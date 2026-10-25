@@ -38,6 +38,28 @@ export function getPool() {
 	return globalThis.__pool;
 }
 
+// Tofu (2026-10-25): the pool resume updates are heard on (LISTEN, packages/api/src/features/resume/events.ts). LISTEN
+// needs a connection that keeps its session. Through a transaction-mode pooler, such as the one Tofu's DATABASE_URL
+// names, each statement may run on another server connection, and notifications never arrive. When
+// DATABASE_MIGRATION_URL is set (on Tofu, tofu-entrypoint.sh sets it to the same pooler in session mode), listening
+// uses one connection of its own from it. Everything else, sending notifications included, stays on getPool().
+let listenPool: Pool | undefined;
+export function getListenPool() {
+	if (env.CLOUDFLARE || !env.DATABASE_MIGRATION_URL || requestDatabase.getStore()) return getPool();
+	if (!listenPool) {
+		const pool = new Pool({ connectionString: env.DATABASE_MIGRATION_URL, max: 1, connectionTimeoutMillis: 10_000 });
+		const logPgError = (error: unknown) => {
+			console.error("[db] postgres listen connection error:", error);
+		};
+		pool.on("error", logPgError);
+		pool.on("connect", (client) => {
+			client.on("error", logPgError);
+		});
+		listenPool = pool;
+	}
+	return listenPool;
+}
+
 // ponytail: two private fns collapsed; getPool() is already a singleton, global cache preserved
 globalThis.__drizzle ??= drizzle({ client: getPool() });
 

@@ -1,5 +1,5 @@
 import { EventEmitter, on } from "node:events";
-import { getPool } from "@reactive-resume/db/client";
+import { getListenPool, getPool } from "@reactive-resume/db/client";
 import { getCoordination } from "@reactive-resume/db/coordination";
 import { getRedis, redisKey } from "@reactive-resume/db/redis";
 
@@ -242,7 +242,8 @@ const subscribeOnRedis =
 function readUpstream(signal?: AbortSignal) {
 	const redis = getRedis();
 	if (redis) return readFeed(redis, subscribeOnRedis(redis), signal);
-	const pool = getPool();
+	// Tofu (2026-10-25): listens on a session connection when there is one (getListenPool in @reactive-resume/db/client).
+	const pool = getListenPool();
 	return readFeed(pool, listenOnPostgres(pool), signal);
 }
 
