@@ -8,6 +8,7 @@ import { Pool } from "pg";
 import { env } from "@reactive-resume/env/server";
 import { getLocalDataDirectory } from "@reactive-resume/utils/monorepo.node";
 import { verifyMigratedSchema } from "./schema-check";
+import { prepareTofuDatabase } from "./tofu-database";
 
 function resolveFromCurrentModule(relativePath: string) {
 	return fileURLToPath(new URL(relativePath, import.meta.url));
@@ -58,6 +59,14 @@ export async function runDatabaseMigrations() {
 				console.error(
 					"Continuing with a drifted database schema; set STRICT_SCHEMA_CHECK=true to refuse startup instead.",
 				);
+			}
+
+			// Tofu (2026-10-25): the database storage table, and row-level security on the app's tables for Supabase's
+			// Data API (./tofu-database.ts). A failure is logged and the server starts anyway.
+			try {
+				await prepareTofuDatabase(client);
+			} catch (error) {
+				console.error("Preparing the database for Tofu failed", { error });
 			}
 		} finally {
 			try {

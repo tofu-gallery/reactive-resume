@@ -13,6 +13,8 @@ import sharp from "sharp";
 import { env } from "@reactive-resume/env/server";
 import { getLocalDataDirectory } from "@reactive-resume/utils/monorepo.node";
 import { BlobStorageService } from "./blob";
+// Tofu (2026-10-25): the database backend (STORAGE_BACKEND=database) keeps files in PostgreSQL; see ./database.ts.
+import { DatabaseStorageService } from "./database";
 
 interface StorageWriteInput {
 	key: string;
@@ -39,7 +41,7 @@ export interface StorageService {
 
 interface StorageHealthResult {
 	status: "healthy" | "unhealthy";
-	type: "local" | "s3" | "blob" | "r2";
+	type: "local" | "s3" | "blob" | "r2" | "database";
 	message: string;
 	error?: string;
 }
@@ -396,7 +398,9 @@ export function getStorageService(): StorageService {
 			? new BlobStorageService()
 			: env.STORAGE_BACKEND === "s3"
 				? new S3StorageService()
-				: new LocalStorageService();
+				: env.STORAGE_BACKEND === "database"
+					? new DatabaseStorageService()
+					: new LocalStorageService();
 	return cachedService;
 }
 

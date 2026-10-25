@@ -156,7 +156,8 @@ export const env = createEnv({
 		SMTP_SECURE: z.stringbool().default(false),
 
 		// Storage (Optional)
-		STORAGE_BACKEND: z.enum(["local", "s3", "blob", "r2"]),
+		// Tofu (2026-10-25): "database" keeps uploads in PostgreSQL (packages/api/src/features/storage/database.ts).
+		STORAGE_BACKEND: z.enum(["local", "s3", "blob", "r2", "database"]),
 		STORAGE_HEALTHCHECK_TIMEOUT_MS: z.coerce.number().int().positive().max(2_147_483_647).default(5_000),
 		BLOB_READ_WRITE_TOKEN: z.string().min(1).optional(),
 		BLOB_STORE_ID: z.string().min(1).optional(),
