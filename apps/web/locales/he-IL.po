@@ -4342,8 +4342,6 @@ msgstr "אין לך חשבון? <0/>"
 msgid "Don't send {0}"
 msgstr "אל תשלח {0}"
 
-#: src/components/ui/donation-toast.tsx
-#: src/features/resume/share/download-tab.tsx
 #: src/routes/dashboard/settings/route.tsx
 msgid "Donate"
 msgstr "לִתְרוֹם"
@@ -4734,6 +4732,11 @@ msgstr "כתובת הדוא\"ל לא תזוהה"
 msgid "Email delivery isn't set up on this server, so the address isn't verified."
 msgstr "משלוח דואר אלקטרוני לא מוגדר בשרת הזה, ולכן הכתובת לא מאומתת."
 
+#: src/features/auth/pages/forgot-password.tsx
+#: src/features/auth/pages/register.tsx
+msgid "Email needs its owner's settings"
+msgstr ""
+
 #: src/features/applications/components/detail/next-step-card.tsx
 msgid "Email the recruiter"
 msgstr "דוא\"ל למגייס"
@@ -4770,10 +4773,6 @@ msgstr "קריאה משופרת אינה זמינה; השתמש בקורא המ�
 #: src/features/applications/components/add-application-dialog.tsx
 msgid "Enhanced reading was unavailable. The built-in reader retrieved this posting."
 msgstr "קריאה משופרת לא הייתה זמינה. הקורא המובנה אחזר את פרסום המשרה הזה."
-
-#: src/components/ui/donation-toast.tsx
-msgid "Enjoying Reactive Resume?"
-msgstr "נהנה מ-Reactive Resume?"
 
 #: src/features/auth/pages/verify-2fa.tsx
 msgid "Enter a backup code."
@@ -5485,10 +5484,6 @@ msgstr "מעבר ללוח בקרה"
 msgid "Go to…"
 msgstr "עבור אל…"
 
-#: src/features/resume/share/download-tab.tsx
-msgid "Good luck out there. Reactive Resume stays free because people chip in."
-msgstr "בהצלחה שם בחוץ. Reactive Resume נשאר בחינם כי אנשים מצטרפים."
-
 #. Authentication provider display name in account settings
 #. Brand name label for Google social sign-in button
 #: src/features/auth/components/social-auth.tsx
@@ -6088,10 +6083,6 @@ msgstr "זה יימחק סופית ולא ניתן לשחזר."
 msgid "It will show on the application's timeline and on the calendar."
 msgstr "זה יופיע בציר הזמן של המועמדות ובלוח השנה."
 
-#: src/components/ui/donation-toast.tsx
-msgid "It's free and open source, kept going by donations from the people who use it. If it has helped you, consider chipping in."
-msgstr "זה חינמי וקוד פתוח, וממשיך לפעול בזכות תרומות מהאנשים שמשתמשים בו. אם זה עזר לך, שקול לתרום."
-
 #: src/features/applications/components/detail/activity.tsx
 msgid "It's removed from the timeline for good."
 msgstr "זה הוסר מציר הזמן לתמיד."
@@ -6116,6 +6107,10 @@ msgstr "ההודעות והקבצים המצורפים שלה נמחקים. ער
 #: src/routes/builder/letter/-components/write-panel.tsx
 msgid "Its own design ({summary})."
 msgstr "עיצוב משלו ({summary})."
+
+#: src/features/auth/components/email-settings-note.tsx
+msgid "Its owner has to save <0>SMTP_HOST</0>, <1>SMTP_PORT</1>, <2>SMTP_USER</2> and <3>SMTP_FROM</3> as settings, and <4>SMTP_PASS</4> as a hidden value. Until then, nobody can reset a forgotten password."
+msgstr ""
 
 #: src/features/settings/ai/providers.tsx
 msgid "Its saved key is deleted. Conversations using it need another provider."
@@ -7017,10 +7012,6 @@ msgstr "התאמת קורות החיים"
 #: src/features/career/shared.tsx
 msgid "Matching your facts"
 msgstr "מתאים את העובדות שלך"
-
-#: src/components/ui/donation-toast.tsx
-msgid "Maybe later"
-msgstr "אולי מאוחר יותר"
 
 #: src/features/command-palette/pages/navigation.tsx
 msgid "MCP"
@@ -8340,6 +8331,10 @@ msgstr "הסיסמה שונתה"
 #: src/features/resume/share/link-tab.tsx
 msgid "Password removed"
 msgstr "הסיסמה הוסרה"
+
+#: src/features/auth/pages/forgot-password.tsx
+msgid "Password reset needs email"
+msgstr ""
 
 #: src/features/auth/pages/reset-password.tsx
 msgid "Password reset. Sign in with your new password."
@@ -11834,6 +11829,14 @@ msgstr "בקשת החיבור הזו אינה חוקית או שפג תוקפה.
 msgid "This conversation couldn't be opened. Refresh the page to try again."
 msgstr "לא ניתן היה לפתוח את השיחה הזו. רענן את הדף כדי לנסות שוב."
 
+#: src/features/auth/pages/forgot-password.tsx
+msgid "This copy of Reactive Resume can't send email yet, so it can't send you a link to reset your password."
+msgstr ""
+
+#: src/features/auth/pages/register.tsx
+msgid "This copy of Reactive Resume can't send email yet, so no verification link was sent. You can use your account without it."
+msgstr ""
+
 #: src/features/resume/editor/write/dates-field.tsx
 msgid "This date hasn't been saved. Use a month and year, like Mar 2022, or just a year. The resume keeps the last valid date."
 msgstr "התאריך הזה לא נשמר. השתמש בחודש ושנה, כמו מרץ 2022, או רק שנה. קורות החיים שומר על התאריך האחרון בתוקף."
@@ -13400,6 +13403,10 @@ msgstr "הכול מעודכן"
 #: src/features/auth/components/guest-banner.tsx
 msgid "You're using a guest account"
 msgstr "אתם משתמשים בחשבון אורח"
+
+#: src/features/auth/pages/register.tsx
+msgid "Your account is ready"
+msgstr ""
 
 #: src/features/settings/account/data.tsx
 msgid "Your account was deleted."

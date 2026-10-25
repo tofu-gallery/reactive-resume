@@ -4342,8 +4342,6 @@ msgstr "Neturite paskyros? <0/>"
 msgid "Don't send {0}"
 msgstr "Nesiųskite {0}"
 
-#: src/components/ui/donation-toast.tsx
-#: src/features/resume/share/download-tab.tsx
 #: src/routes/dashboard/settings/route.tsx
 msgid "Donate"
 msgstr "Paaukoti"
@@ -4734,6 +4732,11 @@ msgstr "El. pašto adresas nebus atpažintas"
 msgid "Email delivery isn't set up on this server, so the address isn't verified."
 msgstr "El. pašto pristatymas šiame serveryje nenustatytas, todėl adresas nėra patvirtintas."
 
+#: src/features/auth/pages/forgot-password.tsx
+#: src/features/auth/pages/register.tsx
+msgid "Email needs its owner's settings"
+msgstr ""
+
 #: src/features/applications/components/detail/next-step-card.tsx
 msgid "Email the recruiter"
 msgstr "El. paštu įdarbintojui"
@@ -4770,10 +4773,6 @@ msgstr "Patobulintas skaitymas nepasiekiamas; naudojo įmontuotą skaitytuvą."
 #: src/features/applications/components/add-application-dialog.tsx
 msgid "Enhanced reading was unavailable. The built-in reader retrieved this posting."
 msgstr "Patobulintas skaitymas nepasiekiamas. Integruotas skaitytuvas gavo šį darbo skelbimą."
-
-#: src/components/ui/donation-toast.tsx
-msgid "Enjoying Reactive Resume?"
-msgstr "Patinka Reactive Resume?"
 
 #: src/features/auth/pages/verify-2fa.tsx
 msgid "Enter a backup code."
@@ -5485,10 +5484,6 @@ msgstr "Eikite į skydelį"
 msgid "Go to…"
 msgstr "Eikite į…"
 
-#: src/features/resume/share/download-tab.tsx
-msgid "Good luck out there. Reactive Resume stays free because people chip in."
-msgstr "Sėkmės ten. Reactive Resume lieka nemokama, nes žmonės prisijungia."
-
 #. Authentication provider display name in account settings
 #. Brand name label for Google social sign-in button
 #: src/features/auth/components/social-auth.tsx
@@ -6088,10 +6083,6 @@ msgstr "Jis bus visam laikui ištrintas ir jo nebus galima atkurti."
 msgid "It will show on the application's timeline and on the calendar."
 msgstr "Jis bus rodomas darbo paraiškos laiko juostoje ir kalendoriuje."
 
-#: src/components/ui/donation-toast.tsx
-msgid "It's free and open source, kept going by donations from the people who use it. If it has helped you, consider chipping in."
-msgstr "Tai nemokama atvirojo kodo programa, kurią išlaiko ja besinaudojančių žmonių aukos. Jei ji jums padėjo, apsvarstykite galimybę prisidėti."
-
 #: src/features/applications/components/detail/activity.tsx
 msgid "It's removed from the timeline for good."
 msgstr "Jis visam laikui pašalintas iš laiko juostos."
@@ -6116,6 +6107,10 @@ msgstr "Jo pranešimai ir priedai ištrinami. Pataisymai, su kuriais sutikote, l
 #: src/routes/builder/letter/-components/write-panel.tsx
 msgid "Its own design ({summary})."
 msgstr "Jo paties dizainas ({summary})."
+
+#: src/features/auth/components/email-settings-note.tsx
+msgid "Its owner has to save <0>SMTP_HOST</0>, <1>SMTP_PORT</1>, <2>SMTP_USER</2> and <3>SMTP_FROM</3> as settings, and <4>SMTP_PASS</4> as a hidden value. Until then, nobody can reset a forgotten password."
+msgstr ""
 
 #: src/features/settings/ai/providers.tsx
 msgid "Its saved key is deleted. Conversations using it need another provider."
@@ -7017,10 +7012,6 @@ msgstr "Atitinka gyvenimo aprašymą"
 #: src/features/career/shared.tsx
 msgid "Matching your facts"
 msgstr "Derinama su jūsų faktais"
-
-#: src/components/ui/donation-toast.tsx
-msgid "Maybe later"
-msgstr "Galbūt vėliau"
 
 #: src/features/command-palette/pages/navigation.tsx
 msgid "MCP"
@@ -8340,6 +8331,10 @@ msgstr "Slaptažodis pakeistas"
 #: src/features/resume/share/link-tab.tsx
 msgid "Password removed"
 msgstr "Slaptažodis pašalintas"
+
+#: src/features/auth/pages/forgot-password.tsx
+msgid "Password reset needs email"
+msgstr ""
 
 #: src/features/auth/pages/reset-password.tsx
 msgid "Password reset. Sign in with your new password."
@@ -11834,6 +11829,14 @@ msgstr "Ši ryšio užklausa neteisinga arba nebegalioja. Pradėkite ryšį iš 
 msgid "This conversation couldn't be opened. Refresh the page to try again."
 msgstr "Šio pokalbio nepavyko atidaryti. Atnaujinkite puslapį ir bandykite dar kartą."
 
+#: src/features/auth/pages/forgot-password.tsx
+msgid "This copy of Reactive Resume can't send email yet, so it can't send you a link to reset your password."
+msgstr ""
+
+#: src/features/auth/pages/register.tsx
+msgid "This copy of Reactive Resume can't send email yet, so no verification link was sent. You can use your account without it."
+msgstr ""
+
 #: src/features/resume/editor/write/dates-field.tsx
 msgid "This date hasn't been saved. Use a month and year, like Mar 2022, or just a year. The resume keeps the last valid date."
 msgstr "Ši data nebuvo išsaugota. Naudokite mėnesį ir metus, pvz., 2022 m. kovo mėn., arba tik metus. Gyvenimo aprašyme išsaugoma paskutinė galiojanti data."
@@ -13400,6 +13403,10 @@ msgstr "Viskas peržiūrėta"
 #: src/features/auth/components/guest-banner.tsx
 msgid "You're using a guest account"
 msgstr "Naudojate svečio paskyrą"
+
+#: src/features/auth/pages/register.tsx
+msgid "Your account is ready"
+msgstr ""
 
 #: src/features/settings/account/data.tsx
 msgid "Your account was deleted."

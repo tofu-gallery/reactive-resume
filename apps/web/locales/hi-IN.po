@@ -4342,8 +4342,6 @@ msgstr "खाता नहीं है? <0/>"
 msgid "Don't send {0}"
 msgstr "{0} न भेजें"
 
-#: src/components/ui/donation-toast.tsx
-#: src/features/resume/share/download-tab.tsx
 #: src/routes/dashboard/settings/route.tsx
 msgid "Donate"
 msgstr "दान करें"
@@ -4734,6 +4732,11 @@ msgstr "ईमेल पता पहचाना नहीं जाएगा"
 msgid "Email delivery isn't set up on this server, so the address isn't verified."
 msgstr "इस सर्वर पर ईमेल डिलीवरी सेट नहीं है, इसलिए पता सत्यापित नहीं है।"
 
+#: src/features/auth/pages/forgot-password.tsx
+#: src/features/auth/pages/register.tsx
+msgid "Email needs its owner's settings"
+msgstr ""
+
 #: src/features/applications/components/detail/next-step-card.tsx
 msgid "Email the recruiter"
 msgstr "भर्तीकर्ता को ईमेल करें"
@@ -4770,10 +4773,6 @@ msgstr "उन्नत पठन अनुपलब्ध; अंतर्न�
 #: src/features/applications/components/add-application-dialog.tsx
 msgid "Enhanced reading was unavailable. The built-in reader retrieved this posting."
 msgstr "उन्नत पठन अनुपलब्ध था. बिल्ट-इन रीडर ने इस जॉब पोस्टिंग को पुनः प्राप्त किया।"
-
-#: src/components/ui/donation-toast.tsx
-msgid "Enjoying Reactive Resume?"
-msgstr "Reactive Resume पसंद आ रहा है?"
 
 #: src/features/auth/pages/verify-2fa.tsx
 msgid "Enter a backup code."
@@ -5485,10 +5484,6 @@ msgstr "डैशबोर्ड पर जाएँ"
 msgid "Go to…"
 msgstr "… पर जाएं"
 
-#: src/features/resume/share/download-tab.tsx
-msgid "Good luck out there. Reactive Resume stays free because people chip in."
-msgstr "वहाँ शुभकामनाएँ. Reactive Resume मुफ़्त रहता है क्योंकि लोग जुड़ते हैं।"
-
 #. Authentication provider display name in account settings
 #. Brand name label for Google social sign-in button
 #: src/features/auth/components/social-auth.tsx
@@ -6088,10 +6083,6 @@ msgstr "इसे हमेशा के लिए हटा दिया जा
 msgid "It will show on the application's timeline and on the calendar."
 msgstr "यह नौकरी आवेदन की टाइमलाइन और कैलेंडर पर दिखाई देगा।"
 
-#: src/components/ui/donation-toast.tsx
-msgid "It's free and open source, kept going by donations from the people who use it. If it has helped you, consider chipping in."
-msgstr "यह मुफ़्त और ओपन सोर्स है, और इसके उपयोगकर्ताओं के दान से चलता है। अगर इससे आपको मदद मिली है, तो योगदान देने पर विचार करें।"
-
 #: src/features/applications/components/detail/activity.tsx
 msgid "It's removed from the timeline for good."
 msgstr "इसे हमेशा के लिए टाइमलाइन से हटा दिया गया है।"
@@ -6116,6 +6107,10 @@ msgstr "इसके संदेश और अनुलग्नक हटा �
 #: src/routes/builder/letter/-components/write-panel.tsx
 msgid "Its own design ({summary})."
 msgstr "इसका अपना डिज़ाइन ({summary}) है।"
+
+#: src/features/auth/components/email-settings-note.tsx
+msgid "Its owner has to save <0>SMTP_HOST</0>, <1>SMTP_PORT</1>, <2>SMTP_USER</2> and <3>SMTP_FROM</3> as settings, and <4>SMTP_PASS</4> as a hidden value. Until then, nobody can reset a forgotten password."
+msgstr ""
 
 #: src/features/settings/ai/providers.tsx
 msgid "Its saved key is deleted. Conversations using it need another provider."
@@ -7017,10 +7012,6 @@ msgstr "बायोडाटा का मिलान"
 #: src/features/career/shared.tsx
 msgid "Matching your facts"
 msgstr "आपके तथ्यों का मिलान कर रहा है"
-
-#: src/components/ui/donation-toast.tsx
-msgid "Maybe later"
-msgstr "शायद बाद में"
 
 #: src/features/command-palette/pages/navigation.tsx
 msgid "MCP"
@@ -8340,6 +8331,10 @@ msgstr "पासवर्ड बदल दिया गया"
 #: src/features/resume/share/link-tab.tsx
 msgid "Password removed"
 msgstr "पासवर्ड हटा दिया गया"
+
+#: src/features/auth/pages/forgot-password.tsx
+msgid "Password reset needs email"
+msgstr ""
 
 #: src/features/auth/pages/reset-password.tsx
 msgid "Password reset. Sign in with your new password."
@@ -11834,6 +11829,14 @@ msgstr "यह कनेक्शन अनुरोध अमान्य ह�
 msgid "This conversation couldn't be opened. Refresh the page to try again."
 msgstr "यह बातचीत खोली नहीं जा सकी। पुनः प्रयास करने के लिए पेज रीफ़्रेश करें।"
 
+#: src/features/auth/pages/forgot-password.tsx
+msgid "This copy of Reactive Resume can't send email yet, so it can't send you a link to reset your password."
+msgstr ""
+
+#: src/features/auth/pages/register.tsx
+msgid "This copy of Reactive Resume can't send email yet, so no verification link was sent. You can use your account without it."
+msgstr ""
+
 #: src/features/resume/editor/write/dates-field.tsx
 msgid "This date hasn't been saved. Use a month and year, like Mar 2022, or just a year. The resume keeps the last valid date."
 msgstr "यह दिनांक सहेजा नहीं गया है. एक माह और वर्ष का उपयोग करें, जैसे मार्च 2022, या केवल एक वर्ष। बायोडाटा अंतिम वैध तिथि रखता है।"
@@ -13400,6 +13403,10 @@ msgstr "सब कुछ अप-टू-डेट है"
 #: src/features/auth/components/guest-banner.tsx
 msgid "You're using a guest account"
 msgstr "आप अतिथि खाते का उपयोग कर रहे हैं"
+
+#: src/features/auth/pages/register.tsx
+msgid "Your account is ready"
+msgstr ""
 
 #: src/features/settings/account/data.tsx
 msgid "Your account was deleted."

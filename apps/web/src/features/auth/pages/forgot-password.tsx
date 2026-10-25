@@ -1,15 +1,17 @@
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useSelector } from "@tanstack/react-form";
-import { Link } from "@tanstack/react-router";
+import { Link, useRouteContext } from "@tanstack/react-router";
 import { useState } from "react";
 import z from "zod";
+import { Alert, AlertDescription, AlertTitle } from "@reactive-resume/ui/components/alert";
 import { Button } from "@reactive-resume/ui/components/button";
 import { FormControl, FormItem, FormLabel, FormMessage } from "@reactive-resume/ui/components/form";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { cn } from "@reactive-resume/utils/style";
+import { EmailSettingsNote } from "../components/email-settings-note";
 import { authClient } from "@/libs/auth/client";
 import { ENTER_CLASS } from "@/libs/motion";
 import { useAppForm } from "@/libs/tanstack-form";
@@ -20,6 +22,8 @@ const formSchema = z.object({
 
 export function ForgotPasswordPage() {
 	const [submitted, setSubmitted] = useState(false);
+	// Tofu (2026-10-25): without SMTP settings the server sends no email, so the page says so instead of the form.
+	const smtpEnabled = useRouteContext({ strict: false }).flags?.smtpEnabled ?? false;
 
 	const form = useAppForm({
 		defaultValues: { email: "" },
@@ -53,6 +57,7 @@ export function ForgotPasswordPage() {
 
 	const isSubmitting = useSelector(form.store, (state) => state.isSubmitting);
 
+	if (!smtpEnabled) return <EmailNotSetUpScreen />;
 	if (submitted) return <PostForgotPasswordScreen />;
 
 	return (
@@ -117,6 +122,42 @@ export function ForgotPasswordPage() {
 				</Button>
 			</form>
 		</>
+	);
+}
+
+/** Tofu (2026-10-25): shown instead of the form while the server has no SMTP settings, since no link could be sent. */
+function EmailNotSetUpScreen() {
+	return (
+		<div className={cn(ENTER_CLASS, "grid gap-y-6")}>
+			<div className="space-y-1 text-center">
+				<h1 className="text-2xl font-semibold tracking-tight">
+					<Trans>Password reset needs email</Trans>
+				</h1>
+				<p className="text-ink-3">
+					<Trans>
+						This copy of Reactive Resume can't send email yet, so it can't send you a link to reset your password.
+					</Trans>
+				</p>
+			</div>
+
+			<Alert>
+				<AlertTitle>
+					<Trans>Email needs its owner's settings</Trans>
+				</AlertTitle>
+				<AlertDescription>
+					<EmailSettingsNote />
+				</AlertDescription>
+			</Alert>
+
+			<Button
+				nativeButton={false}
+				render={
+					<Link to="/auth/login">
+						<Trans>Sign in now</Trans> <Icon name="arrow-right" size={16} />
+					</Link>
+				}
+			/>
+		</div>
 	);
 }
 

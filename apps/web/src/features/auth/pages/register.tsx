@@ -2,7 +2,7 @@ import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useSelector } from "@tanstack/react-form";
 import { useQueryClient } from "@tanstack/react-query";
-import { Link, useSearch } from "@tanstack/react-router";
+import { Link, useRouteContext, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
 import z from "zod";
 import { Alert, AlertDescription, AlertTitle } from "@reactive-resume/ui/components/alert";
@@ -12,6 +12,7 @@ import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { cn } from "@reactive-resume/utils/style";
+import { EmailSettingsNote } from "../components/email-settings-note";
 import { SocialAuth } from "../components/social-auth";
 import { getAuthRedirectOptions, getOAuthSignInOptions, isOAuthRedirect } from "../redirect";
 import { PasswordInput } from "@/components/input/password-input";
@@ -256,26 +257,46 @@ export function RegisterPage({ disableEmailAuth }: Props) {
 function PostSignupScreen() {
 	const { callbackURL } = useSearch({ from: "/auth" });
 	const redirectOptions = getAuthRedirectOptions(callbackURL);
+	// Tofu (2026-10-25): without SMTP settings no verification email was sent, so the step says that instead.
+	const smtpEnabled = useRouteContext({ strict: false }).flags?.smtpEnabled ?? false;
 	return (
 		// Replaces the form in place: fades up into the auth column, with the layout's 24px gap.
 		<div className={cn(ENTER_CLASS, "grid gap-y-6")}>
 			<div className="space-y-1 text-center">
 				<h1 className="text-2xl font-semibold tracking-tight">
-					<Trans>Check your email</Trans>
+					{smtpEnabled ? <Trans>Check your email</Trans> : <Trans>Your account is ready</Trans>}
 				</h1>
 				<p className="text-ink-3">
-					<Trans>Check your email for a link to verify your account.</Trans>
+					{smtpEnabled ? (
+						<Trans>Check your email for a link to verify your account.</Trans>
+					) : (
+						<Trans>
+							This copy of Reactive Resume can't send email yet, so no verification link was sent. You can use your
+							account without it.
+						</Trans>
+					)}
 				</p>
 			</div>
 
-			<Alert>
-				<AlertTitle>
-					<Trans>This step is optional, but recommended.</Trans>
-				</AlertTitle>
-				<AlertDescription>
-					<Trans>Verifying your email confirms that you own this address.</Trans>
-				</AlertDescription>
-			</Alert>
+			{smtpEnabled ? (
+				<Alert>
+					<AlertTitle>
+						<Trans>This step is optional, but recommended.</Trans>
+					</AlertTitle>
+					<AlertDescription>
+						<Trans>Verifying your email confirms that you own this address.</Trans>
+					</AlertDescription>
+				</Alert>
+			) : (
+				<Alert>
+					<AlertTitle>
+						<Trans>Email needs its owner's settings</Trans>
+					</AlertTitle>
+					<AlertDescription>
+						<EmailSettingsNote />
+					</AlertDescription>
+				</Alert>
+			)}
 
 			<Button
 				nativeButton={false}
