@@ -73,13 +73,16 @@ COPY --from=builder --chown=node:node /app/apps/web/dist ./apps/web/dist
 COPY --from=builder --chown=node:node /app/apps/web/dist-prerender ./apps/web/dist-prerender
 COPY --from=builder --chown=node:node /app/apps/server/dist ./apps/server/dist
 COPY --from=pruner --chown=node:node /app/migrations ./migrations
-COPY --chmod=755 apps/server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# Tofu (2026-10-25): the image starts through tofu-entrypoint.sh, run with /bin/sh because a file Tofu deploys arrives
+# without its execute bit. It derives the secrets, fits DATABASE_URL to the managed database's pooler, keeps uploads in
+# PostgreSQL and starts the server as root, since Tofu's PORT is 80. Upstream's docker-entrypoint.sh is not used.
+COPY tofu-entrypoint.sh /app/tofu-entrypoint.sh
 
 WORKDIR /app
 
-# Starts as root only so Cloudron can fix its root-owned data directory; the app always runs as `node`.
-# Run with `--user node` (or Kubernetes `runAsUser: 1000`) to skip that step.
-ENTRYPOINT ["docker-entrypoint.sh"]
+# Tofu (2026-10-25): no USER line, so the server runs as root and can listen on Tofu's PORT (80 unless the app sets
+# another); upstream's entrypoint switched to `node` here.
+ENTRYPOINT ["/bin/sh", "/app/tofu-entrypoint.sh"]
 
 EXPOSE 3000/tcp
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
