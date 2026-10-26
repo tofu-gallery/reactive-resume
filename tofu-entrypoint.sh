@@ -13,8 +13,10 @@
 #                                   database's pooler; `no-verify` encrypts without checking the certificate, which is
 #                                   what `require` means to libpq. A URL with its own `sslrootcert` is left alone.
 #   DATABASE_MIGRATION_URL          When unset and DATABASE_URL names a pooler host (a `.pooler.` label) on port 6543,
-#                                   the same URL on port 5432, the pooler's session mode. The migrations hold a
-#                                   session-level advisory lock, which a transaction-mode pooler cannot keep.
+#                                   the same URL on port 5432, the pooler's session mode. Listening for resume updates
+#                                   (LISTEN) needs a connection that keeps its session, which a transaction-mode pooler
+#                                   cannot give; the migrations run on it too (Tofu, 2026-10-26: under a
+#                                   transaction-level lock, which holds on either mode).
 #   STORAGE_BACKEND                 When unset and S3 is not configured, `database`: uploads are kept in PostgreSQL,
 #                                   since no disk outlives a restart on Tofu.
 set -eu
