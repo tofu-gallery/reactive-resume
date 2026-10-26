@@ -121,8 +121,14 @@ export async function runDatabaseMigrations() {
 	try {
 		const client = await pool.connect();
 		try {
+			// Tofu (2026-10-26): one round trip per migration instead of one per statement. drizzle-kit cuts a migration's
+			// SQL at its `--> statement-breakpoint` lines; joined again, PostgreSQL runs the statements one after another in
+			// the same transaction, as drizzle would. A first start sends about a hundred statements instead of about 500.
 			const migrationsFolder = resolveWorkspaceFolder("migrations");
-			const migrations = readMigrationFiles({ migrationsFolder });
+			const migrations = readMigrationFiles({ migrationsFolder }).map((migration) => ({
+				...migration,
+				sql: [migration.sql.join("\n;\n")],
+			}));
 			for (let attempt = 1; ; attempt++) {
 				try {
 					await migrateUnderLock(client, migrations, migrationsFolder);
