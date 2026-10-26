@@ -9,7 +9,12 @@ const pool = vi.hoisted(() => ({
 // Tests that need real checkout limits swap in a real pg Pool here.
 const database = vi.hoisted(() => ({ pool: undefined as unknown }));
 
-vi.mock("@reactive-resume/db/client", () => ({ getPool: () => database.pool ?? pool }));
+// Tofu (2026-10-26): events.ts listens through getListenPool (packages/db/src/client.ts), which is the app's own pool
+// unless DATABASE_MIGRATION_URL is set; here both are this mock's pool.
+vi.mock("@reactive-resume/db/client", () => ({
+	getPool: () => database.pool ?? pool,
+	getListenPool: () => database.pool ?? pool,
+}));
 const redis = vi.hoisted(() => ({ getRedis: vi.fn(), publish: vi.fn(), duplicate: vi.fn() }));
 vi.mock("@reactive-resume/db/redis", () => ({
 	getRedis: redis.getRedis,
