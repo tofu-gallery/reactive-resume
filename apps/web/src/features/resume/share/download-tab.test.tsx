@@ -40,7 +40,8 @@ it("offers peer feedback only after a successful export and clears it for a new 
 	const link = await screen.findByRole("link", { name: "Get resume feedback on Discord" });
 	expect(link.getAttribute("href")).toBe("https://discord.gg/9kAqrGcwn5");
 	expect(mocks.download).toHaveBeenCalledWith(file, "resume.pdf");
-	expect(screen.getByRole("link", { name: "Donate" })).toBeTruthy();
+	// Tofu (2026-10-26): Tofu's copies show no donation request after a download (download-tab.tsx).
+	expect(screen.queryByRole("link", { name: "Donate" })).toBeNull();
 
 	fireEvent.click(screen.getByRole("radio", { name: /Word/ }));
 	expect(invite()).toBeNull();

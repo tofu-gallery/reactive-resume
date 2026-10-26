@@ -167,8 +167,8 @@ type DownloadActionsProps = {
 };
 
 /**
- * The failure alert (with PDF as the fallback) and the 44px button that shows its progress. After a download, a
- * one-line thank-you asks for a donation: the moment someone has what they came for is the one time it's fair to ask.
+ * The failure alert (with PDF as the fallback) and the 44px button that shows its progress.
+ * Tofu (2026-10-26): upstream's donation request after a download is removed (below), and with it its mention here.
  */
 export function DownloadActions({ state, label, onDownload, onDownloadPdf }: DownloadActionsProps) {
 	return (
