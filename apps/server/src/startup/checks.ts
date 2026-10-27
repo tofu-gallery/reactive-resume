@@ -86,15 +86,18 @@ async function migrateUnderLock(client: PoolClient, migrations: MigrationMeta[],
 		);
 
 		// The database storage table, and row-level security on the app's tables for Supabase's Data API
-		// (./tofu-database.ts), in the same transaction. A failure there is logged and the server starts anyway.
-		let protectedTables = 0;
-		await client.query("SAVEPOINT tofu_prepare");
+		// (./tofu-database.ts), in the same transaction. Tofu (2026-10-27): a failure there stops the start, as a failed
+		// migration does: the whole transaction rolls back, its migrations with it, and the server never listens over
+		// tables left open to the Data API.
+		let protectedTables: number;
 		try {
 			protectedTables = await prepareTofuDatabase(client);
-			await client.query("RELEASE SAVEPOINT tofu_prepare");
 		} catch (error) {
-			await client.query("ROLLBACK TO SAVEPOINT tofu_prepare");
-			console.error("Preparing the database for Tofu failed", { error });
+			throw new Error(
+				"Preparing the database for Tofu (the storage table, and row-level security for Supabase's Data API) " +
+					"failed; the start's schema step is rolled back, its migrations with it.",
+				{ cause: error },
+			);
 		}
 		return { applied: Number(applied.rows[0]?.count ?? 0), protectedTables };
 	});
