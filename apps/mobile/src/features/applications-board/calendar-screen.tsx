@@ -1,6 +1,7 @@
 import type { CalendarEvent } from "./calendar";
-import type { Application } from "@/features/applications/types";
+import type { ApplicationSummary as Application } from "@/features/applications/types";
 import type { InterviewTimelineEntry } from "@reactive-resume/schema/applications/data";
+import { i18n } from "@lingui/core";
 import { plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { useRouter } from "expo-router";
@@ -24,6 +25,7 @@ import { FollowUpSheet } from "@/features/application-detail/sheets";
 import { applicationError } from "@/features/applications/error";
 import { filterApplications } from "@/features/applications/list";
 import { useApplications } from "@/features/applications/queries";
+import { useOfferHints } from "@/features/applications/stage-actions";
 import { routes } from "@/routes";
 import { useIsTablet } from "@/shell/use-is-tablet";
 import { Banner, Button, Card, EmptyState, IconButton, SelectSheet, Sheet, Skeleton, Text, useTheme } from "@/ui";
@@ -55,22 +57,28 @@ function ApplicationCalendar() {
 	const [width, setWidth] = useState(0);
 	const query = useApplications();
 	const pull = usePullRefresh(query.refetch);
-	const { search } = useApplicationSearch();
+	const { search, needsYou, clearFilters } = useApplicationSearch();
+	const offers = useOfferHints();
 	const userTime = useUserTime();
 	const now = useNow();
 	const timeZone = userTime.timeZone;
 	const today = dayKeyOf(now, timeZone);
-	const [month, setMonth] = useState(() => ({
-		year: Number(today.slice(0, 4)),
-		month: Number(today.slice(5, 7)) - 1,
-	}));
-	const [selected, setSelected] = useState(today);
+	const [browsedMonth, setBrowsedMonth] = useState<{ year: number; month: number } | null>(null);
+	const month = browsedMonth ?? { year: Number(today.slice(0, 4)), month: Number(today.slice(5, 7)) - 1 };
+	const [selectedDay, setSelectedDay] = useState<string | null>(null);
+	const selected = selectedDay ?? today;
 	const [picking, setPicking] = useState(false);
 	const [pickedId, setPickedId] = useState<string | null>(null);
 	const [editing, setEditing] = useState<Editing | null>(null);
 	const [editorOpen, setEditorOpen] = useState(false);
 
-	const applications = filterApplications(query.data ?? [], { search, tag: "", showClosed: true });
+	const applications = filterApplications(
+		query.data ?? [],
+		{ search, tag: "", showClosed: true, needsYou },
+		now,
+		timeZone,
+		offers,
+	);
 	const open = applications.filter((application) => application.status !== "closed");
 	const events = collectEvents(applications, timeZone);
 	const byDay = groupByDay(events);
@@ -80,13 +88,11 @@ function ApplicationCalendar() {
 	const monthInterviews = events.filter(
 		(event) => event.kind === "interview" && event.day.startsWith(monthPrefix),
 	).length;
-	const isThisMonth = today.startsWith(monthPrefix);
 
 	const utc = (options: Intl.DateTimeFormatOptions) =>
 		new Intl.DateTimeFormat(i18n.locale, { timeZone: "UTC", ...options });
 	const monthTitle = utc({ month: "long", year: "numeric" }).format(Date.UTC(month.year, month.month, 1));
 	const weekday = utc({ weekday: "narrow" });
-	const weekdayLong = utc({ weekday: "long" });
 	const fullDay = utc({ weekday: "long", day: "numeric", month: "long" });
 	const tomorrow = new Date(dateOfKey(today).getTime() + 86_400_000).toISOString().slice(0, 10);
 	const dayHeading = (key: string) =>
@@ -118,6 +124,17 @@ function ApplicationCalendar() {
 		);
 	}
 
+	if ((search.trim() || needsYou) && events.length === 0) {
+		return (
+			<EmptyState
+				variant="card"
+				title={applications.length === 0 ? t`No matching applications` : t`Nothing scheduled yet`}
+				message={t`Try different words or clear your filters.`}
+				action={{ label: t`Clear filters`, onPress: clearFilters }}
+			/>
+		);
+	}
+
 	const selectedEvents = byDay.get(selected) ?? [];
 	const agenda = (
 		<View style={{ gap: space.s4 }}>
@@ -137,6 +154,7 @@ function ApplicationCalendar() {
 				</Text>
 				{upcoming.length === 0 ? (
 					<EmptyState
+						variant="card"
 						icon="calendar-blank"
 						title={t`Nothing scheduled yet`}
 						message={t`Add screening calls and technical interviews to see them here and on the calendar.`}
@@ -172,12 +190,12 @@ function ApplicationCalendar() {
 				<IconButton
 					icon="caret-left"
 					label={t`Previous month`}
-					onPress={() => setMonth(shiftMonth(month.year, month.month, -1))}
+					onPress={() => setBrowsedMonth(shiftMonth(month.year, month.month, -1))}
 				/>
 				<IconButton
 					icon="caret-right"
 					label={t`Next month`}
-					onPress={() => setMonth(shiftMonth(month.year, month.month, 1))}
+					onPress={() => setBrowsedMonth(shiftMonth(month.year, month.month, 1))}
 				/>
 			</View>
 			<View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.s2 }}>
@@ -185,14 +203,16 @@ function ApplicationCalendar() {
 					variant="secondary"
 					size="sm"
 					label={t`This month`}
-					disabled={isThisMonth}
+					disabled={browsedMonth === null && selectedDay === null}
 					onPress={() => {
-						setMonth({ year: Number(today.slice(0, 4)), month: Number(today.slice(5, 7)) - 1 });
-						setSelected(today);
+						setBrowsedMonth(null);
+						setSelectedDay(null);
 					}}
 				/>
+				{/* Secondary: the screen's one accent-filled action is New, in the tab bar. */}
 				<Button
 					size="sm"
+					variant="secondary"
 					icon="calendar-plus"
 					label={t`Schedule interview`}
 					disabled={!open.length}
@@ -233,8 +253,11 @@ function ApplicationCalendar() {
 									key={day.key}
 									accessibilityRole="button"
 									accessibilityState={{ selected: isSelected }}
-									accessibilityLabel={`${weekdayLong.format(dateOfKey(day.key))} ${fullDay.format(dateOfKey(day.key))}${summary ? `: ${summary}` : ""}`}
-									onPress={() => setSelected(day.key)}
+									accessibilityLabel={`${fullDay.format(dateOfKey(day.key))}${summary ? `: ${summary}` : ""}`}
+									onPress={() => {
+										setBrowsedMonth(month);
+										setSelectedDay(day.key);
+									}}
 									style={{
 										flex: 1,
 										minHeight: tablet ? size.hit * 2 : size.hit,
@@ -280,7 +303,7 @@ function ApplicationCalendar() {
 											))}
 											{items.length > MAX_PER_DAY ? (
 												<Text variant="micro" color="ink3">
-													{t`+${items.length - MAX_PER_DAY} more`}
+													{t`+${i18n.number(items.length - MAX_PER_DAY)} more`}
 												</Text>
 											) : null}
 										</>
@@ -411,7 +434,7 @@ function EventCard({ event, onEdit }: EventCardProps) {
 	const when = event.kind === "interview" ? `${userTime.time(event.start)} – ${userTime.time(event.end)}` : "";
 	const title =
 		event.kind === "interview"
-			? t`${interviewTypeLabel(event.interview.kind)} interview · ${event.interview.durationMinutes} min`
+			? t`${interviewTypeLabel(event.interview.kind)} interview · ${i18n.number(event.interview.durationMinutes)} min`
 			: application.followUpNote || t`Follow up`;
 
 	return (

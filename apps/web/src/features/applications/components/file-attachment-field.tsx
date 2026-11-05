@@ -2,6 +2,7 @@ import { t } from "@lingui/core/macro";
 import { useRef } from "react";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { toast } from "@reactive-resume/ui/components/toast";
+import { AttachmentPreview } from "./attachment-preview";
 
 export type FileAttachment = { url: string; name: string };
 
@@ -9,7 +10,7 @@ type Props = {
 	// A saved attachment, a locally picked file, or nothing.
 	value: FileAttachment | File | null;
 	onChange: (value: File | null) => void;
-	// Copy for the empty-state button, e.g. "Attach a cover letter (PDF)".
+	// Copy for the empty-state button, e.g. "Attach a cover letter (PDF, up to 10 MB)".
 	attachLabel: string;
 	disabled?: boolean;
 };
@@ -21,42 +22,52 @@ export function FileAttachmentField({ value, onChange, attachLabel, disabled }: 
 	const onSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
 		const file = event.target.files?.[0];
 		if (!file) return;
+		event.target.value = "";
 		if (file.type !== "application/pdf") {
 			toast.add({ type: "error", description: t`Choose a PDF file.` });
 			return;
 		}
+		if (file.size > 10 * 1024 * 1024) {
+			toast.add({
+				type: "error",
+				description: t`This PDF is larger than 10 MB. Compress it or export a smaller PDF, then attach it again.`,
+			});
+			return;
+		}
 		onChange(file);
-		event.target.value = "";
 	};
 
 	return (
 		<>
 			{value ? (
-				<div className="flex items-center gap-3 rounded-lg border border-line p-2.5">
-					<span className="flex size-8 items-center justify-center rounded-md bg-accent/10 text-accent-text">
-						<Icon name="file-pdf" size={16} />
-					</span>
-					{value instanceof File ? (
-						<span className="min-w-0 flex-1 truncate text-sm">{value.name}</span>
-					) : (
-						<a
-							href={value.url}
-							target="_blank"
-							rel="noreferrer"
-							className="min-w-0 flex-1 truncate text-sm hover:underline"
+				<div className="grid gap-2 rounded-lg border border-line p-2.5">
+					<div className="flex items-center gap-3">
+						<span className="flex size-8 items-center justify-center rounded-md bg-accent/10 text-accent-text">
+							<Icon name="file-pdf" size={16} />
+						</span>
+						{value instanceof File ? (
+							<span className="min-w-0 flex-1 truncate text-sm">{value.name}</span>
+						) : (
+							<a
+								href={value.url}
+								target="_blank"
+								rel="noreferrer"
+								className="min-w-0 flex-1 truncate text-sm hover:underline"
+							>
+								{value.name}
+							</a>
+						)}
+						<button
+							type="button"
+							title={t`Remove file`}
+							disabled={disabled}
+							className="text-ink-3 hover:text-danger-text disabled:opacity-40"
+							onClick={() => onChange(null)}
 						>
-							{value.name}
-						</a>
-					)}
-					<button
-						type="button"
-						title={t`Remove file`}
-						disabled={disabled}
-						className="text-ink-3 hover:text-danger-text disabled:opacity-40"
-						onClick={() => onChange(null)}
-					>
-						<Icon name="x" size={16} />
-					</button>
+							<Icon name="x" size={16} />
+						</button>
+					</div>
+					<AttachmentPreview source={value instanceof File ? value : value.url} name={value.name} />
 				</div>
 			) : (
 				<button

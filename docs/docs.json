@@ -65,7 +65,7 @@
 				"tab": "Documentation",
 				"groups": [
 					{
-						"group": "Getting Started",
+						"group": "Getting started",
 						"pages": [
 							"getting-started",
 							"getting-started/quickstart",
@@ -102,7 +102,7 @@
 						]
 					},
 					{
-						"group": "Resume Editor",
+						"group": "Resume editor",
 						"pages": [
 							"guides/editor-overview",
 							"guides/filling-in-your-details",
@@ -119,6 +119,7 @@
 						"group": "Design",
 						"pages": [
 							"guides/choosing-a-template",
+							"guides/changing-how-entries-look",
 							"guides/customizing-typography",
 							"guides/choosing-colors",
 							"guides/selecting-page-format",
@@ -128,27 +129,28 @@
 						]
 					},
 					{
-						"group": "Checking Your Resume",
+						"group": "Checking your resume",
 						"pages": ["guides/checking-your-resume", "guides/using-the-ats-checker"]
 					},
 					{
-						"group": "Cover Letters",
+						"group": "Cover letters",
 						"pages": ["guides/writing-a-cover-letter"]
 					},
 					{
-						"group": "Sharing and Exporting",
+						"group": "Sharing and exporting",
 						"pages": [
 							"guides/sharing-your-resume-publicly",
+							"guides/getting-feedback-on-your-resume",
 							"guides/exporting-your-resume",
 							"guides/exporting-resume-to-markdown"
 						]
 					},
 					{
-						"group": "AI Assistant",
+						"group": "AI assistant",
 						"pages": ["guides/using-ai", "guides/using-the-assistant", "guides/ai-agent-tools"]
 					},
 					{
-						"group": "Career and Application Workspaces",
+						"group": "Career and application workspaces",
 						"pages": [
 							"guides/career-overview",
 							"guides/first-career-application",
@@ -163,11 +165,12 @@
 						]
 					},
 					{
-						"group": "Application Tracker",
+						"group": "Application tracker",
 						"pages": [
 							"guides/tracking-job-applications",
 							"guides/adding-an-application",
 							"guides/managing-an-application",
+							"guides/customizing-application-stages",
 							"guides/scheduling-interviews",
 							"guides/tailoring-a-resume-for-a-job",
 							"guides/viewing-application-insights",
@@ -188,7 +191,7 @@
 						]
 					},
 					{
-						"group": "Use Cases",
+						"group": "Use cases",
 						"pages": [
 							"use-cases/free-resume-builder",
 							"use-cases/open-source-resume-builder",
@@ -222,7 +225,7 @@
 						]
 					},
 					{
-						"group": "Self-Hosting",
+						"group": "Self-hosting",
 						"pages": [
 							"self-hosting/docker",
 							"self-hosting/kubernetes",
@@ -233,9 +236,10 @@
 						]
 					},
 					{
-						"group": "Server Configuration",
+						"group": "Server configuration",
 						"pages": [
 							"self-hosting/environment-variables",
+							"self-hosting/sharing-domains",
 							"self-hosting/fonts",
 							"self-hosting/examples",
 							"self-hosting/job-search-and-ai",
@@ -243,7 +247,7 @@
 						]
 					},
 					{
-						"group": "Upgrade Guides",
+						"group": "Upgrade guides",
 						"pages": ["self-hosting/upgrading-to-v6", "self-hosting/migration"]
 					},
 					{
@@ -254,7 +258,8 @@
 							"contributing/web-access",
 							"contributing/career-platform",
 							"contributing/translations",
-							"contributing/deployment-checks"
+							"contributing/deployment-checks",
+							"contributing/storage-cleanup"
 						]
 					},
 					{

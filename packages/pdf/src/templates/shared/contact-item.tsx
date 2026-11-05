@@ -1,6 +1,6 @@
 import type { IconName } from "../../forme/icons";
 import type { Style } from "../../forme/style-types";
-import type { CustomField } from "@reactive-resume/schema/resume/data";
+import type { CustomField, ResumeData } from "@reactive-resume/schema/resume/data";
 import { View } from "#react-pdf-renderer";
 import { resolvedPdfFlowProps } from "../../semantic/adapter";
 import { useResolvedNode, useSemanticNodeKey, useSemanticNodeVisible } from "../../semantic/context";
@@ -10,6 +10,10 @@ import { Icon, Link, Text } from "./primitives";
 import { composeStyles } from "./styles";
 
 type ContactStyle = Style | Style[];
+
+// Addresses and numbers read left to right on a right-to-left page too: "+81 3-1234-5678", not "3-1234-5678 81+".
+const LTR_VALUE: Style = { direction: "ltr" };
+const ltrText = (textStyle: ContactStyle | undefined) => composeStyles(textStyle, LTR_VALUE);
 
 type WebsiteDisplay = {
 	url: string;
@@ -59,7 +63,7 @@ export const WebsiteContactItem = ({
 	return (
 		<Link nodeKey={keys.primitiveNodeKey} src={website.url} {...(style ? { style } : {})}>
 			<Icon nodeKey={keys.iconNodeKey} name="globe" {...(iconColor ? { color: iconColor } : {})} />
-			<Text nodeKey={keys.fieldNodeKey} {...(textStyle ? { style: textStyle } : {})}>
+			<Text nodeKey={keys.fieldNodeKey} style={ltrText(textStyle)}>
 				{getWebsiteDisplayText(website)}
 			</Text>
 		</Link>
@@ -126,7 +130,7 @@ export const EmailContactItem = ({
 	return (
 		<Link nodeKey={keys.primitiveNodeKey} src={`mailto:${email}`} {...(style ? { style } : {})}>
 			<Icon nodeKey={keys.iconNodeKey} name={iconName} {...(iconColor ? { color: iconColor } : {})} />
-			<Text nodeKey={keys.fieldNodeKey} {...(textStyle ? { style: textStyle } : {})}>
+			<Text nodeKey={keys.fieldNodeKey} style={ltrText(textStyle)}>
 				{email}
 			</Text>
 		</Link>
@@ -148,7 +152,7 @@ export const PhoneContactItem = ({ phone, style, textStyle, iconColor, primitive
 	return (
 		<Link nodeKey={keys.primitiveNodeKey} src={`tel:${phone}`} {...(style ? { style } : {})}>
 			<Icon nodeKey={keys.iconNodeKey} name="phone" {...(iconColor ? { color: iconColor } : {})} />
-			<Text nodeKey={keys.fieldNodeKey} {...(textStyle ? { style: textStyle } : {})}>
+			<Text nodeKey={keys.fieldNodeKey} style={ltrText(textStyle)}>
 				{phone}
 			</Text>
 		</Link>
@@ -183,3 +187,16 @@ export const LocationContactItem = ({
 		</View>
 	);
 };
+
+/**
+ * Whether the header has any contact detail to print. With none (a name-only resume, or "Hide contact details"),
+ * templates leave out the contact list's box, band or rule too.
+ */
+export const hasContactDetails = (basics: ResumeData["basics"]) =>
+	Boolean(
+		basics.email.trim() ||
+		basics.phone.trim() ||
+		basics.location.trim() ||
+		basics.website.url.trim() ||
+		basics.customFields.some((field) => field.text.trim()),
+	);

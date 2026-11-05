@@ -1,6 +1,12 @@
 import type { UIMessage } from "ai";
 import { describe, expect, it } from "vite-plus/test";
-import { applyStepToUiMessage, proposedEditsOf, upsertAssistantUiMessage } from "./messages-persistence";
+import {
+	applyStepToUiMessage,
+	proposedEditsOf,
+	upsertAssistantUiMessage,
+	withEditWording,
+	supersededEdits,
+} from "./messages-persistence";
 
 function emptyMessage(): UIMessage {
 	return { id: "ui-1", role: "assistant", parts: [] };
@@ -83,8 +89,9 @@ function scriptedDatabase(updateResults: Array<Array<{ id: string }>>): Scripted
 	const state: ScriptedDb = { updates: [] };
 	let updateCall = 0;
 
-	return {
+	const database: ScriptedDb & Record<string, unknown> = {
 		updates: state.updates,
+		transaction: (run: (tx: unknown) => unknown) => run(database),
 		update: () => ({
 			set: (value: unknown) => {
 				state.updates.push(value);
@@ -100,6 +107,7 @@ function scriptedDatabase(updateResults: Array<Array<{ id: string }>>): Scripted
 			},
 		}),
 	};
+	return database;
 }
 
 describe("proposed edit statuses", () => {
@@ -125,8 +133,17 @@ describe("proposed edit statuses", () => {
 
 	it("keeps what the user did while a run rewrites its message", async () => {
 		const database = scriptedDatabase([[{ id: "row-1" }]]);
+		database.transaction = async (callback: (tx: unknown) => unknown) => callback(database);
 		database.select = () => ({
-			from: () => ({ where: async () => [{ uiMessage: proposing(["accepted", "rejected"]) }] }),
+			from: () => ({
+				where: () => {
+					const query = {
+						orderBy: () => query,
+						for: async () => [{ id: "row-1", uiMessage: proposing(["accepted", "rejected"]) }],
+					};
+					return query;
+				},
+			}),
 		});
 
 		await upsertAssistantUiMessage(
@@ -142,5 +159,83 @@ describe("proposed edit statuses", () => {
 
 		const written = database.updates[0] as { uiMessage: UIMessage };
 		expect(proposedEditsOf(written.uiMessage).map((edit) => edit.status)).toEqual(["accepted", "rejected"]);
+	});
+
+	it("stores the user's wording as escaped text and keeps it while a run rewrites its message", async () => {
+		const original = proposing(["pending"]);
+		const edit = proposedEditsOf(original)[0] as Record<string, unknown>;
+		Object.assign(edit, {
+			before: "<p>Old</p>",
+			after: "<p>Led Kubernetes</p>",
+			unsupported: [{ kind: "skill", text: "Kubernetes" }],
+		});
+
+		const rewritten = withEditWording(original, "call-1", "e0", "Led <i>design</i>");
+		expect(proposedEditsOf(rewritten)[0]).toMatchObject({
+			after: "<p>Led &lt;i&gt;design&lt;/i&gt;</p>",
+			unsupported: [],
+			edited: true,
+			status: "pending",
+		});
+
+		const database = scriptedDatabase([[{ id: "row-1" }]]);
+		database.transaction = async (callback: (tx: unknown) => unknown) => callback(database);
+		database.select = () => ({
+			from: () => ({
+				where: () => {
+					const query = { orderBy: () => query, for: async () => [{ id: "row-1", uiMessage: rewritten }] };
+					return query;
+				},
+			}),
+		});
+		await upsertAssistantUiMessage(
+			{ userId: "user-1", threadId: "thread-1", rowId: "row-1", message: original, status: "completed" },
+			database as never,
+		);
+		const written = database.updates[0] as { uiMessage: UIMessage };
+		expect(proposedEditsOf(written.uiMessage)[0]?.after).toBe("<p>Led &lt;i&gt;design&lt;/i&gt;</p>");
+	});
+});
+
+describe("supersededEdits", () => {
+	const target = { sectionId: "experience", itemId: "northwind", field: "description" };
+	const edit = (id: string, before: string, after: string, extra: Record<string, unknown> = {}) => ({
+		id,
+		target,
+		location: "Experience · Northwind Labs · bullet 1",
+		before,
+		after,
+		why: "Why",
+		status: "pending" as "pending" | "accepted" | "rejected",
+		...extra,
+	});
+	const message = (edits: ReturnType<typeof edit>[]): UIMessage => ({
+		id: "earlier",
+		role: "assistant",
+		parts: [
+			{
+				type: "tool-propose_edits",
+				toolCallId: "call-1",
+				state: "output-available",
+				input: {},
+				output: { title: "Add the audit", edits, skipped: [] },
+			} as UIMessage["parts"][number],
+		],
+	});
+	const bullet = "<p>Improved checkout-flow accessibility.</p>";
+	// The earlier addition anchors on the bullet with its list item's end; the refinement rewrites the same bullet.
+	const addition = edit("add", `${bullet}</li>`, `${bullet}</li><li><p>Led an accessibility audit last year.</p></li>`);
+	const refinement = edit("refine", bullet, "<p>Led a WCAG 2.2 AA audit in 2025; the team fixed 60 issues.</p>");
+
+	it("names an earlier undecided edit of the same passage", () => {
+		expect(supersededEdits(message([addition]), [refinement], () => false)).toEqual(["add"]);
+	});
+
+	it("keeps decided edits, edits the document already holds, other passages and structural changes", () => {
+		const other = edit("other", "<p>Shipped the onboarding flow.</p>", "<p>Shipped onboarding.</p>");
+		const accepted = { ...addition, id: "accepted", status: "accepted" as const };
+		const structural = edit("structural", bullet, bullet, { snapshot: { before: "{}", after: "{}" } });
+		const earlier = message([other, accepted, structural, addition]);
+		expect(supersededEdits(earlier, [refinement], (candidate) => candidate.id === "add")).toEqual([]);
 	});
 });

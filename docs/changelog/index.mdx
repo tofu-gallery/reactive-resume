@@ -4,6 +4,140 @@ description: "Release notes for Reactive Resume covering new features, resume bu
 rss: true
 ---
 
+<Update label="v6.0.10" description="29th October 2026">
+
+## Highlights
+
+- **More help for your resume and job search.** The agent-skill collection now includes 32 skills, with 24 new guides for writing a complete resume, finding accomplishments, proofreading, changing careers and creating an academic CV. Fourteen profession-specific guides help you describe work in fields such as engineering, design, healthcare, finance and education. [dd1a60df2](https://github.com/reactive-resume/reactive-resume/commit/dd1a60df2)
+- **Your picture appears on your own domain.** Fixed public resume pictures being blocked when a resume page uses a custom domain, including when the browser checks a cached picture. Private attachments keep their existing access restrictions. [95823a651](https://github.com/reactive-resume/reactive-resume/commit/95823a651)
+
+## Writing & Integrations
+
+- Added dedicated skills for cover letters, application-form answers, LinkedIn profiles and portfolio case studies. Use pasted text on its own, or connect your Reactive Resume account to review and save changes. [dd1a60df2](https://github.com/reactive-resume/reactive-resume/commit/dd1a60df2)
+- Updated the plugin catalog and installation guide for the expanded collection. Skills preserve your facts, distinguish estimates and team contributions, and ask for review and authorization before connected changes. [dd1a60df2](https://github.com/reactive-resume/reactive-resume/commit/dd1a60df2)
+
+## Self-Hosting & Maintenance
+
+- Updated dependencies across the web app, server and mobile app, and refreshed resume-schema documentation. No new database migrations are needed for this patch. [dd1a60df2](https://github.com/reactive-resume/reactive-resume/commit/dd1a60df2)
+
+**Full Changelog**: [v6.0.9...v6.0.10](https://github.com/reactive-resume/reactive-resume/compare/v6.0.9...v6.0.10)
+
+</Update>
+
+<Update label="v6.0.9" description="29th October 2026">
+
+## Highlights
+
+- **Write a cover letter with its own sender details.** Edit your name, email, phone and location without changing a resume, or choose **No resume** for a standalone letter. Your saved details carry through the preview, signature and downloads, and stay intact when refreshing the letter's design. [26a7aebfc](https://github.com/reactive-resume/reactive-resume/commit/26a7aebfc), [4e448207b](https://github.com/reactive-resume/reactive-resume/commit/4e448207b)
+- **Compare offers without connecting an AI provider.** Enter offer terms yourself on web or mobile, including compensation, benefits and a response deadline. Missing details stay unknown so you can compare what you actually know. [5abf185fc](https://github.com/reactive-resume/reactive-resume/commit/5abf185fc)
+
+## Applications & Career
+
+- Kept the interview Calendar available in phone browsers with an upcoming agenda, interview editing and links to application details. [e6234aafc](https://github.com/reactive-resume/reactive-resume/commit/e6234aafc)
+- Fixed interview times, day headings and calendar downloads to follow your account timezone. Calendars now follow the current account month until you browse elsewhere. [5c1672917](https://github.com/reactive-resume/reactive-resume/commit/5c1672917), [e6234aafc](https://github.com/reactive-resume/reactive-resume/commit/e6234aafc)
+- Made **Apply** reflect recorded submissions while keeping your manual content-review checks separate. Closing a saved job no longer makes it appear submitted. [004ccd4d5](https://github.com/reactive-resume/reactive-resume/commit/004ccd4d5)
+- Added field-specific guidance for missing situation, action or result when saving a career story. [5b9c53b63](https://github.com/reactive-resume/reactive-resume/commit/5b9c53b63)
+
+## Resume Builder, Letters & Sharing
+
+- Preserved independent sender headers in Word and OpenDocument cover-letter downloads, and clarified download actions. [1e0f39be1](https://github.com/reactive-resume/reactive-resume/commit/1e0f39be1), [273893a0e](https://github.com/reactive-resume/reactive-resume/commit/273893a0e)
+- Fixed the PDF checker recognizing year ranges beside role titles. [bfc2d6b09](https://github.com/reactive-resume/reactive-resume/commit/bfc2d6b09)
+- Improved keyboard focus containment in the phone entry editor and updated browser tab titles after renaming saved documents. [cfe168cc4](https://github.com/reactive-resume/reactive-resume/commit/cfe168cc4), [2188cf701](https://github.com/reactive-resume/reactive-resume/commit/2188cf701)
+- Corrected public-link summaries so password-protected resumes are described accurately. [d7cb0e10f](https://github.com/reactive-resume/reactive-resume/commit/d7cb0e10f)
+
+## Languages & Getting Started
+
+- Added a direct homepage **Sign in** link, made the language selector easier to find, and honored explicit language choices on localized addresses. Removed the testing language from production choices. [aa7c27bc6](https://github.com/reactive-resume/reactive-resume/commit/aa7c27bc6), [1238bb009](https://github.com/reactive-resume/reactive-resume/commit/1238bb009), [fbef87bea](https://github.com/reactive-resume/reactive-resume/commit/fbef87bea), [9b92695df](https://github.com/reactive-resume/reactive-resume/commit/9b92695df)
+- Updated guides and web and mobile translations for sender details, manual offers, story validation, interview scheduling and submission review. [26a7aebfc](https://github.com/reactive-resume/reactive-resume/commit/26a7aebfc), [5abf185fc](https://github.com/reactive-resume/reactive-resume/commit/5abf185fc), [5b9c53b63](https://github.com/reactive-resume/reactive-resume/commit/5b9c53b63), [e6234aafc](https://github.com/reactive-resume/reactive-resume/commit/e6234aafc), [004ccd4d5](https://github.com/reactive-resume/reactive-resume/commit/004ccd4d5)
+
+## AI & Self-Hosting
+
+- Refreshed suggested models for new provider connections across web, mobile and assistant setup. Existing saved model choices stay unchanged. Thanks to @pcbeingused333. [ce467bcac](https://github.com/reactive-resume/reactive-resume/commit/ce467bcac)
+
+No new database migrations or native mobile changes are included in this patch.
+
+**Full Changelog**: [v6.0.8...v6.0.9](https://github.com/reactive-resume/reactive-resume/compare/v6.0.8...v6.0.9)
+
+</Update>
+
+<Update label="v6.0.8" description="29th October 2026">
+
+## Highlights
+
+![Entry header settings with five layouts, row order and accent controls](https://raw.githubusercontent.com/reactive-resume/reactive-resume/aef0476fe68fa5da7f3cf89a58d1dead88b89df0/docs/images/guides/changing-how-entries-look/entries-panel.webp)
+
+- **Give your experience a layout of its own.** Choose Stacked, One line, Compact, Date column or Eyebrow headers, put your position before the company, and add an accent rule, bar or band. The new **Entries** settings work across templates on web and mobile; Word and OpenDocument exports follow your row order. [b428e89df](https://github.com/reactive-resume/reactive-resume/commit/b428e89df)
+
+![Application board with custom Take-home assignment and Ghosted statuses](https://raw.githubusercontent.com/reactive-resume/reactive-resume/aef0476fe68fa5da7f3cf89a58d1dead88b89df0/docs/images/changelog/custom-application-stages/custom-stages-board.png)
+
+- **Make application statuses match your job search.** Add stages such as **Take-home assignment** and **Ghosted**, rename and recolor existing stages, and arrange them in your own order. Your stages carry through the board, lists, application details and mobile app while reminders and Insights keep their meaning. [9ac4687fa](https://github.com/reactive-resume/reactive-resume/commit/9ac4687fa)
+
+## Resume Builder & Sharing
+
+- Added an available `.cv` domain suggestion and a clearer DNS-records dialog when connecting your own domain. [a2bd0c5d9](https://github.com/reactive-resume/reactive-resume/commit/a2bd0c5d9)
+- Fixed public pages on the configured alias getting stuck when a browser already has cookies, and made copied share links use the configured public address. [d644b9963](https://github.com/reactive-resume/reactive-resume/commit/d644b9963), [70c231edf](https://github.com/reactive-resume/reactive-resume/commit/70c231edf)
+- Improved touch-input sizing, keyboard handling, foldable layouts and large-text usability. [d644b9963](https://github.com/reactive-resume/reactive-resume/commit/d644b9963), [70c231edf](https://github.com/reactive-resume/reactive-resume/commit/70c231edf)
+
+## Applications & Everyday Use
+
+- Added custom-stage support to bulk moves, imports, exports, REST and MCP integrations, and a warning when a previous application to the same company received no response. Removing a stage preserves its applications and history. [9ac4687fa](https://github.com/reactive-resume/reactive-resume/commit/9ac4687fa)
+- Made application lists quicker to open by loading full job details when needed. Thanks to @GoldenSection0618. [0fd5e4e7e](https://github.com/reactive-resume/reactive-resume/commit/0fd5e4e7e)
+- Fixed application metadata and tag edits recording linked drafts as submitted documents. [d644b9963](https://github.com/reactive-resume/reactive-resume/commit/d644b9963)
+- Fixed sign-in pages clipping content on short screens or overflowing when scrollbars are visible. Thanks to @iwmywn. [9deea1443](https://github.com/reactive-resume/reactive-resume/commit/9deea1443)
+- Improved first-page loading with smaller images, earlier rendering, compressed assets and longer-lived font and image caching. [07f460af3](https://github.com/reactive-resume/reactive-resume/commit/07f460af3), [702e33d5f](https://github.com/reactive-resume/reactive-resume/commit/702e33d5f), [0e28991fe](https://github.com/reactive-resume/reactive-resume/commit/0e28991fe), [1003b1d8a](https://github.com/reactive-resume/reactive-resume/commit/1003b1d8a)
+
+## Security & Self-Hosting
+
+- Hardened sign-in, account cleanup, document access, imports and exports. Assistant searches and saved career stories now require approval of their exact content; older clients need updated approval controls to complete these actions. Passkey enrollment requires a verified email and recent sign-in, and password recovery revokes existing passkeys. [82368dd66](https://github.com/reactive-resume/reactive-resume/commit/82368dd66)
+- **Back up your database before upgrading.** Startup adds application-stage tables and references, and serializes username reservations. Existing applications keep their stages and history, and older integrations can continue using the standard statuses. [9ac4687fa](https://github.com/reactive-resume/reactive-resume/commit/9ac4687fa), [82368dd66](https://github.com/reactive-resume/reactive-resume/commit/82368dd66)
+- Required SMTP connections to use STARTTLS or direct TLS. Plaintext-only mail servers must be reconfigured before upgrading. Added limits for oversized documents and fonts; unusually complex documents may need simplifying before export. [82368dd66](https://github.com/reactive-resume/reactive-resume/commit/82368dd66)
+- Fixed custom-domain proxy discovery when no domains have been verified and published a resource catalog for connected agents. [d456abfca](https://github.com/reactive-resume/reactive-resume/commit/d456abfca), [8bfba4846](https://github.com/reactive-resume/reactive-resume/commit/8bfba4846)
+- Updated dependencies and enabled smaller Android release builds. Native rendering safeguards and Android build optimizations require new compatible store binaries; this web release does not update installed native code. [8ffc6c599](https://github.com/reactive-resume/reactive-resume/commit/8ffc6c599), [660b4b6d6](https://github.com/reactive-resume/reactive-resume/commit/660b4b6d6), [5cc3677a4](https://github.com/reactive-resume/reactive-resume/commit/5cc3677a4), [82368dd66](https://github.com/reactive-resume/reactive-resume/commit/82368dd66)
+
+## Documentation & Translations
+
+- Refreshed product guides for header layouts, custom application stages, sharing, integrations and self-hosting. [aef0476fe](https://github.com/reactive-resume/reactive-resume/commit/aef0476fe), [378365f02](https://github.com/reactive-resume/reactive-resume/commit/378365f02)
+- Updated web and mobile translations for domain settings, header layouts, application stages and assistant approvals. [9657be968](https://github.com/reactive-resume/reactive-resume/commit/9657be968), [b428e89df](https://github.com/reactive-resume/reactive-resume/commit/b428e89df), [9ac4687fa](https://github.com/reactive-resume/reactive-resume/commit/9ac4687fa), [82368dd66](https://github.com/reactive-resume/reactive-resume/commit/82368dd66)
+
+**Full Changelog**: [v6.0.7...v6.0.8](https://github.com/reactive-resume/reactive-resume/compare/v6.0.7...v6.0.8)
+
+</Update>
+
+<Update label="v6.0.7" description="27th October 2026">
+
+## Highlights
+
+- **Share your resume as a web page.** The new Share mode publishes a page that uses your template and design, adapts to phones and computers, and stays up to date as you edit. Preview it before publishing, then copy its address or share a QR code. Downloads and version history now have their own **Download & history** sheet on web and mobile. [63539ef20](https://github.com/reactive-resume/reactive-resume/commit/63539ef20)
+- **Choose where your resume lives and what visitors see.** Make one resume primary for your short link, connect your own domain on supported servers, hide contact details, and choose whether search engines can list your page. Password protection and PDF download controls apply to the public page and its downloads. [63539ef20](https://github.com/reactive-resume/reactive-resume/commit/63539ef20)
+
+## Resume Builder & Sharing
+
+- Added matching Share controls to the native apps, with public resume pages opening in a browser and local PDF exports remaining separate. The hosted Share panel copies `rx.cv` links; existing `rxresu.me` public addresses continue to work. [63539ef20](https://github.com/reactive-resume/reactive-resume/commit/63539ef20)
+- Added resume link previews in your design's colours, explicit search-engine opt-in, and contact redaction across public pages, PDFs and previews. Private notes and hidden entries stay out of public content. [63539ef20](https://github.com/reactive-resume/reactive-resume/commit/63539ef20)
+- Limited new resume addresses to 64 characters while preserving existing longer addresses and updates that keep them unchanged. Improved address validation, conflict messages and suggestions on web and mobile. Thanks to @iwmywn. [f77121efe](https://github.com/reactive-resume/reactive-resume/commit/f77121efe)
+- Fixed password-protected PDF downloads asking signed-in resume owners for their own share password. Visitors still need the password. Thanks to @iwmywn. [520fdf59d](https://github.com/reactive-resume/reactive-resume/commit/520fdf59d)
+
+## Applications & Everyday Use
+
+- Fixed application list rows capturing unrelated clicks across the page in Safari. Thanks to @albanofazzito. [5d247c59d](https://github.com/reactive-resume/reactive-resume/commit/5d247c59d)
+- Kept bulk application actions visible in a floating bar and improved sign-in query handling. [b8710f43a](https://github.com/reactive-resume/reactive-resume/commit/b8710f43a)
+- Improved application list pagination on installations with multiple users. Thanks to @GoldenSection0618. [780596673](https://github.com/reactive-resume/reactive-resume/commit/780596673)
+
+## Documentation & Translations
+
+- Updated the editor, sharing and export guides for Share mode, and clarified skill fields and shared fields in the resume schema reference. [5adc33876](https://github.com/reactive-resume/reactive-resume/commit/5adc33876), [50daf7108](https://github.com/reactive-resume/reactive-resume/commit/50daf7108)
+- Updated translations for the sharing controls and address validation across web and mobile. [63539ef20](https://github.com/reactive-resume/reactive-resume/commit/63539ef20), [f77121efe](https://github.com/reactive-resume/reactive-resume/commit/f77121efe)
+
+## Self-Hosting & Maintenance
+
+- Added optional `APP_ALIAS_URL` support for a second public address, plus DNS-verified custom domains backed by a Traefik HTTP provider. **Back up your database before upgrading:** startup adds a custom-domain table and three resume sharing columns. Existing public/private and download settings remain; search indexing, contact hiding and primary-resume status default to off. Domain support needs additional proxy and HTTPS setup; ordinary sharing needs no new variables. See [Sharing domains](https://docs.rxresu.me/self-hosting/sharing-domains). [63539ef20](https://github.com/reactive-resume/reactive-resume/commit/63539ef20)
+- Changed the manual mobile store-release workflow to upload Android builds to production and submit iOS builds for App Store review. Store approval and publication remain separate from this release; no native store build is created by a Docker release. [a080009d9](https://github.com/reactive-resume/reactive-resume/commit/a080009d9)
+- Updated dependencies. [28fbcb3ea](https://github.com/reactive-resume/reactive-resume/commit/28fbcb3ea)
+
+**Full Changelog**: [v6.0.6...v6.0.7](https://github.com/reactive-resume/reactive-resume/compare/v6.0.6...v6.0.7)
+
+</Update>
+
 <Update label="v6.0.6" description="25th October 2026">
 
 ## Highlights
@@ -320,10 +454,10 @@ on **2026-10-02**. For a shorter orientation, read
 
 - **Recover from an empty resume-copy dialog.** Opening **Copy a resume for a job** without an existing resume previously showed an empty source list and a disabled **Create and open** button. The dialog now explains the prerequisite and offers **Import or create a resume**, including when opened directly from an application. Returning to the copy flow keeps that application selected. Importing or creating a blank resume during preparation links it to the saved job. [bec152b7e](https://github.com/reactive-resume/reactive-resume/commit/bec152b7e), [3e7849e51](https://github.com/reactive-resume/reactive-resume/commit/3e7849e51)
 
-<Frame caption="Resumes and letters share one Documents library">
+<Frame caption="Search, filter and organize documents">
   <img
     src="/images/guides/managing-documents/documents-grid.webp"
-    alt="Documents with All, Resumes and Letters tabs, search, sorting, tag filters and a grid of resume and letter cards."
+    alt="Documents with three fictional cover letters, current toolbar, tag filters and grid controls"
   />
 </Frame>
 
@@ -342,10 +476,10 @@ on **2026-10-02**. For a shorter orientation, read
 
 - **Keep parser results tied to the open resume.** Switching documents could display another resume’s cached extracted text. Parser results now include the resume ID and reset with the rendered page. [bc92b8cf7](https://github.com/reactive-resume/reactive-resume/commit/bc92b8cf7)
 
-<Frame caption="Write, Design and Check replace the builder's sidebars and dock">
+<Frame caption="Write your details beside the rendered resume">
   <img
     src="/images/getting-started/editor-overview.webp"
-    alt="The v6 resume editor with Write, Design and Check modes, editable Basics on the left and the rendered resume page on the right."
+    alt="Resume editor with David Kowalski's fictional sample, editable Basics and a rendered page, plus Write, Design, Check and Share modes"
   />
 </Frame>
 
@@ -372,19 +506,19 @@ on **2026-10-02**. For a shorter orientation, read
 - **Undo stylesheet typing within the code editor.** The editor previously routed typing undo to resume-wide history. It now keeps its own typing history, reports fatal stylesheet limits and explains unsupported PDF styles. Unsupported declarations or selectors may still be skipped. [9a803305c](https://github.com/reactive-resume/reactive-resume/commit/9a803305c)
 - **Apply heading text styles even when an icon is present.** Icon-bearing headings previously passed only color into their text. Font size, weight, style, spacing, line height, alignment, decoration and text transform now reach the title as well. [677ff17c1](https://github.com/reactive-resume/reactive-resume/commit/677ff17c1)
 
-<Frame caption="Pick an entry on the rendered page to edit its custom CSS">
+<Frame caption="A section rule beside the rendered resume">
   <img
     src="/images/guides/applying-custom-styles/pick-an-entry-on-the-page.webp"
-    alt="Custom Styles editing an education entry's color, with the selected entry outlined on the rendered resume."
+    alt="Semantic CSS rule for the Education section beside the fictional sample resume"
   />
 </Frame>
 
 ## Check mode & the public ATS checker
 
-<Frame caption="Check connects findings to the lines they affect">
+<Frame caption="Check shows issues beside the affected resume">
   <img
     src="/images/guides/checking-your-resume/check-mode-overview.webp"
-    alt="Check mode with a live readability score, Issues, Job match and Writing tabs, fix actions and numbered findings on the resume page."
+    alt="Check mode with readability score 82, four issues, suggested fixes and numbered markers on the fictional sample resume"
   />
 </Frame>
 
@@ -394,10 +528,10 @@ on **2026-10-02**. For a shorter orientation, read
 - **Inspect what a parser reads.** Switch between the rendered page and text extracted from its PDF in reading order. Deep checks of the exported PDF pin findings to their source lines while the resume remains unchanged, and a pin opens the full report. [565424631](https://github.com/reactive-resume/reactive-resume/commit/565424631), [6c2bc74f9](https://github.com/reactive-resume/reactive-resume/commit/6c2bc74f9)
 - **Continue from a public check into editing.** The rebuilt public ATS checker accepts a resume and optional posting, groups readability and layout findings, and offers **Fix these in the editor**. The file waits in the browser through sign-up and imports after sign-in. The score describes text extraction reliability; it does not predict hiring outcomes. Resume drop targets now distinguish checker files from document imports. [d9ed63f72](https://github.com/reactive-resume/reactive-resume/commit/d9ed63f72), [9a803305c](https://github.com/reactive-resume/reactive-resume/commit/9a803305c)
 
-<Frame caption="The public checker offers a direct path from findings to an editable resume">
+<Frame caption="Read the score and issues beside the sample PDF">
   <img
     src="/images/guides/using-the-ats-checker/report-and-fix.webp"
-    alt="An ATS report grouped by readability, layout and posting terms, followed by a Fix these in the editor button."
+    alt="ATS checker showing a fictional sample with score 99, contact-detail issues and Fix these in the editor"
   />
 </Frame>
 
@@ -410,10 +544,10 @@ on **2026-10-02**. For a shorter orientation, read
 
 - **Enable shared AI and web access for all users.** Self-hosters can set `AI_PROVIDER`, `AI_MODEL`, `AI_API_KEY` and an optional `AI_BASE_URL`, plus `WEB_ACCESS_PROVIDER`, `WEB_ACCESS_API_KEY` and an optional Firecrawl `WEB_ACCESS_API_URL`. Each globally configured integration takes precedence over personal credentials and hides their settings controls; saved personal keys remain available after shared configuration is removed. Shared credentials stay on the server and need no `ENCRYPTION_SECRET`; encrypted personal AI and web-access keys remain supported when it is set. See [Job search and AI](/self-hosting/job-search-and-ai). [bec152b7e](https://github.com/reactive-resume/reactive-resume/commit/bec152b7e), [bc92b8cf7](https://github.com/reactive-resume/reactive-resume/commit/bc92b8cf7)
 
-<Frame caption="The assistant works beside the document it is helping with">
+<Frame caption="The assistant works beside your document">
   <img
     src="/images/guides/using-the-assistant/assistant-beside-the-page.webp"
-    alt="The resume editor with an Assistant panel beside the rendered page, suggested starting prompts and a document context chip."
+    alt="Assistant beside the fictional resume, showing starting prompts, document context and a message field"
   />
 </Frame>
 
@@ -429,10 +563,10 @@ on **2026-10-02**. For a shorter orientation, read
 
 - **Protect pending letter edits when changing documents.** Late save responses no longer replace the newly opened letter. Downloads, history and other document changes wait for pending saves and stop with a retryable error when saving fails. [bc92b8cf7](https://github.com/reactive-resume/reactive-resume/commit/bc92b8cf7)
 
-<Frame caption="A letter has its own editor, recipient fields and live resume links">
+<Frame caption="Write a letter beside its rendered page">
   <img
     src="/images/guides/writing-a-cover-letter/letter-editor-write.webp"
-    alt="A standalone letter editor with recipient name, company, date, linked resume details and a live letter preview."
+    alt="Letter editor for fictional Priya Shah at Northwind Games, with sender details linked to Game Developer Resume and a rendered letter"
   />
 </Frame>
 
@@ -449,10 +583,10 @@ on **2026-10-02**. For a shorter orientation, read
 
 - **Find jobs with one optional web connection.** Applications supports keyword search through Firecrawl, Tavily or Exa. Review results, choose a posting and check its imported details before saving. Shared services or one encrypted personal connection supply search and enhanced reading; self-hosted Firecrawl is supported. The built-in public-URL reader remains available without credentials. [bec152b7e](https://github.com/reactive-resume/reactive-resume/commit/bec152b7e), [3e7849e51](https://github.com/reactive-resume/reactive-resume/commit/3e7849e51)
 
-<Frame caption="The board shows each application's next step">
+<Frame caption="Board view groups applications by stage">
   <img
     src="/images/guides/tracking-job-applications/applications-board-view.webp"
-    alt="Application board columns for Saved, Applied, Screening and Interview, with next-step labels on job cards."
+    alt="Applications board showing Saved, Applied, Screening and Interview columns with fictional job cards"
   />
 </Frame>
 
@@ -465,19 +599,19 @@ on **2026-10-02**. For a shorter orientation, read
 - **Read outcomes from actual stage history.** Insights adds progression, response rate, median time to first reply and tailored-versus-base resume comparisons. Active totals exclude closed applications, and weekly submissions use the sent date and exclude jobs only saved for later. [462db6011](https://github.com/reactive-resume/reactive-resume/commit/462db6011), [9a803305c](https://github.com/reactive-resume/reactive-resume/commit/9a803305c)
 - **Review CSV column matching before import.** See and adjust recognized columns, inspect the import summary and download skipped rows. Exports include closed reasons, and legacy rejected/archived values remain readable. [462db6011](https://github.com/reactive-resume/reactive-resume/commit/462db6011), [cbc76b03b](https://github.com/reactive-resume/reactive-resume/commit/cbc76b03b)
 
-<Frame caption="Schedule interviews and take them into your own calendar">
+<Frame caption="Calendar and upcoming interviews">
   <img
     src="/images/guides/scheduling-interviews/applications-calendar-view.webp"
-    alt="An application interview calendar with color-coded interview types and an upcoming-interview list showing times, durations and locations."
+    alt="Applications Calendar with a month grid and a fictional upcoming technical interview listed with its time and duration"
   />
 </Frame>
 
 ## Sharing, downloads & version history
 
-<Frame caption="Sharing and all four export formats live in one panel">
+<Frame caption="Download & history offers five resume formats">
   <img
     src="/images/guides/exporting-your-resume/share-sheet-download-tab.webp"
-    alt="Share and export with Link, Download and History tabs, PDF, Word, Markdown and JSON formats, an editable filename and a non-blocking Check warning."
+    alt="Download & history panel showing PDF, Word, OpenDocument, Markdown and JSON, an editable file name, and Download PDF"
   />
 </Frame>
 
@@ -488,10 +622,10 @@ on **2026-10-02**. For a shorter orientation, read
 - **Recover the state before a restore.** Restoring saves pending edits and preserves **Before restore** before replacing the document. Resume undo history resets; restore **Before restore** to go back. Session autosaves and transient kinds retain 90 days of history, while named and protected milestones remain until their document is deleted. The timeline includes all permanent checkpoints alongside the 100 most recent expiring versions. Named-version creation and restore stop if pending edits cannot be saved. [bc92b8cf7](https://github.com/reactive-resume/reactive-resume/commit/bc92b8cf7), [060750a86](https://github.com/reactive-resume/reactive-resume/commit/060750a86), [6e412c2f6](https://github.com/reactive-resume/reactive-resume/commit/6e412c2f6)
 - **Open your own password-protected resume without its visitor password.** Owner access now bypasses the public password gate for viewing and statistics while visitors still need access. Download statistics explicitly explain that repeat successful clicks can count more than once. [9a803305c](https://github.com/reactive-resume/reactive-resume/commit/9a803305c)
 
-<Frame caption="Name a milestone or preview an editing session before restoring it">
+<Frame caption="Name a version so you can recognize it later">
   <img
     src="/images/guides/undoing-changes-and-version-history/history-tab.webp"
-    alt="History with a field to name the current version and a timeline containing Now, a named milestone, an Editing session and Created."
+    alt="Download & history with the History tab selected and a named Original for game studios version among saved versions"
   />
 </Frame>
 
@@ -520,10 +654,10 @@ on **2026-10-02**. For a shorter orientation, read
 
 - **Keep popups usable inside sheets.** Every sheet popup now renders inside a drawer viewport. Shared UI fonts are consistent across the homepage and app, and footer text no longer clips. [bec152b7e](https://github.com/reactive-resume/reactive-resume/commit/bec152b7e), [ec0932c5d](https://github.com/reactive-resume/reactive-resume/commit/ec0932c5d)
 
-<Frame caption="Phone editing gives entries their own screen">
+<Frame caption="Edit an experience in the phone browser">
   <img
     src="/images/guides/editing-on-mobile/phone-entry-screen.webp"
-    alt="A phone experience editor with stacked fields, structured dates, a Present switch and a rich-text description."
+    alt="Fictional experience open in the phone browser with position, company, dates and description fields"
   />
 </Frame>
 
@@ -1523,7 +1657,7 @@ production deployments.
 - **No more Browserless / Chromium dependency.** From v5.1.0 onwards, you do **not** need to run a `printer`, Browserless, or headless Chrome service alongside Reactive Resume. PDF generation is now performed entirely in your browser via `@react-pdf/renderer`. The `BROWSERLESS_TOKEN`, `PRINTER_ENDPOINT`, `PRINTER_APP_URL`, and `FLAG_DEBUG_PRINTER` environment variables are no longer read and can be removed from your `.env`.
 - **Database migrations.** This release ships several new schema migrations to bring the resume model up to date. They run automatically on container start, but you should **back up your PostgreSQL database before upgrading** in case rollback is needed.
 - **Custom CSS has been removed.** Because the resume PDF is no longer produced by a headless browser, raw CSS no longer applies to the exported document. A first-class template-customization story is on the roadmap for a future release.
-- **Job Listings has been removed.** The JSearch/RapidAPI-backed job listings feature and its settings were removed in the v5.1.0 transition. The old job-search settings path now redirects to **Integrations**. To tailor a resume, paste a job description into the AI Agent; see [Using the AI Agent workspace](/guides/using-ai-agent#tailor-a-resume-to-a-supplied-job-description).
+- **Job Listings has been removed.** The JSearch/RapidAPI-backed job listings feature and its settings were removed in the v5.1.0 transition. The old job-search settings path now redirects to **Integrations**. To tailor a resume, paste a job description into the AI Agent. For the current workflow, see [Tailoring a resume for a job](/guides/tailoring-a-resume-for-a-job).
 
 </Note>
 
@@ -1863,7 +1997,7 @@ production deployments.
 
 <Update label="v5.0.5" description="31st January 2026">
 ## Features & Improvements
-- Implemented Cover Letter functionality as a custom section in the resume builder. [(link)](/guides/adding-a-cover-letter)
+- Implemented Cover Letter functionality as a custom section in the resume builder. Cover letters are separate documents in v6; see [Writing a cover letter](/guides/writing-a-cover-letter) for the current workflow.
 - Added full-screen mode to the rich text editor for distraction-free writing.
 - Introduced a new custom section type: `summary`, enabling users to add extra summary sections.
 - Added `useFormBlocker` hook to prevent dialogs from being closed with unsaved form changes.

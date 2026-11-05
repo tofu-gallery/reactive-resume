@@ -7,6 +7,8 @@ A recruiter asks for your availability and a project example. **Messages** helps
 
 You paste the message yourself and send the reply from your own email. There is no mailbox connection required.
 
+The pasted employer message saves after a short pause, on blur and when leaving. Unsaved text is kept on this browser/device. After an interrupted save, review the recovered draft before saving it over the current version, or choose **Use saved version**. No AI request is made by autosave or recovery.
+
 ## Read the message
 
 1. Open the correct application's workspace and choose **Messages**.
@@ -18,10 +20,10 @@ A pasted email may include its opening From, To, Date and Subject headers; the r
 
 The result identifies what they ask for and what remains unconfirmed. For example, an invitation to “next week” is not a confirmed interview time.
 
-<Frame caption="The invitation asks for availability but leaves the time unconfirmed. The reply and application changes are separate decisions.">
+<Frame caption="Read it for me says what the message asks and proposes changes. Review every offer term, including bonus conditions and the response deadline, before choosing Apply. The follow-up sets the application's follow-up date. Add offer records terms without an AI connection.">
   <img
     src="/images/guides/career/messages.png"
-    alt="Messages tab with a pasted recruiter invitation, summary, unconfirmed interview time, editable reply and one proposed follow-up change waiting for approval"
+    alt="Messages tab for a fictional Brightpath offer: the pasted message, its suggested reply, and Proposed changes with every offer term, a 10% bonus condition and a response deadline, above Apply 2 changes"
   />
 </Frame>
 
@@ -29,23 +31,57 @@ The result identifies what they ask for and what remains unconfirmed. For exampl
 
 Read **Suggested reply · edit before sending**. Replace suggested availability with times that actually work for you, check any project claims, and adjust the tone.
 
+Bracketed placeholders, including ones in the employer's language, appear below the reply for review and disappear as you replace them. They do not block **Copy reply**.
+
+The reply follows the employer's message: its language and its level of formality, so a formal German email gets a formal German reply even when the app is in English. Titles, asks and the rest of the screen stay in your interface language. If you would rather write in the language you read, choose **Write a new reply in …**; that asks the provider again and shows a new reply without changing the message or anything already applied.
+
 Unfinished messages and edited replies stay in this browser tab through navigation and refresh. Opening a Saved review keeps its original generated reply read-only.
 
 Select **Copy reply**, paste it into your email, review it there and send it yourself. Copying does not send anything. Keep the final wording in your email; do not rely on the reply editor as a sent-email archive.
+
+For an open application already sent, **Copy and log as replied** also records your explicit confirmation that you replied. Use it only after replying. It copies the current text, adds a timestamped **Replied** entry to Activity (Timeline on mobile), restarts the current stage's no-reply clock, and clears the application's follow-up and its reminder. Interview reminders and stage dates stay unchanged. It does not send an email or save the reply as a sent document. Ordinary **Copy reply** records no contact.
+
+If copying fails, nothing is logged. A changed-application refusal says that nothing was logged and asks you to review it again. If logging is not confirmed, check the timeline before retrying: the write may have completed despite a lost response. A changed application is refused rather than clearing a newer follow-up. Refresh and review it before trying again. Mobile needs a server exposing the new reply-log action; an older server disables reply logging with an update notice and keeps ordinary Copy available. If mobile cannot clear its local follow-up notification, it warns that the reminder may still notify you and offers **Retry**. Retry clears only the original reminder; a newer reminder you scheduled stays intact. It does not log another reply.
+
+<Frame caption="Bracketed fields remain visible for review. Copy reply only copies; Copy and log as replied explicitly records contact and clears the follow-up after you have replied yourself.">
+  <img
+    src="/images/guides/career/messages-reply-review.png"
+    alt="Fictional Harbor Labs Messages tab with two highlighted availability placeholders, Copy reply, Copy and log as replied, and a disclosure that logging sends no message"
+  />
+</Frame>
 
 ## Choose which application changes to apply
 
 Under **Proposed changes**, review each selected item:
 
 - A **stage** change can reflect an explicit move to the next round.
-- A **next step or follow-up** can record what you need to do and add a reminder to Today when something is due.
-- **Offer terms** can be saved for comparison in Career → Offers.
+- A **next step or follow-up** can record what you need to do and set the application's follow-up date. The date shows with the application's next step; it does not add a reminder to Today. For a reminder in Today, add a **Remind me** schedule.
+- **Offer terms** can be saved for comparison in Career → Offers. The row lists every term the message stated: base, bonus and its conditions, equity, start date and the employer's answer deadline.
 
-Uncheck any change you do not want, then choose **Apply … change(s)**. A six-second **Undo** notice lets you cancel the update.
+<Frame caption="Offer terms stay visible before applying: base, bonus with its conditions, equity, start date and the employer's stated deadline.">
+  <img
+    src="/images/guides/career/messages-offer-terms.png"
+    alt="Messages proposal saving a Brightpath offer with base, bonus and conditions, equity, starts Jan 4, 2027 and respond by Fri Nov 20"
+  />
+</Frame>
+Uncheck any change you do not want, then choose **Apply … change(s)**. The update is saved as soon as you apply it, so
+leaving the page right away keeps it. The notice that follows offers **Undo**, which puts back the stage and follow-up
+the update changed and removes the offer it saved. Undo refuses, and leaves everything as it is, when you have since
+changed those fields or edited that offer; change the application in Applications instead. Document versions recorded as
+sent stay recorded.
 
-A row saying **Stage stays Interview** needs no change. If the application is still Saved, record its actual submission in **Apply → Mark as applied** before applying later-stage changes.
+A Saved-to-later-stage move requires its receipt confirmation before anything is written.
 
-If the application changed after the review, the app rejects stale proposed changes; read the message again against the current application before retrying.
+A row saying **Stage stays Interview** needs no change. From Saved, the move reads **Mark as applied and move to …**. Choosing it opens one confirmation naming the answers and documents it will record; confirming records the receipt and moves the application together, and cancelling changes nothing. You still submit on the employer's site yourself.
+
+<Frame caption="From Saved, one confirmation records the receipt and moves the application. It names only the documents and answers actually linked; cancelling writes nothing.">
+  <img
+    src="/images/guides/career/messages-confirm-move.png"
+    alt="Mark as applied and move it dialog over the Fictional Harbor Messages tab, recording the linked resume as sent with Cancel and Mark as applied and move"
+  />
+</Frame>
+
+If the application changed after the review, the app rejects stale proposed changes; read the message again against the current application before retrying. This includes applying again after **Undo**.
 
 Applying changes updates your records. It does not send the reply, confirm a time with the recruiter or accept an offer.
 
@@ -53,4 +89,12 @@ Applying changes updates your records. It does not send the reply, confirm a tim
 
 When the employer confirms the date, time and format, add the interview through **Next step → Edit**. Include who you will meet and what to prepare. Then [make a preparation plan](/guides/preparing-for-interview-day).
 
-For a written or verbal offer, review the proposed terms before saving them, then [compare offers](/guides/comparing-job-offers).
+## Record an offer without AI
+
+For a written or verbal offer, choose **Add offer** at the top of **Messages**. The application is already selected. Enter its currency, pay period and known terms, then choose **Save offer**. This makes no AI request, does not send a reply, and does not change the linked resume. If the application was still at an earlier stage, saving moves it to **Offer** and the message offers **Undo**, which keeps the offer and leaves the stage where it was. The saved offer then stays in view as a one-line summary with **Compare**.
+
+Leave unknown amounts blank; enter `0` only for a confirmed zero. Use full amounts such as `95000`, with your interface locale's separators, rather than shorthand such as `95k`. Invalid amounts stay in the form for correction.
+
+**Respond by** is optional and uses your account timezone. Choose a valid local date and time; a time skipped by daylight saving cannot be saved. On mobile, wait for the account timezone to load or retry if loading failed. Clear the date if no deadline is known.
+
+The offer appears in **Library** and [Career → Offers](/guides/comparing-job-offers). If you use **Read it for me** instead, review the proposed terms before applying them. Neither path accepts an offer for you.

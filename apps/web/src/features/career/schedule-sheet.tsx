@@ -9,6 +9,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useRouteContext } from "@tanstack/react-router";
 import { m } from "motion/react";
 import { useId, useState } from "react";
+import { defaultFollowUpNote } from "@reactive-resume/schema/applications/follow-up";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
@@ -20,9 +21,12 @@ import { SwitchRow } from "@reactive-resume/ui/components/switch";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { fromZonedDateTime } from "@reactive-resume/utils/timezone";
+import { CareerLoadError } from "./load-state";
 import { PrivacyLine, Swap, useCareerTime, useNow } from "./shared";
 import { collectInterviews, interviewKindOf } from "@/features/applications/interviews";
-import { applicationsListQueryOptions } from "@/features/applications/queries";
+import { applicationDetailQueryOptions, applicationsListQueryOptions } from "@/features/applications/queries";
+import { SetUpAi } from "@/features/assistant/provider-setup";
+import { SetUpWebAccess } from "@/features/settings/ai/web-access";
 import { AiProviderLoadState } from "@/features/settings/integrations/ai-provider-load-state";
 import { useHasUsableAiProvider } from "@/features/settings/integrations/hooks/use-has-usable-ai-provider";
 import { useClosingValue } from "@/hooks/use-closing-value";
@@ -84,6 +88,10 @@ export function rollForward(at: Date, intervalDays: number, timeZone: string, no
 }
 
 /** When a briefing runs; mirrors the server, which recomputes it from the interview on save. */
+/** A new briefing's lead: 24 hours before, or 2 hours when that has passed (then it runs now either way). */
+const firstLeadAhead = (start: Date | undefined, timeZone: string, now: Date): Lead =>
+	start && prepareRunAt(start, "24h", timeZone) <= now && prepareRunAt(start, "2h", timeZone) > now ? "2h" : "24h";
+
 const prepareRunAt = (start: Date, lead: Lead, timeZone: string) =>
 	lead === "morning"
 		? fromZoned(toZoned(start, timeZone).date, "08:00", timeZone)
@@ -94,6 +102,7 @@ const prepareRunAt = (start: Date, lead: Lead, timeZone: string) =>
 type Draft = {
 	kind: Kind;
 	query: string;
+	followUpNote: string | null;
 	every: string;
 	date: string;
 	time: string;
@@ -130,10 +139,11 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 	const phone = useBreakpoint() === "mobile";
 	const now = useNow();
 	const [shown, onClosingComplete] = useClosingValue(schedule ?? null);
-	const { when, timeZone, locale } = useCareerTime();
+	const { when, timeZone: accountTimeZone, locale } = useCareerTime();
 	const context = useRouteContext({ strict: false });
 	const user = context.session?.user;
 	const { data: schedules } = useQuery(orpc.career.schedules.queryOptions({ input: {} }));
+	const timeZone = schedules?.find((row) => row.id === shown)?.timezone ?? accountTimeZone;
 	const { data: profile } = useQuery(orpc.career.profile.queryOptions());
 	const { data: applications } = useQuery(applicationsListQueryOptions());
 	const { data: webAccess } = useQuery(orpc.webAccess.status.queryOptions());
@@ -149,6 +159,8 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 
 	// The form starts once its data is in, and again for each schedule opened; closing drops it.
 	const [form, setForm] = useState<Form | null>(null);
+	// A lead the person picked stays; until then it follows the chosen interview.
+	const [leadChosen, setLeadChosen] = useState(false);
 	if (shown && form?.target !== shown && schedules && profile && applications && !providersLoading) {
 		const [head, kind, applicationId] = shown.split(":");
 		const existing = head === "new" ? null : (schedules.find((row) => row.id === shown) ?? null);
@@ -159,20 +171,28 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 			: fromZoned(toZoned(new Date(now.getTime() + 86_400_000), timeZone).date, "08:00", timeZone);
 		const initial: Draft = {
 			kind: existing ? (existing.kind as Kind) : (KINDS.find((item) => item === kind) ?? "discovery"),
-			query: existing?.query || [...profile.targetRoles, ...profile.locations].join(" · "),
+			query:
+				existing?.kind === "discovery" ? existing.query : [...profile.targetRoles, ...profile.locations].join(" · "),
+			followUpNote: existing?.kind === "follow-up" ? existing.query : null,
 			every: String(existing?.intervalDays ?? 1),
 			...toZoned(at, timeZone),
 			interviewId: existing?.interviewId ?? upcoming[0]?.interview.id ?? "",
-			lead: (existing?.lead as Lead | null) ?? "24h",
+			lead: (existing?.lead as Lead | null) ?? firstLeadAhead(upcoming[0]?.start, timeZone, now),
 			aiProviderId: providers.find((provider) => provider.id === existing?.aiProviderId)?.id ?? providers[0]?.id ?? "",
 			applicationId: existing?.applicationId ?? applicationId ?? open[0]?.id ?? "",
 			enabled: existing?.enabled ?? true,
 			email: existing?.email ?? false,
 		};
 		setForm({ target: shown, existing, initial, draft: initial, touched: {}, submitted: false, discarding: false });
+		setLeadChosen(false);
 	}
 
 	const draft = form?.draft;
+	const prefill = Boolean(shown && draft?.kind === "follow-up" && draft.followUpNote === null && draft.applicationId);
+	const detail = useQuery({ ...applicationDetailQueryOptions(draft?.applicationId ?? ""), enabled: prefill });
+	const selectedDetail = detail.data?.id === draft?.applicationId ? detail.data : undefined;
+	const prefillBlocked = prefill && (detail.isPending || detail.isFetching || !selectedDetail);
+	const followUpNote = draft?.followUpNote ?? (selectedDetail ? defaultFollowUpNote(selectedDetail) : "");
 	const set = (patch: Partial<Draft>) =>
 		setForm((current) => current && { ...current, draft: { ...current.draft, ...patch } });
 	const touch = (field: keyof Form["touched"]) =>
@@ -184,11 +204,21 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 	const choices = interviews.filter((item) => item.end >= now || item === interview);
 	const runAt =
 		draft?.kind === "prepare" ? (interview ? prepareRunAt(interview.start, draft.lead, timeZone) : null) : null;
-	const enteredAt = draft ? fromZoned(draft.date, draft.time, timeZone) : null;
+	const unchangedFollowUp =
+		form?.existing?.kind === "follow-up" &&
+		draft?.kind === "follow-up" &&
+		draft.date === form.initial.date &&
+		draft.time === form.initial.time;
+	const enteredAt =
+		unchangedFollowUp && form?.existing
+			? new Date(form.existing.nextRunAt)
+			: draft
+				? fromZoned(draft.date, draft.time, timeZone)
+				: null;
 	const errors = {
 		query: draft?.kind === "discovery" && draft.query.trim().length < 3 ? t`Add a role or company to look for.` : null,
 		when:
-			draft && draft.kind !== "prepare" && enteredAt && !(enteredAt > now)
+			draft && draft.kind !== "prepare" && !unchangedFollowUp && enteredAt && !(enteredAt > now)
 				? Number.isNaN(enteredAt.getTime())
 					? t`This time does not exist in your timezone. Choose another time.`
 					: t`Pick a time after now.`
@@ -198,15 +228,17 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 		(form?.submitted || form?.touched[field]) && errors[field] ? errors[field] : null;
 	const smtp = context.flags?.smtpEnabled ?? false;
 	const verified = Boolean(user?.emailVerified);
+	const runnerAvailable = context.flags?.careerSchedulingEnabled ?? false;
 	const blocked =
+		(draft?.enabled && !runnerAvailable) ||
 		(draft?.kind === "prepare" && (!interview || providers.length === 0)) ||
 		(draft?.kind === "follow-up" && open.length === 0);
-	const needsWebSearch = draft?.kind === "discovery" && webAccess?.search === false;
+	const needsWebSearch = draft?.kind === "discovery" && draft.enabled && webAccess?.search === false;
 
 	const onSave = () => {
-		if (!form || !draft) return;
+		if (!form || !draft || !enteredAt) return;
 		setForm({ ...form, submitted: true });
-		if (errors.query || errors.when || blocked) return;
+		if (errors.query || errors.when || blocked || needsWebSearch || prefillBlocked) return;
 		save.mutate(
 			{
 				...(form.existing ? { id: form.existing.id } : {}),
@@ -217,12 +249,12 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 						: draft.kind === "follow-up"
 							? draft.applicationId || null
 							: null,
-				query: draft.kind === "discovery" ? draft.query.trim() : "",
+				query: draft.kind === "follow-up" ? followUpNote.trim() : draft.kind === "discovery" ? draft.query.trim() : "",
 				interviewId: draft.kind === "prepare" ? draft.interviewId || null : null,
 				lead: draft.kind === "prepare" ? draft.lead : null,
 				enabled: draft.enabled,
 				email: smtp && verified && draft.email,
-				nextRunAt: runAt ?? fromZoned(draft.date, draft.time, timeZone),
+				nextRunAt: runAt ?? enteredAt,
 				timezone: timeZone,
 				locale,
 				intervalDays: draft.kind === "discovery" ? Number(draft.every) : null,
@@ -277,11 +309,29 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 							onChange={(kind) => set({ kind: kind as Kind })}
 							options={[
 								{ value: "discovery", label: t`Find roles` },
-								{ value: "prepare", label: t`Prepare` },
+								{ value: "prepare", label: t`Interview prep` },
 								{ value: "follow-up", label: t`Remind me` },
 							]}
 						/>
 
+						{!runnerAvailable && (
+							<p role="status" className="text-sm text-warn-text">
+								<Trans>
+									Scheduled work is not available on this server. Ask your server administrator to configure it.
+								</Trans>
+							</p>
+						)}
+						{draft.kind === "discovery" && !webAccess?.search && (
+							<div role="status" className="grid gap-2 rounded-lg bg-warn-soft p-3 text-sm">
+								<p>
+									<Trans>
+										Finding roles needs a working web search service. Set it up first, or save jobs manually in
+										Applications.
+									</Trans>
+								</p>
+								<SetUpWebAccess />
+							</div>
+						)}
 						<Swap id={draft.kind} className="flex flex-col gap-[18px]">
 							{draft.kind === "discovery" && (
 								<>
@@ -294,13 +344,25 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 											<Input
 												{...props}
 												value={draft.query}
-												maxLength={500}
 												onChange={(event) => set({ query: event.target.value })}
 												onBlur={() => touch("query")}
 												className="pointer-coarse:text-base"
 											/>
 										)}
 									</Field>
+									<p className="text-xs text-ink-3">
+										<Trans>
+											AI is optional. Review target roles in Knowledge, wait for Saved, then create a new schedule.
+											Existing schedules keep this query until you edit and save it.
+										</Trans>
+									</p>
+									<Button
+										variant="link"
+										nativeButton={false}
+										render={<Link to="/dashboard/career/knowledge/preferences" />}
+									>
+										<Trans>Review target roles in Knowledge</Trans>
+									</Button>
 									<Segments
 										label={t`How often`}
 										value={draft.every}
@@ -314,9 +376,20 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 									<p className="flex gap-2.5 rounded-lg bg-info-soft px-3 py-2.5 text-[13px] leading-[19px] text-ink">
 										<Icon name="globe-simple" size={18} className="mt-px shrink-0 text-info-text" />
 										<Trans>
-											Uses the web search service set up in Settings. Results wait in Today for your review;
-											applications and documents are never created for you.
+											Uses the web search service set up in Settings. Only this query and search countries are sent;
+											your resume and Knowledge are not sent to search. The service may charge. Results wait in Today
+											for your review; applications and documents are never created for you.
 										</Trans>
+									</p>
+									<p className="text-xs text-ink-3">
+										{webAccess?.provider ? (
+											<Trans>
+												Found posting links are read by Reactive Resume and, when needed, {webAccess.provider} and the
+												sites being read. The reader may charge.
+											</Trans>
+										) : (
+											<Trans>Found posting links are read by Reactive Resume and the sites being read.</Trans>
+										)}
 									</p>
 								</>
 							)}
@@ -340,7 +413,15 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 												{...props}
 												disabled={choices.length === 0}
 												value={draft.interviewId}
-												onChange={(event) => set({ interviewId: event.target.value })}
+												onChange={(event) => {
+													const chosen = choices.find((item) => item.interview.id === event.target.value);
+													set({
+														interviewId: event.target.value,
+														...(leadChosen || form?.existing?.lead || !chosen
+															? {}
+															: { lead: firstLeadAhead(chosen.start, timeZone, now) }),
+													});
+												}}
 												className="pointer-coarse:text-base"
 											>
 												{choices.map((item) => (
@@ -358,7 +439,10 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 									<Segments
 										label={t`Prepare a briefing`}
 										value={draft.lead}
-										onChange={(lead) => set({ lead: lead as Lead })}
+										onChange={(lead) => {
+											setLeadChosen(true);
+											set({ lead: lead as Lead });
+										}}
 										options={[
 											{ value: "24h", label: t`24 hours before` },
 											{ value: "2h", label: t`2 hours before` },
@@ -370,14 +454,7 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 											providerState.isUnavailable ? (
 												<AiProviderLoadState state={providerState} />
 											) : providers.length === 0 ? (
-												<Button
-													variant="link"
-													nativeButton={false}
-													className="w-fit"
-													render={<Link to="/dashboard/settings/ai" />}
-												>
-													<Trans>Connect an AI provider in Settings</Trans>
-												</Button>
+												<SetUpAi />
 											) : (
 												<NativeSelect
 													{...props}
@@ -394,41 +471,61 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 											)
 										}
 									</Field>
-									{/* The run itself falls back to the default the same way, so this says what will happen. */}
 									{form?.existing?.kind === "prepare" &&
 										providers.length > 0 &&
 										!providers.some((provider) => provider.id === form.existing?.aiProviderId) && (
 											<p className="-mt-2 text-xs text-warn-text">
-												{t`Its connection was switched off or removed, so it runs on ${providers[0]?.label ?? ""} until you choose another.`}
+												<Trans>
+													Its connection is unavailable. Choose and approve a connection before enabling this schedule.
+												</Trans>
 											</p>
 										)}
 									<PrivacyLine cost>
 										<Trans>
 											Sends this application's posting, notes and documents, plus Knowledge that's switched on, to this
-											connection. Your provider may charge for it.
+											connection. Your provider may charge for it. Scheduled work never switches to another connection
+											automatically.
 										</Trans>
 									</PrivacyLine>
 								</>
 							)}
 
 							{draft.kind === "follow-up" && (
-								<Field label={t`Application`} hint={open.length === 0 ? t`Add an application first` : undefined}>
-									{(props) => (
-										<NativeSelect
-											{...props}
-											disabled={open.length === 0}
-											value={draft.applicationId}
-											onChange={(event) => set({ applicationId: event.target.value })}
-											className="pointer-coarse:text-base"
-										>
-											{open.map((application) => (
-												<option key={application.id} value={application.id}>
-													{`${application.company} · ${application.role}`}
-												</option>
-											))}
-										</NativeSelect>
+								<>
+									<Field label={t`Follow-up note`}>
+										{(props) => (
+											<Input
+												{...props}
+												value={followUpNote}
+												onChange={(event) => set({ followUpNote: event.target.value })}
+											/>
+										)}
+									</Field>
+									{prefill && detail.isError && (
+										<CareerLoadError
+											onRetry={() => {
+												void detail.refetch();
+											}}
+										/>
 									)}
-								</Field>
+									<Field label={t`Application`} hint={open.length === 0 ? t`Add an application first` : undefined}>
+										{(props) => (
+											<NativeSelect
+												{...props}
+												disabled={!!form?.existing || open.length === 0}
+												value={draft.applicationId}
+												onChange={(event) => set({ applicationId: event.target.value })}
+												className="pointer-coarse:text-base"
+											>
+												{open.map((application) => (
+													<option key={application.id} value={application.id}>
+														{`${application.company} · ${application.role}`}
+													</option>
+												))}
+											</NativeSelect>
+										)}
+									</Field>
+								</>
 							)}
 
 							{draft.kind !== "prepare" && (
@@ -462,6 +559,15 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 										</Field>
 									</div>
 									<FieldError>{shownError("when")}</FieldError>
+									{draft.kind === "discovery" && (
+										<p className="text-xs text-ink-3">
+											<Trans>
+												Repeats at this local time in the displayed timezone across clock changes. A skipped clock time
+												moves forward. Missed runs combine into one search. Results and failures appear in Today;
+												delivery depends on the server runner.
+											</Trans>
+										</p>
+									)}
 								</div>
 							)}
 						</Swap>
@@ -474,6 +580,13 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 								description={t`Paused schedules keep their settings.`}
 								className="rounded-none border-b border-line py-3.5"
 							/>
+							{!smtp && (
+								<p className="py-3 text-xs text-ink-3">
+									<Trans>
+										Email copies are unavailable on this server. In-app notifications still appear in Today.
+									</Trans>
+								</p>
+							)}
 							{smtp && (
 								<SwitchRow
 									checked={verified && draft.email}
@@ -528,11 +641,9 @@ export function ScheduleSheet({ schedule, onScheduleChange, onDelete }: Schedule
 									<Trans>Cancel</Trans>
 								</Button>
 								{needsWebSearch ? (
-									<Button variant="secondary" nativeButton={false} render={<Link to="/dashboard/settings/ai" />}>
-										<Trans>Set up web search in Settings</Trans>
-									</Button>
+									<SetUpWebAccess />
 								) : (
-									<Button disabled={!form || blocked} loading={save.isPending} onClick={onSave}>
+									<Button disabled={!form || blocked || prefillBlocked} loading={save.isPending} onClick={onSave}>
 										<Trans>Save schedule</Trans>
 									</Button>
 								)}

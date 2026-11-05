@@ -50,6 +50,10 @@ describe("normalizeRichTextHtml", () => {
 		expect(normalizeRichTextHtml("<ul><li><p>a</p></li><li><p><strong>b</strong></p></li></ul>")).toBe(
 			"<ul><li>a</li><li><strong>b</strong></li></ul>",
 		);
+		// The editor's nested bullets: a paragraph followed by a list keeps both.
+		expect(normalizeRichTextHtml("<ul><li><p>a</p><ul><li><p>b</p></li></ul></li></ul>")).toBe(
+			"<ul><li><p>a</p><ul><li>b</li></ul></li></ul>",
+		);
 	});
 
 	it("flushes accumulated inlines before block-level tags", () => {
@@ -110,6 +114,10 @@ describe("normalizeRichTextHtml", () => {
 
 	it("normalizes RTL pseudo-bullets into anchored list items in the shared HTML path", () => {
 		expect(normalizeRichTextHtml("<p>‏- א<br>‏- ב</p>", { direction: "rtl" })).toBe("<ul><li>‏א</li><li>‏ב</li></ul>");
+		// A Latin paragraph on a right-to-left page reads left to right: no RLM pulls its first fragment across the line.
+		expect(normalizeRichTextHtml("<p>Led <b>the</b> team.</p><p>&nbsp;قاد</p>", { direction: "rtl" })).toBe(
+			"<p>Led <b>the</b> team.</p><p>‏&nbsp;قاد</p>",
+		);
 	});
 });
 

@@ -1,15 +1,16 @@
 import type { SavedData, SavedItem } from "../hooks";
 import type { WorkspaceTabProps } from "./shell";
+import type { PracticeQuestion as Question } from "@reactive-resume/schema/career-practice";
 import type { IconName } from "@reactive-resume/ui/components/icon";
 import type { ReactNode } from "react";
-import { t } from "@lingui/core/macro";
+import { ph, t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
-import { Link } from "@tanstack/react-router";
 import { AnimatePresence, m } from "motion/react";
 import { useEffect, useId, useRef, useState } from "react";
 import { z } from "zod";
 import { AI_VOICE_MODELS } from "@reactive-resume/ai/types";
+import { threePracticeQuestions } from "@reactive-resume/schema/career-practice";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Checkbox } from "@reactive-resume/ui/components/checkbox";
 import { Icon } from "@reactive-resume/ui/components/icon";
@@ -24,7 +25,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@reactive-resume/ui/com
 import { cn } from "@reactive-resume/utils/style";
 import { useCoachKnowledge } from "../coach-thread";
 import { latest, useDefaultProvider, useGenerate, useSavedItems, useSessionDraft } from "../hooks";
-import { CollapseRow, PrivacyLine, useCareerTime, Working, workingSteps } from "../shared";
+import { CollapseRow, PrivacyLine, useCareerTime, useNow, GenerateNotice, Working, workingSteps } from "../shared";
+import { AiNotice } from "./fit";
 import {
 	acceptAudioFile,
 	canDictate,
@@ -37,6 +39,7 @@ import {
 	speakAloud,
 	writeNumbersAsDigits,
 } from "./recorder";
+import { SetUpAi } from "@/features/assistant/provider-setup";
 import { AiProviderLoadState } from "@/features/settings/integrations/ai-provider-load-state";
 import { useHasUsableAiProvider } from "@/features/settings/integrations/hooks/use-has-usable-ai-provider";
 import { toastError } from "@/libs/error-message";
@@ -45,33 +48,73 @@ import { client } from "@/libs/orpc/client";
 
 type Practice = SavedData<"practice">;
 type Attempt = SavedItem & { data: Practice };
-type Question = { text: string; origin: Practice["origin"] };
 type Mode = Practice["mode"];
 
 const isAttempt = (item: SavedItem): item is Attempt => item.data.kind === "practice";
 
 /** The briefing's practice questions for this interview, then questions recalled in Debrief; generic ones without either. */
-function practiceQuestions(items: SavedItem[] | undefined, interviewId: string | undefined, company: string) {
+function practiceQuestions(
+	items: SavedItem[] | undefined,
+	interviewId: string | undefined,
+	company: string,
+	warmup = false,
+) {
 	const simulated = latest(items, "briefing", interviewId)?.data.practiceQuestions ?? [];
 	const recalled = (items ?? []).flatMap((item) => (item.data.kind === "debrief" ? [item.data.question] : []));
 	const questions: Question[] = [
 		...simulated.map((text) => ({ text, origin: "simulated" as const })),
 		...[...new Set(recalled)].map((text) => ({ text, origin: "recalled" as const })),
 	];
-	if (questions.length > 0) return questions;
-	return [
+	const fallbacks = [
 		t`Tell me about a piece of work you're proud of. What was your part in it, and how did you measure success?`,
 		t`Tell me about a time you disagreed with a colleague. How did you resolve it?`,
 		t`Why do you want this role at ${company}?`,
-	].map((text) => ({ text, origin: "simulated" as const }));
+	];
+	if (warmup) return threePracticeQuestions(questions, fallbacks);
+	return questions.length > 0 ? questions : fallbacks.map((text) => ({ text, origin: "simulated" as const }));
 }
 
-export function PractiseTab({ application, version, interview, speak, story, now, go }: WorkspaceTabProps) {
-	const saved = useSavedItems(application.id);
-	const knowledge = useCoachKnowledge(application.id);
+type PractiseProps = Omit<WorkspaceTabProps, "application"> & { application: WorkspaceTabProps["application"] | null };
+
+type StoryPracticeProps = { storyId: string };
+
+export function StoryPractice({ storyId }: StoryPracticeProps) {
+	const saved = useSavedItems(null);
+	const [versionId, setVersionId] = useState<string>();
+	const now = useNow();
+	return (
+		<div className="grid gap-3">
+			<p className="text-sm text-ink-2">
+				<Trans>Practice without an application</Trans>
+			</p>
+			<PractiseTab
+				application={null}
+				version={saved.data?.find((item) => item.id === versionId && item.evidence.storyIds.includes(storyId))}
+				interview={undefined}
+				speak={true}
+				story={storyId}
+				now={now}
+				go={(_tab, search) => setVersionId(search?.version)}
+			/>
+		</div>
+	);
+}
+
+export function PractiseTab({ application, version, interview, speak, story, warmup, now, go }: PractiseProps) {
+	const saved = useSavedItems(application?.id ?? null);
+	const knowledge = useCoachKnowledge(application?.id ?? null);
 	const voice = useVoiceSettings();
+	if (warmup && !interview)
+		return (
+			<Notice icon="warning-circle">
+				<Trans>This interview is unavailable.</Trans>
+			</Notice>
+		);
 	const viewing = version && isAttempt(version) ? version : undefined;
-	const attempts = saved.data?.filter(isAttempt) ?? [];
+	const attempts =
+		saved.data
+			?.filter(isAttempt)
+			.filter((item) => application !== null || !story || item.evidence.storyIds.includes(story)) ?? [];
 	const selectedStory = story ? knowledge.stories.find((item) => item.id === story) : undefined;
 	const questions: Question[] = selectedStory
 		? [
@@ -80,7 +123,7 @@ export function PractiseTab({ application, version, interview, speak, story, now
 					origin: "simulated",
 				},
 			]
-		: practiceQuestions(saved.data, interview?.id, application.company);
+		: practiceQuestions(saved.data, interview?.id, application?.company ?? "", warmup);
 	if (story && knowledge.isError)
 		return (
 			<Notice icon="warning-circle">
@@ -97,10 +140,29 @@ export function PractiseTab({ application, version, interview, speak, story, now
 		return (
 			<Notice icon="warning-circle">
 				<span>
-					<Trans>This story is unavailable or uses facts that are switched off.</Trans>
+					{knowledge.allStories.some((item) => item.id === story) ? (
+						<Trans>
+							This story has no facts in use here. Link a fact to it in Knowledge, or switch its facts on, to practice
+							it.
+						</Trans>
+					) : (
+						<Trans>This story is unavailable or uses facts that are switched off.</Trans>
+					)}
 				</span>
-				<Button variant="secondary" onClick={() => go("practise")}>
-					<Trans>Practice another question</Trans>
+				{application && (
+					<Button variant="secondary" onClick={() => go("practise")}>
+						<Trans>Practice another question</Trans>
+					</Button>
+				)}
+			</Notice>
+		);
+
+	if (saved.isError)
+		return (
+			<Notice icon="warning-circle">
+				<Trans>Couldn't load this. Your saved data hasn't changed.</Trans>
+				<Button onClick={() => void saved.refetch()}>
+					<Trans>Try again</Trans>
 				</Button>
 			</Notice>
 		);
@@ -108,7 +170,14 @@ export function PractiseTab({ application, version, interview, speak, story, now
 	return (
 		<div className="grid items-start gap-5 @3xl:grid-cols-[minmax(0,1fr)_280px]">
 			{viewing ? (
-				<SavedAttempt item={viewing} />
+				<div className="grid gap-3">
+					{application === null && (
+						<Button variant="secondary" className="justify-self-start" onClick={() => go("practise")}>
+							<Trans context="Button: rehearse interview answers">Practice</Trans>
+						</Button>
+					)}
+					<SavedAttempt item={viewing} />
+				</div>
 			) : saved.isPending ? (
 				<div className="grid gap-4">
 					<Skeleton className="h-40 rounded-xl" />
@@ -116,14 +185,16 @@ export function PractiseTab({ application, version, interview, speak, story, now
 				</div>
 			) : (
 				<Session
-					key={`${application.id}:${interview?.id ?? "none"}:${story ?? "general"}`}
-					applicationId={application.id}
+					key={`${application?.id ?? "shared"}:${interview?.id ?? "none"}:${story ?? "general"}:${warmup ? "three" : "all"}`}
+					application={application}
+					applicationId={application?.id ?? null}
 					interviewId={interview?.id ?? null}
 					questions={questions}
 					storyId={selectedStory?.id}
 					storyTitle={selectedStory?.data.title}
 					voice={voice}
 					initialMode={speak ? "spoken" : "typed"}
+					warmup={warmup === true}
 				/>
 			)}
 			<aside className="grid gap-3 rounded-xl border border-line bg-surface p-4">
@@ -149,9 +220,13 @@ export function PractiseTab({ application, version, interview, speak, story, now
 					</ul>
 				)}
 				<p className="text-xs leading-[17px] text-ink-3">
-					<Trans>
-						Compare attempts to see what improved. Practice questions are simulated, not from {application.company}.
-					</Trans>
+					{application ? (
+						<Trans>
+							Compare attempts to see what improved. Practice questions are simulated, not from {application.company}.
+						</Trans>
+					) : (
+						<Trans>Compare attempts to see what improved. Practice questions are simulated.</Trans>
+					)}
 				</p>
 			</aside>
 		</div>
@@ -206,22 +281,34 @@ type Step =
 	| { name: "error" };
 
 type SessionProps = {
-	applicationId: string;
+	application: WorkspaceTabProps["application"] | null;
+	applicationId: string | null;
 	interviewId: string | null;
 	questions: Question[];
 	storyId: string | undefined;
 	storyTitle: string | undefined;
 	voice: VoiceSettings;
 	initialMode: Mode;
+	warmup: boolean;
 };
 
-function Session({ applicationId, interviewId, questions, voice, initialMode, storyId, storyTitle }: SessionProps) {
+function Session({
+	application,
+	applicationId,
+	interviewId,
+	questions,
+	voice,
+	initialMode,
+	storyId,
+	storyTitle,
+	warmup,
+}: SessionProps) {
 	const id = useId();
 	const generate = useGenerate(applicationId);
 	const connection = useDefaultProvider();
 	const { provider } = connection;
 	const draft = useSessionDraft<PracticeDraft>(
-		`practice:${applicationId}:${interviewId ?? "none"}:${storyId ?? "general"}`,
+		`practice:${applicationId}:${interviewId ?? "none"}:${storyId ?? "general"}${warmup ? ":three" : ""}`,
 		{
 			question: questions[0] ?? { text: t`Tell me about a piece of work you're proud of.`, origin: "simulated" },
 			mode: initialMode,
@@ -251,6 +338,11 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 	const { i18n } = useLingui();
 	const fileInput = useRef<HTMLInputElement>(null);
 	const alive = useRef(true);
+	const transcription = useRef<AbortController | null>(null);
+	useEffect(
+		() => () => transcription.current?.abort(),
+		[applicationId, voice.settings.transcribe.providerId, voice.settings.transcribe.model],
+	);
 
 	const browserDictation = voice.settings.transcribe.providerId === BROWSER;
 	const canHear = !connection.isUnavailable && (voice.settings.speak.providerId !== BROWSER || canSpeakAloud());
@@ -274,21 +366,28 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 
 	const transcribe = async (next: Audio) => {
 		if (connection.isUnavailable) return;
+		transcription.current?.abort();
+		const request = new AbortController();
+		transcription.current = request;
 		setStep({ name: "transcribing" });
 		try {
-			const result = await client.career.voice.transcribe({
-				providerId: voice.settings.transcribe.providerId,
-				model: voice.settings.transcribe.model,
-				applicationId,
-				audio: next.file,
-			});
-			if (!alive.current) return;
+			const result = await client.career.voice.transcribe(
+				{
+					providerId: voice.settings.transcribe.providerId,
+					model: voice.settings.transcribe.model,
+					applicationId,
+					audio: next.file,
+				},
+				{ signal: request.signal },
+			);
+			if (!alive.current || request.signal.aborted) return;
 			setAnswer(result.text);
 			setSpoken({ id: result.id, text: result.text, seconds: next.seconds });
 			setStep({ name: "idle" });
 			if (!voice.settings.keep) setAudio(null);
 		} catch {
-			if (alive.current) setStep({ name: "error" });
+			if (alive.current && transcription.current === request)
+				setStep(request.signal.aborted ? { name: "idle" } : { name: "error" });
 		}
 	};
 	const takeAudio = (file: File, seconds: number | null) => {
@@ -305,7 +404,7 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 				onText: setHeard,
 				onStop: (text, seconds, atLimit) => {
 					recording.current = null;
-					setAnnouncement(t`Stopped at ${clock(seconds)}`);
+					setAnnouncement(t`Stopped at ${clock(seconds, i18n.locale)}`);
 					if (atLimit) toast.add({ description: t`Dictation stopped at the 2-minute limit.` });
 					if (!text) return setStep({ name: "failed", message: t`Nothing was heard. Try again, or type your answer.` });
 					setAnswer(text);
@@ -343,7 +442,7 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 				onTick: (seconds) => setStep({ name: "recording", seconds }),
 				onStop: (file, seconds, atLimit) => {
 					recording.current = null;
-					setAnnouncement(t`Stopped at ${clock(seconds)}`);
+					setAnnouncement(t`Stopped at ${clock(seconds, i18n.locale)}`);
 					if (atLimit)
 						toast.add({ description: t`Recording stopped at the 2-minute limit. Transcribing what you said.` });
 					if (file) takeAudio(file, seconds);
@@ -367,6 +466,8 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 		else if (step.name !== "starting" && step.name !== "transcribing") void startRecording();
 	};
 	const chooseMode = (next: Mode) => {
+		transcription.current?.abort();
+		if (step.name === "transcribing") setStep({ name: "idle" });
 		if (next === "typed" && recording.current) {
 			recording.current.cancel();
 			recording.current = null;
@@ -400,14 +501,15 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 			.catch(() => undefined);
 	};
 
-	const providerName = provider?.label ?? t`your AI connection`;
 	const recordingNow = step.name === "recording";
-	const elapsed = clock(recordingNow ? step.seconds : 0);
+	const elapsed = clock(recordingNow ? step.seconds : 0, i18n.locale);
 	const model = voice.settings.transcribe.model;
 	const position = (index % questions.length) + 1;
 	const total = questions.length;
 	const answerField = (
 		<Textarea
+			// What people paste or write here can be in any language: its own text sets the direction.
+			dir="auto"
 			id={`${id}-answer`}
 			aria-labelledby={`${id}-heading`}
 			value={answer}
@@ -422,8 +524,9 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 		<div className="grid min-w-0 gap-4">
 			<section className="grid gap-3 rounded-xl border border-line bg-surface p-5">
 				<div className="flex flex-wrap items-center justify-between gap-2">
-					<p className="font-mono text-xs font-medium text-ink-2">
-						{t`Question ${position} of ${total}`} · {question.origin === "recalled" ? t`Recalled` : t`Practice`}
+					<p className="text-xs font-medium text-ink-2">
+						{t`Question ${ph({ position: i18n.number(position) })} of ${ph({ total: i18n.number(total) })}`} ·{" "}
+						{question.origin === "recalled" ? t`Recalled` : t`Practice`}
 					</p>
 					{canHear && (
 						<HearIt
@@ -464,11 +567,7 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 					<p className="rounded-lg bg-sunken px-3.5 py-3 text-[13px] leading-[19px] text-ink-2">
 						<Trans>
 							This browser can't take dictation, and none of your AI connections can transcribe speech (OpenAI, Google
-							Gemini, Mistral, xAI, Groq or Vercel AI Gateway can).{" "}
-							<Link to="/dashboard/settings/ai" className="text-accent-text underline underline-offset-3">
-								Add one in Settings
-							</Link>
-							, or type your answer.
+							Gemini, Mistral, xAI, Groq or Vercel AI Gateway can). <SetUpAi />, or type your answer.
 						</Trans>
 					</p>
 				) : spoken ? (
@@ -476,7 +575,7 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 						<p className="-mb-2 flex flex-wrap items-center gap-1.5 text-xs text-ink-3">
 							<Icon name="waveform" size={16} />
 							<Trans>Transcribed</Trans>
-							{spoken.seconds !== null && <span className="font-mono">· {clock(spoken.seconds)}</span>}
+							{spoken.seconds !== null && <span className="font-mono">· {clock(spoken.seconds, i18n.locale)}</span>}
 							<span>
 								· <Trans>check numbers and names before using it</Trans>
 							</span>
@@ -580,7 +679,7 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 									aria-valuemin={0}
 									aria-valuemax={MAX_SECONDS}
 									aria-valuenow={step.seconds}
-									aria-valuetext={clock(step.seconds)}
+									aria-valuetext={clock(step.seconds, i18n.locale)}
 									className="h-1.5 w-[180px] max-w-full overflow-hidden rounded-sm bg-bg"
 								>
 									<div
@@ -637,28 +736,15 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 							{generate.isPending ? <Working steps={workingSteps("practice")} /> : <Trans>Get feedback</Trans>}
 						</Button>
 						<p className="text-xs text-ink-2">
-							<Trans>Compared with your stories and the posting.</Trans>
+							{application ? (
+								<Trans>Compared with your stories and the posting.</Trans>
+							) : (
+								<Trans>Compared with your stories.</Trans>
+							)}
 						</p>
 					</div>
-					{connection.isUnavailable ? (
-						<AiProviderLoadState state={connection} />
-					) : provider ? (
-						<PrivacyLine>
-							<Trans>
-								Get feedback sends the question, your answer, this posting and your stories to {providerName}.
-							</Trans>
-						</PrivacyLine>
-					) : (
-						<PrivacyLine>
-							<Trans>
-								Feedback needs an AI connection.{" "}
-								<Link to="/dashboard/settings/ai" className="text-accent-text underline underline-offset-3">
-									Add one in Settings
-								</Link>
-								. Nothing is sent until you ask.
-							</Trans>
-						</PrivacyLine>
-					)}
+					<GenerateNotice generate={generate} onRetry={getFeedback} className="w-fit" />
+					<AiNotice task="practice" application={application} interview={interviewId !== null} />
 				</div>
 			</section>
 
@@ -682,7 +768,7 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 						</Button>
 						<span className="ms-auto flex items-center gap-1 text-xs text-ink-3">
 							<Icon name="check-circle" size={15} />
-							<Trans>Saved to Saved · Practice</Trans>
+							<Trans>Saved to Library · Practice</Trans>
 						</span>
 					</div>
 				</FeedbackCard>
@@ -738,10 +824,12 @@ function HearIt({ text, voice }: { text: string; voice: VoiceSettings }) {
 	const [playing, setPlaying] = useState(false);
 	const playback = useRef<(() => void) | null>(null);
 	const request = useRef(0);
+	const speech = useRef<AbortController | null>(null);
 	const reader = voice.settings.speak;
 	useEffect(
 		() => () => {
 			request.current += 1;
+			speech.current?.abort();
 			playback.current?.();
 			playback.current = null;
 		},
@@ -749,6 +837,7 @@ function HearIt({ text, voice }: { text: string; voice: VoiceSettings }) {
 	);
 	const stop = () => {
 		request.current += 1;
+		speech.current?.abort();
 		playback.current?.();
 		playback.current = null;
 		setPlaying(false);
@@ -757,6 +846,8 @@ function HearIt({ text, voice }: { text: string; voice: VoiceSettings }) {
 	const play = async () => {
 		if (playing || busy) return stop();
 		const generation = ++request.current;
+		const controller = new AbortController();
+		speech.current = controller;
 		if (reader.providerId === BROWSER) {
 			setPlaying(true);
 			playback.current = speakAloud(text, i18n.locale, () => setPlaying(false));
@@ -764,7 +855,10 @@ function HearIt({ text, voice }: { text: string; voice: VoiceSettings }) {
 		}
 		setBusy(true);
 		try {
-			const result = await client.career.voice.speak({ providerId: reader.providerId, model: reader.model, text });
+			const result = await client.career.voice.speak(
+				{ providerId: reader.providerId, model: reader.model, text },
+				{ signal: controller.signal },
+			);
 			if (generation !== request.current) return;
 			const bytes = Uint8Array.from(atob(result.audio), (character) => character.charCodeAt(0));
 			const url = URL.createObjectURL(new Blob([bytes], { type: result.mediaType }));
@@ -780,6 +874,10 @@ function HearIt({ text, voice }: { text: string; voice: VoiceSettings }) {
 			await player.play();
 			if (generation === request.current) setPlaying(true);
 		} catch (error) {
+			if (controller.signal.aborted) {
+				if (speech.current === controller) setBusy(false);
+				return;
+			}
 			if (generation !== request.current) return;
 			stop();
 			toastError(error, t`Spoken audio is unavailable. Continue with the text question.`, { allowServerMessage: true });
@@ -1043,9 +1141,7 @@ function SavedAttempt({ item }: { item: Attempt }) {
 	return (
 		<div className="grid min-w-0 gap-4">
 			<section className="grid gap-3 rounded-xl border border-line bg-surface p-5">
-				<p className="font-mono text-xs font-medium text-ink-2">
-					{item.data.origin === "recalled" ? t`Recalled` : t`Practice`}
-				</p>
+				<p className="text-xs font-medium text-ink-2">{item.data.origin === "recalled" ? t`Recalled` : t`Practice`}</p>
 				<h2 className="font-display text-[22px] leading-[29px]">{item.data.question}</h2>
 			</section>
 			<section className="grid gap-3 rounded-xl border border-line bg-surface p-4 md:p-5">

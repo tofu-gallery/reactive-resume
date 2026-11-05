@@ -107,17 +107,45 @@ describe("registerTools", () => {
 		vi.clearAllMocks();
 	});
 
-	it("creates and duplicates with an automatically generated address", async () => {
+	it("preserves the application-letter review and provenance envelope without saving generated text", async () => {
+		const draft = {
+			text: "Fictional reviewed body",
+			coverLetterId: "letter",
+			reviewRequired: true,
+			aiOperationIds: ["operation"],
+			aiUsage: {
+				requests: 1,
+				models: [{ providerId: "provider", label: "Fictional AI", provider: "openai", model: "original-model" }],
+			},
+		};
+		clientMock.applications.ai.draftMessage.mockResolvedValueOnce(draft);
 		const { server, registered } = makeFakeServer();
 		registerTools(server as never, clientMock as never, new Headers());
-		clientMock.resume.create.mockResolvedValueOnce("created");
-		clientMock.resume.duplicate.mockResolvedValueOnce("copied");
-		const create = registered.find((tool) => tool.name === MCP_TOOL_NAME.createResume)!;
-		const duplicate = registered.find((tool) => tool.name === MCP_TOOL_NAME.duplicateResume)!;
-		await create.handler(TOOL_META[MCP_TOOL_NAME.createResume].inputSchema.parse({ name: "Resume" }));
-		await duplicate.handler(TOOL_META[MCP_TOOL_NAME.duplicateResume].inputSchema.parse({ id: "r1" }));
-		expect(clientMock.resume.create).toHaveBeenCalledWith({ name: "Resume", tags: [], withSampleData: false });
-		expect(clientMock.resume.duplicate).toHaveBeenCalledWith({ id: "r1" });
+		const tool = registered.find((tool) => tool.name === MCP_TOOL_NAME.draftApplicationMessage)!;
+		const input = { id: "application", kind: "cover-letter" };
+		const result = await tool.handler(TOOL_META[MCP_TOOL_NAME.draftApplicationMessage].inputSchema.parse(input));
+		expect(clientMock.applications.ai.draftMessage).toHaveBeenCalledWith(input);
+		expect(result.structuredContent).toEqual(draft);
+		expect(clientMock.coverLetters.update).not.toHaveBeenCalled();
+		expect(TOOL_META[MCP_TOOL_NAME.draftApplicationMessage].outputSchema.parse({ text: "Legacy follow-up" })).toEqual({
+			text: "Legacy follow-up",
+		});
+	});
+
+	it("preserves pending tailoring review metadata and the legacy resume reference", async () => {
+		const draft = { resumeId: "copy", name: "Fictional copy", reviewRequired: true, generationStatus: "interrupted" };
+		clientMock.applications.ai.tailorResume.mockResolvedValueOnce(draft);
+		const { server, registered } = makeFakeServer();
+		registerTools(server as never, clientMock as never, new Headers());
+		const tool = registered.find((tool) => tool.name === MCP_TOOL_NAME.tailorResumeForApplication)!;
+		const result = await tool.handler({ id: "application" });
+		expect(clientMock.applications.ai.tailorResume).toHaveBeenCalledWith({ id: "application" });
+		expect(result.structuredContent).toEqual(draft);
+		expect(TOOL_META[MCP_TOOL_NAME.tailorResumeForApplication].outputSchema.parse(draft)).toEqual(draft);
+		expect(
+			TOOL_META[MCP_TOOL_NAME.tailorResumeForApplication].outputSchema.parse({ resumeId: "old", name: "Old" }),
+		).toEqual({ resumeId: "old", name: "Old" });
+		expect(clientMock.resume.patch).not.toHaveBeenCalled();
 	});
 
 	it("imports applications with followUpAt coerced to Date and null preserved", async () => {
@@ -192,7 +220,7 @@ describe("registerTools", () => {
 				`\`${MCP_TOOL_NAME.listResumes}\`, \`${MCP_TOOL_NAME.listCoverLetters}\`, and \`${MCP_TOOL_NAME.listApplications}\` return valid ones.`,
 			],
 			["RESUME_SLUG_ALREADY_EXISTS", 400, "The slug is already in use."],
-			["FORBIDDEN", undefined, "Permission denied."],
+			["FORBIDDEN", undefined, "Not allowed."],
 			["BAD_REQUEST", undefined, "Check the input parameters against the tool's schema."],
 		])("hints on %s", async (code, status, expected) => {
 			const result = await readResume(new ORPCError(code, status ? { status } : undefined));

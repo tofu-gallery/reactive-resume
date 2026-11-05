@@ -1,5 +1,5 @@
 import type { PageMap } from "@reactive-resume/pdf/page-map";
-import { t } from "@lingui/core/macro";
+import { ph, t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
 import { useQuery } from "@tanstack/react-query";
@@ -8,10 +8,11 @@ import { useReducedMotion } from "motion/react";
 import { useMemo, useState } from "react";
 import { useDebounceValue } from "usehooks-ts";
 import { coverLetterTextToHtml } from "@reactive-resume/resume/cover-letter";
-import { getStateIn } from "@reactive-resume/resume/proposals";
+import { applyProposals } from "@reactive-resume/resume/proposals";
 import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { cn } from "@reactive-resume/utils/style";
 import { templates } from "@/dialogs/resume/template/data";
+import { AiResultUsage } from "@/features/ai/usage";
 import { letterPageData, useLetterWords } from "@/features/letters/compose";
 import { useLetterEditorStore } from "@/features/letters/store";
 import { useLetterMode } from "@/features/letters/use-letter-mode";
@@ -46,13 +47,14 @@ function useDeepStable<T>(value: T) {
  */
 export function LetterPage() {
 	const letter = useLetterEditorStore((state) => state.letter);
+	const applications = useLetterEditorStore((state) => state.proposalApplications);
 	const draft = useLetterEditorStore((state) => state.draft);
 	const assistantProposals = useEditorStore((state) => (state.assistantOpen ? state.assistantProposals : NONE));
 	const { i18n } = useLingui();
 	const reducedMotion = useReducedMotion();
 	const previewTemplate = useEditorStore((state) => state.previewTemplate);
 	const historyVersionId = useEditorStore((state) => state.historyVersionId);
-	const sheetOpen = useEditorStore((state) => state.shareTab !== null);
+	const sheetOpen = useEditorStore((state) => state.sheetTab !== null);
 	const rendered = useEditorStore((state) => state.rendered);
 	const setRendered = useEditorStore((state) => state.setRendered);
 	const breakpoint = useBreakpoint();
@@ -79,17 +81,19 @@ export function LetterPage() {
 		if (!letter) return undefined;
 		if (viewing) return letterPageData({ ...letter, ...viewing.data }, words);
 		// The assistant's pending edits show in the body: the old text struck through, the new highlighted.
-		const content = shownDraft
-			? coverLetterTextToHtml(shownDraft)
-			: assistantProposals
-					.filter((proposal) => getStateIn(letter.content, proposal) === "pending")
-					.reduce(
-						(html, proposal) => html.replace(proposal.before, () => markChange(proposal.before, proposal.after)),
-						letter.content,
-					);
+		let content = shownDraft ? coverLetterTextToHtml(shownDraft) : letter.content;
+		if (!shownDraft)
+			applyProposals(
+				assistantProposals.map((proposal) => ({ ...proposal, after: markChange(proposal.before, proposal.after) })),
+				() => content,
+				(_, value) => {
+					content = value;
+				},
+				applications,
+			);
 		const page = letterPageData({ ...letter, content }, words);
 		return previewTemplate ? { ...page, metadata: { ...page.metadata, template: previewTemplate } } : page;
-	}, [letter, viewing, shownDraft, previewTemplate, words, assistantProposals]);
+	}, [letter, viewing, shownDraft, previewTemplate, words, assistantProposals, applications]);
 	const data = useDeepStable(pageData);
 
 	if (!letter || !data) return null;
@@ -101,7 +105,7 @@ export function LetterPage() {
 		letter: t({ message: "Letter", context: "US Letter paper size (8.5 × 11 in), shown beside A4" }),
 		"free-form": t`Free-form`,
 	}[format];
-	// Desktop: the page moves aside so it stays visible beside the Share & export sheet.
+	// Desktop: the page moves aside so it stays visible beside the Download & history sheet.
 	const shifted = sheetOpen && (breakpoint === "desktop" || breakpoint === "wide");
 
 	return (
@@ -112,11 +116,16 @@ export function LetterPage() {
 				// oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- a scrollable region must be reachable by keyboard.
 				tabIndex={0}
 				aria-label={t`Letter page`}
-				className={cn("absolute inset-0 overflow-auto pt-7 pb-24 outline-none", isPhone ? "px-4" : "px-10")}
+				className={cn(
+					"absolute inset-0 overflow-auto pt-7 pb-24 outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent",
+					isPhone ? "px-4" : "px-10",
+				)}
 			>
+				{viewing && <AiResultUsage usage={viewing.aiUsage} />}
 				<ResumePreview
 					data={data}
 					includeCoverLetterHeader
+					contentLabel={t`Letter content`}
 					pageLayout="vertical"
 					pageGap={24}
 					pageScale={pageScale}
@@ -146,7 +155,7 @@ export function LetterPage() {
 							</figcaption>
 						) : (
 							<figcaption className="mb-2.5 text-center text-xs font-medium text-ink-3">
-								<Trans>Page {pageNumber}</Trans>
+								<Trans>Page {ph({ pageNumber: i18n.number(pageNumber) })}</Trans>
 							</figcaption>
 						)
 					}

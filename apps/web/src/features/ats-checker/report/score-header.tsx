@@ -1,5 +1,6 @@
 import type { PdfAtsReport } from "@reactive-resume/resume/ats-pdf";
 import type { CSSProperties } from "react";
+import { i18n } from "@lingui/core";
 import { Trans } from "@lingui/react/macro";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@reactive-resume/ui/components/tooltip";
@@ -24,7 +25,7 @@ export function ScoreHeader({ report }: ScoreHeaderProps) {
 	return (
 		<div className="space-y-3 rounded-md border bg-surface p-3">
 			<div className="flex items-baseline gap-2">
-				<span className={cn("text-4xl leading-none font-bold tabular-nums", tone.text)}>
+				<span className={cn("font-display text-4xl leading-none tabular-nums", tone.text)}>
 					<RollingNumber value={report.score} />
 				</span>
 				<span className="text-sm text-ink-3">
@@ -46,7 +47,7 @@ export function ScoreHeader({ report }: ScoreHeaderProps) {
 			<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-3">
 				<span>
 					<Trans>
-						{report.passedChecks} of {report.applicableChecks} applicable checks passed
+						{i18n.number(report.passedChecks)} of {i18n.number(report.applicableChecks)} applicable checks passed
 					</Trans>
 				</span>
 
@@ -55,7 +56,7 @@ export function ScoreHeader({ report }: ScoreHeaderProps) {
 						<TooltipTrigger
 							render={
 								<span className="inline-flex cursor-help items-center gap-1 underline decoration-dotted underline-offset-2">
-									<Trans>{report.skippedChecks} skipped</Trans>
+									<Trans>{i18n.number(report.skippedChecks)} skipped</Trans>
 									<Icon name="info" size={12} />
 								</span>
 							}

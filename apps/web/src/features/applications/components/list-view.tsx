@@ -1,11 +1,15 @@
-import type { Application } from "../types";
+import type { ApplicationLane } from "../lanes";
+import type { OfferHint } from "../next-step";
+import type { ApplicationSummary } from "../types";
 import type { ApplicationStatus } from "@reactive-resume/schema/applications/data";
+import { i18n } from "@lingui/core";
 import { plural, t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Plural, Trans } from "@lingui/react/macro";
+import { HotkeysProvider, useHotkeys } from "@tanstack/react-hotkeys";
 import { useMutation } from "@tanstack/react-query";
 import { AnimatePresence, m } from "motion/react";
-import { memo, useMemo, useState } from "react";
+import { memo, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Checkbox } from "@reactive-resume/ui/components/checkbox";
 import {
@@ -15,14 +19,23 @@ import {
 	DropdownMenuTrigger,
 } from "@reactive-resume/ui/components/dropdown-menu";
 import { Icon } from "@reactive-resume/ui/components/icon";
+import { IconButton } from "@reactive-resume/ui/components/icon-button";
 import { Input } from "@reactive-resume/ui/components/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@reactive-resume/ui/components/popover";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
+import { useFloatingToolbarSpace } from "@reactive-resume/ui/hooks/use-floating-toolbar-space";
 import { cn } from "@reactive-resume/utils/style";
-import { describeNextStep, getNextStep } from "../next-step";
-import { CLOSED_REASONS, getClosedReasonLabel, getStageColor, getStageLabel, LIST_ORDER, PIPELINE } from "../stages";
-import { useInvalidateApplications } from "../use-application-actions";
+import { getStageDisplay } from "../lanes";
+import { getCategoryLane, getDisplayLane, getLaneLabel } from "../lanes";
+import { compareNextStepSortKeys, describeNextStep, getNextStep, nextStepSortKey } from "../next-step";
+import { offerHintFor, useOfferHints } from "../queries";
+import { getStageLabel, LIST_ORDER, PIPELINE } from "../stages";
+import { useApplicationActions, useInvalidateApplications, useMoveWithUndo } from "../use-application-actions";
+import { useApplicationLanes } from "../use-application-lanes";
+import { ClosedLaneItems } from "./application-actions-menu";
+import { TagChips } from "./tag-chips";
+import { useCareerTime, useNow } from "@/features/career/shared";
 import { useConfirm } from "@/hooks/use-confirm";
 import { formatRelativeTime } from "@/libs/locale";
 import { D2, EASE, EXIT } from "@/libs/motion";
@@ -30,71 +43,128 @@ import { orpc } from "@/libs/orpc/client";
 
 type SortKey = "role" | "next" | "updated";
 type Sort = { key: SortKey; direction: "asc" | "desc" };
-
-const nextStepTime = (application: Application) => {
-	const step = getNextStep(application);
-	return step.kind === "interview" || step.kind === "follow-up" ? step.at.getTime() : Number.POSITIVE_INFINITY;
-};
+type SortValue = string | number | readonly [number, number];
 
 // Sort keys are computed once per row, not once per comparison.
-const sortValue: Record<SortKey, (application: Application) => string | number> = {
+const sortValue: Record<
+	SortKey,
+	(application: ApplicationSummary, now: Date, timeZone: string, offer?: OfferHint | null) => SortValue
+> = {
 	role: (application) => application.role,
-	next: nextStepTime,
+	next: (application, now, timeZone, offer) => nextStepSortKey(application, now, timeZone, offer),
 	updated: (application) => new Date(application.updatedAt).getTime(),
 };
 
-const compareValues = (a: string | number, b: string | number) =>
-	typeof a === "string" && typeof b === "string" ? a.localeCompare(b) : Number(a) - Number(b);
+const compareValues = (a: SortValue, b: SortValue, aId: string, bId: string, direction: Sort["direction"]) => {
+	const sign = direction === "asc" ? 1 : -1;
+	if (typeof a === "string" && typeof b === "string") return sign * a.localeCompare(b);
+	if (typeof a === "object" && typeof b === "object") return compareNextStepSortKeys(a, b, aId, bId, direction);
+	return sign * (Number(a) - Number(b));
+};
 
 type ListViewProps = {
-	applications: Application[];
+	applications: ApplicationSummary[];
 	showClosed: boolean;
 	selectedId: string | null;
-	onOpen: (application: Application) => void;
+	onOpen: (application: ApplicationSummary) => void;
+	/** A tag chip filters the page's existing search, rather than starting a second filter state. */
+	onTagSelect?: ((tag: string) => void) | undefined;
 };
 
 /**
- * The default view: applications grouped by stage in the order that needs you first (Interview, Offer, Screening,
- * Applied, Saved, then Closed when shown). Groups collapse, headers sort within groups, and row checkboxes select
+ * The default view: applications grouped by lane, by the stage that needs you first (Interview, Offer, Screening,
+ * Applied, Saved, then Closed when shown) and in the owner's lane order within a stage. Within a group rows follow
+ * Next step: dated steps soonest first, then the longest wait. Groups collapse, headers sort within groups, and row checkboxes select
  * for bulk moves, tags, closing and deleting. Phones get two-line rows.
  */
-export function ApplicationList({ applications, showClosed, selectedId, onOpen }: ListViewProps) {
+export function ApplicationList({ applications, showClosed, selectedId, onOpen, onTagSelect }: ListViewProps) {
 	const breakpoint = useBreakpoint();
+	const { timeZone } = useCareerTime();
 	const phone = breakpoint === "mobile";
-	const [collapsed, setCollapsed] = useState<ReadonlySet<ApplicationStatus>>(new Set());
-	const [sort, setSort] = useState<Sort>({ key: "updated", direction: "desc" });
+	const { lanes, active, isPending: lanesPending, error: lanesError } = useApplicationLanes();
+	const moveWithUndo = useMoveWithUndo();
+	const { logFollowUp } = useApplicationActions();
+	const rowButtons = useRef(new Map<string, HTMLButtonElement>());
+	const restoreFocus = useRef<string | null>(null);
+	const now = useNow();
+	const hints = useOfferHints();
+	const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+	// Next step first: what's dated soonest, then whatever has waited longest in its stage.
+	const [sort, setSort] = useState<Sort>({ key: "next", direction: "asc" });
 	const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
+	const { ref: selectionBarRef, space: selectionBarSpace } = useFloatingToolbarSpace();
 
+	const laneOf = (application: ApplicationSummary) => getDisplayLane(lanes, application);
 	// Selections only cover what's on screen.
-	const checkedIds = applications
-		.filter(
-			(application) =>
-				checked.has(application.id) &&
-				(application.status !== "closed" || showClosed) &&
-				!collapsed.has(application.status),
-		)
-		.map((application) => application.id);
+	const visible = applications.filter(
+		(application) => (application.status !== "closed" || showClosed) && !collapsed.has(laneOf(application).id),
+	);
+	const checkedIds = visible.filter((application) => checked.has(application.id)).map((application) => application.id);
 	if (checkedIds.length !== checked.size) setChecked(new Set(checkedIds));
 
 	const groups = useMemo(() => {
 		const sign = sort.direction === "asc" ? 1 : -1;
-		const keys = new Map(applications.map((application) => [application.id, sortValue[sort.key](application)]));
-		const key = (application: Application) => keys.get(application.id) ?? 0;
+		const keys = new Map(
+			applications.map((application) => [
+				application.id,
+				sortValue[sort.key](application, now, timeZone, offerHintFor(hints, application.id)),
+			]),
+		);
+		const key = (application: ApplicationSummary) => keys.get(application.id) ?? 0;
+		const rowsByLane = new Map<string, ApplicationSummary[]>();
+		for (const application of applications) {
+			const id = getDisplayLane(lanes, application).id;
+			const rows = rowsByLane.get(id);
+			if (rows) rows.push(application);
+			else rowsByLane.set(id, [application]);
+		}
 		return LIST_ORDER.filter((status) => status !== "closed" || showClosed)
-			.map((status) => ({
-				status,
-				rows: applications
-					.filter((application) => application.status === status)
-					.sort(
-						(a, b) =>
-							sign * compareValues(key(a), key(b)) ||
-							(sort.key === "role" ? sign * a.company.localeCompare(b.company) : 0),
-					),
+			.flatMap((status) => active.filter((lane) => lane.category === status))
+			.map((lane) => ({
+				lane,
+				rows: (rowsByLane.get(lane.id) ?? []).sort(
+					(a, b) =>
+						compareValues(key(a), key(b), a.id, b.id, sort.direction) ||
+						(sort.key === "role" ? sign * a.company.localeCompare(b.company) : 0) ||
+						a.id.localeCompare(b.id),
+				),
 			}))
 			.filter((group) => group.rows.length > 0);
-	}, [applications, showClosed, sort]);
+	}, [applications, showClosed, sort, lanes, active, timeZone, now, hints]);
 
-	const toggleGroup = (status: ApplicationStatus) =>
+	const ordered = groups.flatMap(({ lane, rows }) => (collapsed.has(lane.id) ? [] : rows));
+	const rowRef = (id: string, node: HTMLButtonElement | null) => {
+		const previous = rowButtons.current.get(id);
+		if (!node && previous === document.activeElement) restoreFocus.current = id;
+		if (node) rowButtons.current.set(id, node);
+		else rowButtons.current.delete(id);
+	};
+	useLayoutEffect(() => {
+		const id = restoreFocus.current;
+		restoreFocus.current = null;
+		if (id && document.activeElement === document.body) rowButtons.current.get(id)?.focus();
+	});
+	const step = (id: string, direction: number) => {
+		const index = ordered.findIndex((row) => row.id === id);
+		if (index < 0) return;
+		const next = ordered[Math.max(0, Math.min(ordered.length - 1, index + direction))];
+		if (next) rowButtons.current.get(next.id)?.focus();
+	};
+	const move = (id: string, status: ApplicationStatus) => {
+		const application = ordered.find((row) => row.id === id);
+		if (!application || lanesPending || lanesError) return;
+		const lane = getCategoryLane(lanes, status);
+		if (getDisplayLane(lanes, application).id === lane.id) return;
+		moveWithUndo({ applications: [application], lane, description: t`Moved to ${getLaneLabel(lane)}` });
+	};
+	const followedUp = (id: string) => {
+		const application = ordered.find((row) => row.id === id);
+		if (!application || application.status === "saved" || application.status === "closed" || logFollowUp.isPending)
+			return;
+		logFollowUp.mutate({ id });
+	};
+
+	const toggleGroup = (status: string) =>
 		setCollapsed((current) => {
 			const next = new Set(current);
 			if (next.has(status)) next.delete(status);
@@ -135,22 +205,31 @@ export function ApplicationList({ applications, showClosed, selectedId, onOpen }
 	);
 
 	return (
-		<div className="grid min-w-0 content-start gap-3">
+		<div
+			className="grid min-w-0 content-start gap-3"
+			style={{ paddingBottom: checkedIds.length ? selectionBarSpace : undefined }}
+		>
 			<table className={cn("w-full border-collapse text-sm", !phone && "table-fixed")}>
 				{!phone && (
 					<thead>
 						<tr className="border-b border-line text-xs text-ink-3">
 							<th scope="col" className="w-10 ps-3">
-								<span className="sr-only">
-									<Trans>Select</Trans>
-								</span>
+								<Checkbox
+									checked={visible.length > 0 && checkedIds.length === visible.length}
+									indeterminate={checkedIds.length > 0 && checkedIds.length < visible.length}
+									disabled={visible.length === 0}
+									onCheckedChange={(on) =>
+										setChecked(on ? new Set(visible.map((application) => application.id)) : new Set())
+									}
+									aria-label={t`Select all visible applications`}
+								/>
 							</th>
 							{header("role", t`Role`)}
 							{header("next", t`Next step`, "w-1/4")}
 							<th scope="col" className="w-32 px-2 text-start font-medium max-xl:hidden">
 								<Trans>Stage</Trans>
 							</th>
-							<th scope="col" className="w-20 px-2 text-start font-medium">
+							<th scope="col" className="w-36 px-2 text-start font-medium">
 								<Trans>Sent</Trans>
 							</th>
 							{header("updated", t`Updated`, "w-28 max-lg:hidden")}
@@ -158,11 +237,11 @@ export function ApplicationList({ applications, showClosed, selectedId, onOpen }
 					</thead>
 				)}
 
-				{groups.map(({ status, rows }) => {
-					const open = !collapsed.has(status);
-					const groupId = `applications-group-${status}`;
+				{groups.map(({ lane, rows }) => {
+					const open = !collapsed.has(lane.id);
+					const groupId = `applications-group-${lane.id}`;
 					return (
-						<tbody key={status} aria-labelledby={groupId}>
+						<tbody key={lane.id} aria-labelledby={groupId}>
 							<tr>
 								<th
 									scope="colgroup"
@@ -173,8 +252,8 @@ export function ApplicationList({ applications, showClosed, selectedId, onOpen }
 										type="button"
 										id={groupId}
 										aria-expanded={open}
-										onClick={() => toggleGroup(status)}
-										className="flex h-9 items-center gap-2 rounded-md px-1.5 text-sm font-semibold transition-colors hover:bg-hover"
+										onClick={() => toggleGroup(lane.id)}
+										className="flex h-9 max-w-full min-w-0 items-center gap-2 rounded-md px-1.5 text-sm font-semibold transition-colors hover:bg-hover"
 									>
 										<Icon
 											name="caret-right"
@@ -183,11 +262,11 @@ export function ApplicationList({ applications, showClosed, selectedId, onOpen }
 										/>
 										<span
 											aria-hidden="true"
-											className="size-2 rounded-sm"
-											style={{ background: getStageColor(status) }}
+											className="size-2 shrink-0 rounded-sm"
+											style={{ background: lane.color }}
 										/>
-										{getStageLabel(status)}
-										<span className="font-mono text-xs font-normal text-ink-3">{rows.length}</span>
+										<span className="truncate">{getLaneLabel(lane)}</span>
+										<span className="font-mono text-xs font-normal text-ink-3">{i18n.number(rows.length)}</span>
 									</button>
 								</th>
 							</tr>
@@ -196,11 +275,17 @@ export function ApplicationList({ applications, showClosed, selectedId, onOpen }
 									<ApplicationRow
 										key={application.id}
 										application={application}
+										lane={lane}
 										phone={phone}
 										selected={application.id === selectedId}
 										checked={checked.has(application.id)}
 										onCheck={toggleRow}
 										onOpen={onOpen}
+										onTagSelect={onTagSelect}
+										rowRef={rowRef}
+										onStep={step}
+										onMove={move}
+										onFollowUp={followedUp}
 									/>
 								))}
 						</tbody>
@@ -213,13 +298,19 @@ export function ApplicationList({ applications, showClosed, selectedId, onOpen }
 				{checkedIds.length > 0 && (
 					<m.div
 						key="bulk-bar"
+						ref={selectionBarRef}
 						initial={{ opacity: 0, transform: "translateY(100%)" }}
 						animate={{ opacity: 1, transform: "translateY(0%)" }}
 						exit={{ opacity: 0, transform: "translateY(100%)", transition: { duration: D2 * EXIT, ease: EASE } }}
 						transition={{ duration: D2, ease: EASE }}
-						className="sticky bottom-4 z-20 justify-self-center max-sm:bottom-[calc(69px+env(safe-area-inset-bottom))]"
+						className="fixed inset-x-0 bottom-6 z-30 mx-auto w-fit max-w-[calc(100vw-32px)] max-sm:bottom-[calc(69px+env(safe-area-inset-bottom))]"
 					>
-						<BulkBar ids={checkedIds} onDone={() => setChecked(new Set())} />
+						<BulkBar
+							ids={checkedIds}
+							allSelected={checkedIds.length === visible.length}
+							onSelectAll={() => setChecked(new Set(visible.map((application) => application.id)))}
+							onDone={() => setChecked(new Set())}
+						/>
 					</m.div>
 				)}
 			</AnimatePresence>
@@ -228,25 +319,80 @@ export function ApplicationList({ applications, showClosed, selectedId, onOpen }
 }
 
 type ApplicationRowProps = {
-	application: Application;
+	application: ApplicationSummary;
+	lane: ApplicationLane;
 	phone: boolean;
 	selected: boolean;
 	checked: boolean;
+	rowRef: (id: string, node: HTMLButtonElement | null) => void;
+	onStep: (id: string, direction: number) => void;
+	onMove: (id: string, status: ApplicationStatus) => void;
+	onFollowUp: (id: string) => void;
 	onCheck: (id: string) => void;
-	onOpen: (application: Application) => void;
+	onOpen: (application: ApplicationSummary) => void;
+	onTagSelect?: ((tag: string) => void) | undefined;
 };
 
 // Memoized with id-taking callbacks, so one row's change doesn't re-render the other rows.
 const ApplicationRow = memo(function ApplicationRow({
 	application,
+	lane,
 	phone,
 	selected,
 	checked,
+	rowRef,
+	onStep,
+	onMove,
+	onFollowUp,
 	onCheck,
 	onOpen,
+	onTagSelect,
 }: ApplicationRowProps) {
+	const openRef = useRef<HTMLButtonElement>(null);
+	useHotkeys(
+		[
+			{ hotkey: "J" as const, callback: () => onStep(application.id, 1), meta: { name: t`Next application` } },
+			{ hotkey: "K" as const, callback: () => onStep(application.id, -1), meta: { name: t`Previous application` } },
+			{ hotkey: "Enter" as const, callback: () => onOpen(application), meta: { name: t`Open application` } },
+			{ hotkey: "X" as const, callback: () => onCheck(application.id), meta: { name: t`Toggle selection` } },
+			{ hotkey: "F" as const, callback: () => onFollowUp(application.id), meta: { name: t`Followed up` } },
+			...PIPELINE.map((status, index) => ({
+				hotkey: `${index + 1}` as "1" | "2" | "3" | "4" | "5",
+				callback: () => onMove(application.id, status),
+				meta: { name: t`Moved to ${getStageLabel(status)}` },
+			})),
+		].map(({ callback, meta, ...binding }) => ({
+			...binding,
+			options: { meta },
+			callback: (event: KeyboardEvent) => {
+				if (
+					!event.repeat &&
+					!event.isComposing &&
+					event.keyCode !== 229 &&
+					!event.ctrlKey &&
+					!event.metaKey &&
+					!event.altKey &&
+					!event.shiftKey
+				)
+					callback();
+			},
+		})),
+		{ target: openRef, requireReset: true, ignoreInputs: true },
+	);
 	const { i18n } = useLingui();
-	const next = describeNextStep(getNextStep(application), application, i18n.locale);
+	const { timeZone } = useCareerTime();
+	const hints = useOfferHints(application.status === "offer");
+	const { lanes } = useApplicationLanes();
+	const accepted = application.status === "closed" && application.closedReason === "accepted";
+	const stage = accepted
+		? getStageDisplay(lanes, application)
+		: { color: lane.color, label: getLaneLabel(lane), accepted: false };
+	const next = describeNextStep(
+		getNextStep(application, undefined, timeZone, offerHintFor(hints, application.id)),
+		application,
+		i18n.locale,
+		timeZone,
+	);
 	const sent = application.status !== "saved";
 	const tone = next.tone === "warn" ? "text-warn-text" : next.tone === "muted" ? "text-ink-3" : "text-ink-2";
 
@@ -260,26 +406,46 @@ const ApplicationRow = memo(function ApplicationRow({
 	);
 
 	const openButton = (
-		<button type="button" className="grid min-w-0 cursor-pointer text-start">
-			<span className="truncate font-medium">{application.role}</span>
-			<span className="truncate text-xs text-ink-3">
-				{phone
-					? `${application.company} · ${next.title}`
-					: [application.company, application.location].filter(Boolean).join(" · ")}
+		<button
+			type="button"
+			ref={(node) => {
+				openRef.current = node;
+				rowRef(application.id, node);
+			}}
+			data-application-open
+			aria-keyshortcuts="j k Enter 1 2 3 4 5 x f"
+			className="focus-visible:outline-focus grid min-w-0 cursor-pointer rounded-sm text-start focus-visible:outline-2 focus-visible:outline-offset-4"
+		>
+			<span dir="auto" className="truncate font-medium">
+				{application.role}
 			</span>
+			{/* The company keeps its own direction; on phones the next step after it is interface text. */}
+			{phone ? (
+				<span className="truncate text-xs text-ink-3">
+					<bdi>{application.company}</bdi> · {next.title}
+				</span>
+			) : (
+				<span dir="auto" className="truncate text-xs text-ink-3">
+					{[application.company, application.location].filter(Boolean).join(" · ")}
+				</span>
+			)}
 		</button>
 	);
 
 	if (phone) {
 		return (
 			<tr
+				data-application-id={application.id}
 				onClick={() => onOpen(application)}
 				className={cn("cursor-pointer border-b border-line", selected && "bg-accent-soft/50")}
 			>
 				<td className="py-2.5 ps-1">
 					<div className="flex items-center gap-3">
 						{initial}
-						{openButton}
+						<div className="flex min-w-0 flex-1 flex-col gap-0.5">
+							{openButton}
+							<TagChips tags={application.tags} onSelect={onTagSelect} className="ms-0" />
+						</div>
 						<Icon name="caret-right" size={20} className="ms-auto shrink-0 text-ink-3" />
 					</div>
 				</td>
@@ -289,6 +455,7 @@ const ApplicationRow = memo(function ApplicationRow({
 
 	return (
 		<tr
+			data-application-id={application.id}
 			onClick={() => onOpen(application)}
 			className={cn(
 				"cursor-pointer border-b border-line transition-colors duration-quick hover:bg-hover",
@@ -305,7 +472,14 @@ const ApplicationRow = memo(function ApplicationRow({
 			<td className="py-2 pe-2">
 				<div className="flex items-center gap-3">
 					{initial}
-					{openButton}
+					<div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1.5">
+						<div className="col-start-1 row-span-2 min-w-0">{openButton}</div>
+						<TagChips
+							tags={application.tags}
+							onSelect={onTagSelect}
+							className="col-start-2 row-start-2 ms-0 self-center"
+						/>
+					</div>
 				</div>
 			</td>
 			<td className="px-2">
@@ -315,24 +489,51 @@ const ApplicationRow = memo(function ApplicationRow({
 				</span>
 			</td>
 			<td className="px-2 max-xl:hidden">
-				<span className="flex items-center gap-1.5 text-ink-2">
-					<span
-						aria-hidden="true"
-						className="size-2 rounded-sm"
-						style={{ background: getStageColor(application.status) }}
-					/>
-					{getStageLabel(application.status)}
+				<span className="flex min-w-0 items-center gap-1.5 text-ink-2">
+					<span aria-hidden="true" className="size-2 shrink-0 rounded-sm" style={{ background: stage.color }} />
+					{stage.accepted && <Icon name="check" size={14} className="shrink-0 text-accent-text" />}
+					<span className="truncate">{stage.label}</span>
 				</span>
 			</td>
 			<td className="px-2">
-				{application.resumeId || application.coverLetterId ? (
-					<span className="flex items-center gap-1 text-ink-2">
-						{application.resumeId && <Icon name="file-text" size={18} aria-label={t`Resume`} />}
-						{application.coverLetterId && <Icon name="envelope-simple" size={18} aria-label={t`Cover letter`} />}
+				{application.resumeId ||
+				application.coverLetterId ||
+				application.resumeFileUrl ||
+				application.coverLetterUrl ? (
+					// Before the job is applied to, the documents are only linked: show them muted and say so.
+					<span
+						className={cn("flex items-center gap-1", sent ? "text-ink-2" : "text-ink-3 opacity-70")}
+						title={sent ? undefined : t`Linked · not sent yet`}
+					>
+						{!sent && <span className="sr-only">{t`Linked · not sent yet`}</span>}
+						{application.resumeFileUrl && (
+							<>
+								<Icon name="file-pdf" size={18} />
+								<span className="sr-only">{t`Resume file`}</span>
+							</>
+						)}
+						{application.coverLetterUrl && (
+							<>
+								<Icon name="file-pdf" size={18} />
+								<span className="sr-only">{t`Cover letter file`}</span>
+							</>
+						)}
+						{application.resumeId && (
+							<>
+								<Icon name="file-text" size={18} />
+								<span className="sr-only">{t`Resume`}</span>
+							</>
+						)}
+						{application.coverLetterId && (
+							<>
+								<Icon name="envelope-simple" size={18} />
+								<span className="sr-only">{t`Cover letter`}</span>
+							</>
+						)}
 					</span>
 				) : (
 					<span className={cn("text-xs", sent ? "text-warn-text" : "text-ink-3")}>
-						<Trans>None</Trans>
+						<Trans>No documents attached</Trans>
 					</span>
 				)}
 			</td>
@@ -343,12 +544,21 @@ const ApplicationRow = memo(function ApplicationRow({
 	);
 });
 
-type BulkBarProps = { ids: string[]; onDone: () => void };
+type BulkBarProps = {
+	ids: string[];
+	allSelected: boolean;
+	onSelectAll: () => void;
+	onDone: () => void;
+};
 
-/** For the checked rows: move them, tag them, close them with a reason, or delete them (after asking). */
-function BulkBar({ ids, onDone }: BulkBarProps) {
+/** For the checked rows: move them or close them (with Undo), tag them, or delete them (after asking). */
+function BulkBar({ ids, allSelected, onSelectAll, onDone }: BulkBarProps) {
+	const scope = `applications-bulk-${useId()}`;
 	const invalidate = useInvalidateApplications();
+	const moveWithUndo = useMoveWithUndo();
+	const rows = ids.map((id) => ({ id }));
 	const confirm = useConfirm();
+	const { lanes, active } = useApplicationLanes();
 	const [tag, setTag] = useState("");
 
 	const bulkUpdate = useMutation({
@@ -363,97 +573,136 @@ function BulkBar({ ids, onDone }: BulkBarProps) {
 		onError: () => toast.add({ type: "error", description: t`Couldn't update the applications. Try again.` }),
 	});
 	const bulkDelete = useMutation({
-		...orpc.applications.bulkDelete.mutationOptions(),
+		...orpc.applications.bulkTrash.mutationOptions(),
 		onSuccess: (result) => {
 			invalidate();
 			onDone();
 			toast.add({
-				description: plural(result.deleted, { one: "# application deleted", other: "# applications deleted" }),
+				description: t`Moved ${result.deleted} to Trash.`,
 			});
 		},
 		onError: () => toast.add({ type: "error", description: t`Couldn't delete the applications. Try again.` }),
 	});
+	const disabled = ids.length > 200 || bulkUpdate.isPending || bulkDelete.isPending;
 
 	return (
-		<div className="flex flex-wrap items-center gap-1.5 rounded-xl bg-ink px-3 py-2 text-bg shadow-e3">
-			<span className="me-1 text-sm font-semibold">
+		<div
+			role="toolbar"
+			aria-label={t`Applications`}
+			className="flex flex-wrap items-center gap-1 rounded-xl border border-line bg-raised p-1.5 text-ink shadow-e3"
+		>
+			<span className="px-2 text-sm font-semibold whitespace-nowrap" aria-live="polite">
 				<Plural value={ids.length} one="# selected" other="# selected" />
 			</span>
-
-			<DropdownMenu>
-				<DropdownMenuTrigger render={<Button size="sm" variant="secondary" />}>
-					<Icon name="arrow-right" size={16} />
-					<Trans>Move to…</Trans>
-				</DropdownMenuTrigger>
-				<DropdownMenuContent align="start">
-					{PIPELINE.map((status) => (
-						<DropdownMenuItem key={status} onClick={() => bulkUpdate.mutate({ ids, status })}>
-							<span aria-hidden="true" className="size-2 rounded-sm" style={{ background: getStageColor(status) }} />
-							{getStageLabel(status)}
-						</DropdownMenuItem>
-					))}
-				</DropdownMenuContent>
-			</DropdownMenu>
+			{!allSelected && (
+				<Button size="sm" variant="ghost" disabled={disabled} onClick={onSelectAll}>
+					<Trans>Select all</Trans>
+				</Button>
+			)}
+			{ids.length > 200 && (
+				<p role="status" className="w-full px-2 text-sm text-warn-text">
+					<Trans>Choose up to 200 applications per bulk action.</Trans>
+				</p>
+			)}
 
 			<Popover>
-				<PopoverTrigger render={<Button size="sm" variant="secondary" />}>
-					<Icon name="tag" size={16} />
-					<Trans>Add tag</Trans>
+				<PopoverTrigger render={<Button size="sm" variant="ghost" disabled={disabled} />}>
+					<Icon name="tag" />
+					<Trans>Tags…</Trans>
 				</PopoverTrigger>
 				<PopoverContent align="start" className="w-60 p-2">
-					<form
-						className="flex gap-1.5"
-						onSubmit={(event) => {
-							event.preventDefault();
-							if (!tag.trim()) return;
-							bulkUpdate.mutate({ ids, addTags: [tag.trim()] });
-							setTag("");
-						}}
-					>
-						<Input aria-label={t`Tag`} value={tag} onChange={(event) => setTag(event.target.value)} autoFocus />
-						<Button size="sm" type="submit" disabled={!tag.trim()}>
-							<Trans>Add</Trans>
-						</Button>
-					</form>
+					<HotkeysProvider scope={`${scope}-tags`} exclusive>
+						<form
+							className="flex gap-1.5"
+							onSubmit={(event) => {
+								event.preventDefault();
+								if (disabled || !tag.trim()) return;
+								bulkUpdate.mutate({ ids, addTags: [tag.trim()] });
+								setTag("");
+							}}
+						>
+							<Input aria-label={t`Tag`} value={tag} onChange={(event) => setTag(event.target.value)} autoFocus />
+							<Button size="sm" type="submit" disabled={disabled || !tag.trim()}>
+								<Trans>Add</Trans>
+							</Button>
+						</form>
+					</HotkeysProvider>
 				</PopoverContent>
 			</Popover>
 
 			<DropdownMenu>
-				<DropdownMenuTrigger render={<Button size="sm" variant="secondary" />}>
-					<Trans>Close…</Trans>
+				<DropdownMenuTrigger render={<Button size="sm" variant="ghost" disabled={disabled} />}>
+					<Icon name="arrow-right" />
+					<Trans>Move to…</Trans>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent align="start">
-					{CLOSED_REASONS.map((reason) => (
-						<DropdownMenuItem
-							key={reason}
-							onClick={() => bulkUpdate.mutate({ ids, status: "closed", closedReason: reason })}
-						>
-							{getClosedReasonLabel(reason)}
-						</DropdownMenuItem>
-					))}
+					<HotkeysProvider scope={`${scope}-0`} exclusive>
+						{active
+							.filter((lane) => lane.category !== "closed")
+							.map((lane) => (
+								<DropdownMenuItem
+									key={lane.id}
+									onClick={() => {
+										const label = getLaneLabel(lane);
+										moveWithUndo({
+											applications: rows,
+											lane,
+											description: plural(ids.length, {
+												one: `# application moved to ${label}`,
+												other: `# applications moved to ${label}`,
+											}),
+										});
+										onDone();
+									}}
+								>
+									<span aria-hidden="true" className="size-2 shrink-0 rounded-sm" style={{ background: lane.color }} />
+									<span className="truncate">{getLaneLabel(lane)}</span>
+								</DropdownMenuItem>
+							))}
+					</HotkeysProvider>
 				</DropdownMenuContent>
 			</DropdownMenu>
 
+			<DropdownMenu>
+				<DropdownMenuTrigger render={<Button size="sm" variant="ghost" disabled={disabled} />}>
+					<Trans>Close…</Trans>
+				</DropdownMenuTrigger>
+				<DropdownMenuContent align="start">
+					<HotkeysProvider scope={`${scope}-1`} exclusive>
+						<ClosedLaneItems
+							lanes={active}
+							onPick={(lane, reason) => {
+								moveWithUndo({
+									applications: rows,
+									lane: lane ?? getCategoryLane(lanes, "closed"),
+									closedReason: lane ? reason : (reason ?? null),
+									description: plural(ids.length, { one: "# application closed", other: "# applications closed" }),
+								});
+								onDone();
+							}}
+						/>
+					</HotkeysProvider>
+				</DropdownMenuContent>
+			</DropdownMenu>
+
+			<IconButton icon="x" size="icon-sm" label={t`Clear selection`} className="text-ink-2" onClick={onDone} />
 			<Button
 				size="sm"
-				variant="secondary"
-				className="text-danger-text"
+				variant="ghost"
+				disabled={disabled}
+				className="text-danger-text hover:bg-danger-soft"
 				onClick={async () => {
-					const confirmed = await confirm(
-						plural(ids.length, { one: "Delete # application?", other: "Delete # applications?" }),
-						{
-							description: t`They and their timelines are deleted permanently. This can't be undone.`,
-							confirmText: plural(ids.length, { one: "Delete # application", other: "Delete # applications" }),
-						},
-					);
+					const confirmed = await confirm(t`Move to Trash`, {
+						description: t`Applications and their timelines can be restored from Trash.`,
+						confirmText: t`Move to Trash`,
+						cancelText: plural(ids.length, { one: "Keep application", other: "Keep applications" }),
+						variant: "danger",
+					});
 					if (confirmed) bulkDelete.mutate({ ids });
 				}}
 			>
-				<Trans>Delete…</Trans>
-			</Button>
-
-			<Button size="sm" variant="ghost" className="ms-auto text-bg hover:bg-bg/15" onClick={onDone}>
-				<Trans>Clear</Trans>
+				<Icon name="trash" />
+				<Trans>Move to Trash</Trans>
 			</Button>
 		</div>
 	);

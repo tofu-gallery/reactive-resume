@@ -1,8 +1,10 @@
 import type { ColorToken, type as typeScale } from "./tokens";
 import type { ReactNode } from "react";
 import type { TextProps as NativeTextProps, StyleProp, ViewProps, ViewStyle } from "react-native";
-import { RefreshControl, ScrollView, Text as NativeText, View } from "react-native";
+import { RefreshControl, Text as NativeText, View } from "react-native";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useKeyboardScrollSpace } from "./keyboard";
 import { useTheme } from "./theme";
 import { usePullRefresh } from "./use-pull-refresh";
 
@@ -57,6 +59,7 @@ export type ScreenProps = {
 export function Screen({ children, scroll = true, edges = [], contentStyle, onLayout, onRefresh }: ScreenProps) {
 	const { colors, space } = useTheme();
 	const insets = useSafeAreaInsets();
+	const keyboardSpace = useKeyboardScrollSpace();
 	const pull = usePullRefresh(...(onRefresh ? [onRefresh] : []));
 	const padding = [{ padding: space.s4, gap: space.s4 }, contentStyle];
 
@@ -72,8 +75,11 @@ export function Screen({ children, scroll = true, edges = [], contentStyle, onLa
 			}}
 		>
 			{scroll ? (
-				<ScrollView
+				<KeyboardAwareScrollView
+					extraKeyboardSpace={keyboardSpace}
 					onLayout={onLayout}
+					bottomOffset={space.s4}
+					keyboardShouldPersistTaps="handled"
 					contentInsetAdjustmentBehavior="automatic"
 					contentContainerStyle={padding}
 					alwaysBounceVertical
@@ -82,7 +88,7 @@ export function Screen({ children, scroll = true, edges = [], contentStyle, onLa
 					}
 				>
 					{children}
-				</ScrollView>
+				</KeyboardAwareScrollView>
 			) : (
 				<View onLayout={onLayout} style={[{ flex: 1 }, padding]}>
 					{children}

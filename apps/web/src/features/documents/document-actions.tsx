@@ -1,10 +1,14 @@
+import type { DocumentsSearch } from "./documents-page";
 import type { DocumentSummary } from "./filter";
 import type { IconName } from "@reactive-resume/ui/components/icon";
-import { plural, t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural, t } from "@lingui/core/macro";
 import { Plural, Trans } from "@lingui/react/macro";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { lazy, Suspense, useRef, useState } from "react";
 import { useCopyToClipboard } from "usehooks-ts";
+import { publicResumeUrl } from "@reactive-resume/resume/sharing";
 import { Button } from "@reactive-resume/ui/components/button";
 import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from "@reactive-resume/ui/components/context-menu";
 import {
@@ -22,16 +26,21 @@ import {
 } from "@reactive-resume/ui/components/dropdown-menu";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { toast } from "@reactive-resume/ui/components/toast";
-import { publicResumeUrl } from "./filter";
+import { isolate } from "@reactive-resume/utils/string";
+import { useDocumentEffect } from "./library-session";
 import { useNewDocumentsStore } from "./new-documents";
+import { useExistingTags } from "./tag-suggestions";
 import { ChipInput } from "@/components/input/chip-input";
 import { useDialogStore } from "@/dialogs/store";
 import { applicationsListQueryOptions } from "@/features/applications/queries";
+import { useDocumentDownload } from "@/features/applications/use-document-download";
+import { useShareOrigin } from "@/features/resume/share/use-share-origin";
 import { useClosingValue } from "@/hooks/use-closing-value";
-import { useConfirm } from "@/hooks/use-confirm";
+import { useConfirm, usePrompt } from "@/hooks/use-confirm";
 import { authClient } from "@/libs/auth/client";
 import { toastError } from "@/libs/error-message";
 import { orpc } from "@/libs/orpc/client";
+import { confirmUndone } from "@/libs/undone";
 
 type Ref = { type: DocumentSummary["type"]; id: string };
 const ref = (document: DocumentSummary): Ref => ({ type: document.type, id: document.id });
@@ -47,7 +56,10 @@ function useRefreshDocuments() {
 }
 
 export function useDocumentActions() {
+	const onEffect = useDocumentEffect();
 	const confirm = useConfirm();
+	const prompt = usePrompt();
+	const navigate = useNavigate();
 	const openDialog = useDialogStore((state) => state.openDialog);
 	const markNew = useNewDocumentsStore((state) => state.markNew);
 	const refresh = useRefreshDocuments();
@@ -55,13 +67,35 @@ export function useDocumentActions() {
 	const rename = useMutation(
 		orpc.documents.rename.mutationOptions({
 			onSettled: refresh,
-			onError: (error) => toastError(error, t`Couldn't rename the document. Try again.`),
 		}),
 	);
 	const setLocked = useMutation(orpc.documents.setLocked.mutationOptions({ onSettled: refresh }));
-	const trash = useMutation(orpc.documents.trash.mutationOptions({ onSettled: refresh }));
-	const restore = useMutation(orpc.documents.restore.mutationOptions({ onSettled: refresh }));
-	const purge = useMutation(orpc.documents.purge.mutationOptions({ onSettled: refresh }));
+	const trash = useMutation(
+		orpc.documents.trash.mutationOptions({
+			onSuccess: (_result, document) => onEffect("trash", [document]),
+			onSettled: refresh,
+		}),
+	);
+	const restore = useMutation(
+		orpc.documents.restore.mutationOptions({
+			onSuccess: (_result, document) => onEffect("restore", [document]),
+			onSettled: refresh,
+		}),
+	);
+	// Undo counts what it brought back: restoring one that's already back (another tab) or gone changes nothing.
+	const restoreMany = useMutation(
+		orpc.documents.restoreMany.mutationOptions({
+			onSuccess: (result, input) =>
+				result.restored === input.documents.length ? onEffect("restore", input.documents) : undefined,
+			onSettled: refresh,
+		}),
+	);
+	const purge = useMutation(
+		orpc.documents.purge.mutationOptions({
+			onSuccess: (_result, document) => onEffect("purge", [document]),
+			onSettled: refresh,
+		}),
+	);
 	const duplicateResume = useMutation(orpc.resume.duplicate.mutationOptions({ onSettled: refresh }));
 	const duplicateLetter = useMutation(orpc.coverLetters.duplicate.mutationOptions({ onSettled: refresh }));
 
@@ -69,17 +103,44 @@ export function useDocumentActions() {
 		rename: (document: DocumentSummary, name: string) => {
 			const trimmed = name.trim();
 			if (!trimmed || trimmed === document.name) return;
-			rename.mutate({ ...ref(document), name: trimmed });
+			return rename.mutateAsync({ ...ref(document), name: trimmed });
 		},
 
 		duplicate: async (document: DocumentSummary) => {
-			const copied =
-				document.type === "resume"
-					? duplicateResume.mutateAsync({ id: document.id, name: t`${document.name} (copy)`, tags: document.tags })
-					: duplicateLetter.mutateAsync({ id: document.id }).then((letter) => letter.id);
 			try {
-				markNew(await copied);
-				toast.add({ description: t`Duplicated “${document.name}”` });
+				const suggested = await orpc.documents.suggestDuplicateName.call(ref(document));
+				const answer = await prompt(t`Duplicate`, {
+					defaultValue: suggested,
+					maxLength: 100,
+					confirmText: t`Duplicate`,
+				});
+				const name = answer?.trim().slice(0, 100);
+				if (!name) return;
+				const id =
+					document.type === "resume"
+						? await duplicateResume.mutateAsync({ id: document.id, name, tags: document.tags })
+						: (await duplicateLetter.mutateAsync({ id: document.id, name })).id;
+				markNew(id);
+				toast.add({
+					description: t`Duplicated “${document.name}”`,
+					actionProps: {
+						children: t`Rename`,
+						onClick: () => {
+							useNewDocumentsStore.getState().requestRename(id);
+							void navigate({
+								to: "/dashboard",
+								search: (previous: DocumentsSearch) => ({
+									...previous,
+									q: name,
+									type: document.type,
+									tags: [],
+									public: false,
+									sort: "created",
+								}),
+							});
+						},
+					},
+				});
 			} catch (error) {
 				toastError(error, t`Couldn't duplicate the document. Try again.`);
 			}
@@ -88,30 +149,35 @@ export function useDocumentActions() {
 		copyForJob: (document: DocumentSummary) =>
 			openDialog("document.new", { step: "copy", sourceResumeId: document.id }),
 
+		// The menu that called this unmounts on select, and a mutation's per-call callbacks with it: catch the promise.
 		setLocked: (document: DocumentSummary, isLocked: boolean) =>
-			setLocked.mutate(
-				{ ...ref(document), isLocked },
-				{
-					onError: (error) =>
-						toastError(
-							error,
-							isLocked ? t`Couldn't lock the document. Try again.` : t`Couldn't unlock the document. Try again.`,
-						),
-				},
-			),
+			void setLocked
+				.mutateAsync({ ...ref(document), isLocked })
+				.catch((error: unknown) =>
+					toastError(
+						error,
+						isLocked ? t`Couldn't lock the document. Try again.` : t`Couldn't unlock the document. Try again.`,
+					),
+				),
 
 		/** Undoable, so it doesn't ask first. */
 		trash: async (document: DocumentSummary) => {
 			try {
 				await trash.mutateAsync(ref(document));
 				toast.add({
-					description: t`“${document.name}” moved to Trash`,
+					description: t`“${isolate(document.name)}” moved to Trash`,
 					actionProps: {
 						children: t`Undo`,
+						// The trashed card has gone, and a mutation's own callbacks with it: catch the promise.
 						onClick: () =>
-							restore.mutate(ref(document), {
-								onError: (error) => toastError(error, t`Couldn't restore the document. Try again.`),
-							}),
+							void restoreMany
+								.mutateAsync({ documents: [ref(document)] })
+								.then(({ restored }) =>
+									restored > 0
+										? confirmUndone()
+										: toast.add({ description: t`Nothing to undo: it was already restored or deleted.` }),
+								)
+								.catch((error: unknown) => toastError(error, t`Couldn't restore the document. Try again.`)),
 					},
 				});
 			} catch (error) {
@@ -152,11 +218,38 @@ export function useDocumentActions() {
  * says how many changed. Locked documents keep their visibility, tags and place; letters have no public link.
  */
 export function useBatchActions() {
+	const onEffect = useDocumentEffect();
 	const refresh = useRefreshDocuments();
 	const setLocked = useMutation(orpc.documents.setLocked.mutationOptions());
-	const trash = useMutation(orpc.documents.trash.mutationOptions());
-	const restore = useMutation(orpc.documents.restore.mutationOptions());
+	const trash = useMutation(
+		orpc.documents.trash.mutationOptions({ onSuccess: (_result, document) => onEffect("trash", [document]) }),
+	);
+	const restoreMany = useMutation(
+		orpc.documents.restoreMany.mutationOptions({
+			onSuccess: (result, input) =>
+				result.restored === input.documents.length ? onEffect("restore", input.documents) : undefined,
+		}),
+	);
+	const purgeMany = useMutation(
+		orpc.documents.purgeMany.mutationOptions({
+			onSuccess: (result, input) =>
+				result.deleted === input.documents.length ? onEffect("purge", input.documents) : undefined,
+		}),
+	);
+	const emptyTrash = useMutation(
+		orpc.documents.emptyTrash.mutationOptions({
+			onSuccess: (result) => (result.deleted > 0 ? onEffect("purge") : undefined),
+		}),
+	);
 	const updateResume = useMutation(orpc.resume.update.mutationOptions());
+
+	// The server accepts a large selection, but splitting it keeps one request's body bounded on old clients that
+	// still load the whole library.
+	const batchSize = 500;
+	const chunks = <T,>(items: readonly T[]) =>
+		Array.from({ length: Math.ceil(items.length / batchSize) }, (_, index) =>
+			items.slice(index * batchSize, (index + 1) * batchSize),
+		);
 
 	const run = async (
 		documents: readonly DocumentSummary[],
@@ -175,7 +268,7 @@ export function useBatchActions() {
 			description:
 				done === total
 					? plural(done, { one: "# document updated", other: "# documents updated" })
-					: t`Updated ${done} of ${total}. Locked documents, and letters for public links, were skipped.`,
+					: t`Updated ${ph({ done: i18n.number(done) })} of ${ph({ total: i18n.number(total) })}. Locked documents, and letters for public links, were skipped.`,
 		});
 
 	return {
@@ -210,17 +303,101 @@ export function useBatchActions() {
 				description:
 					done.length === documents.length
 						? plural(done.length, { one: "# document moved to Trash", other: "# documents moved to Trash" })
-						: t`Moved ${done.length} of ${documents.length} to Trash. Locked documents were skipped.`,
+						: t`Moved ${i18n.number(done.length)} of ${i18n.number(documents.length)} to Trash. Locked documents were skipped.`,
 				actionProps: {
 					children: t`Undo`,
+					// Confirmed like a single Undo when everything came back; otherwise how many did. The server counts only
+					// documents it restored: one already back (another tab) or deleted since isn't counted.
 					onClick: () =>
-						void run(
-							done,
-							() => true,
-							(document) => restore.mutateAsync({ type: document.type, id: document.id }),
-						),
+						void (async () => {
+							let restored = 0;
+							let failure: unknown;
+							for (const group of chunks(done)) {
+								try {
+									restored += (await restoreMany.mutateAsync({ documents: group.map(ref) })).restored;
+								} catch (error) {
+									failure = error;
+								}
+							}
+							await refresh();
+							if (restored === done.length) return confirmUndone();
+							if (restored === 0 && failure) return toastError(failure, t`Couldn't restore them. Try again.`);
+							toast.add({
+								description: t`Restored ${ph({ restored: i18n.number(restored) })} of ${i18n.number(done.length)}.`,
+							});
+						})(),
 				},
 			});
+		},
+
+		/** Restore selected loaded documents in batches; the server skips any restored or deleted meanwhile. */
+		restore: async (documents: readonly DocumentSummary[]) => {
+			let restored = 0;
+			let failure: unknown;
+			for (const group of chunks(documents)) {
+				try {
+					const result = await restoreMany.mutateAsync({ documents: group.map(ref) });
+					restored += result.restored;
+				} catch (error) {
+					failure = error;
+				}
+			}
+			await refresh();
+			if (restored === documents.length)
+				toast.add({
+					description: plural(restored, { one: "# document restored", other: "# documents restored" }),
+				});
+			else if (restored === 0 && failure) toastError(failure, t`Couldn't restore the selected documents. Try again.`);
+			else if (restored > 0)
+				toast.add({
+					description: t`Restored ${ph({ restored: i18n.number(restored) })} of ${i18n.number(documents.length)}. Refresh and retry any that remain in Trash.`,
+				});
+			else toast.add({ description: t`No selected documents were restored. Refresh to see what remains.` });
+			return restored === documents.length && !failure;
+		},
+
+		/** The selected loaded documents, not every document in Trash. The server skips anything no longer in Trash. */
+		purge: async (documents: readonly DocumentSummary[]) => {
+			let deleted = 0;
+			let failure: unknown;
+			for (const group of chunks(documents)) {
+				try {
+					const result = await purgeMany.mutateAsync({ documents: group.map(ref) });
+					deleted += result.deleted;
+				} catch (error) {
+					failure = error;
+				}
+			}
+			await refresh();
+			if (deleted === documents.length)
+				toast.add({
+					description: plural(deleted, { one: "# document deleted forever", other: "# documents deleted forever" }),
+				});
+			else if (deleted === 0 && failure) toastError(failure, t`Couldn't delete the selected documents. Try again.`);
+			else if (deleted > 0)
+				toast.add({
+					description: t`Deleted ${ph({ deleted: i18n.number(deleted) })} of ${i18n.number(documents.length)} forever. Refresh to see what remains.`,
+				});
+			else toast.add({ description: t`No selected documents were deleted. Refresh to see what remains.` });
+			return deleted === documents.length && !failure;
+		},
+
+		/** Every document in this account's Trash, server-side; selected or loaded IDs don't limit it. */
+		emptyTrash: async () => {
+			try {
+				const result = await emptyTrash.mutateAsync({});
+				await refresh();
+				toast.add({
+					description:
+						result.deleted === 0
+							? t`Trash was already empty`
+							: plural(result.deleted, { one: "# document deleted forever", other: "# documents deleted forever" }),
+				});
+				return true;
+			} catch (error) {
+				toastError(error, t`Couldn't empty Trash. Try again.`);
+				throw error;
+			}
 		},
 	};
 }
@@ -239,7 +416,10 @@ type DocumentMenuProps = {
 	variant?: "dropdown" | "context";
 };
 
-/** Open, Copy public link, Rename, Duplicate, Copy for a job (or Link to application), Tags, Lock, then Move to Trash. */
+/**
+ * Open, Share… and Copy public link (resumes), Download PDF, Select, Rename, Duplicate, Copy for a job (or Link to
+ * application), Tags, Lock, then Move to Trash.
+ */
 export function DocumentMenuContent({
 	document,
 	onOpen,
@@ -250,9 +430,18 @@ export function DocumentMenuContent({
 	variant = "dropdown",
 }: DocumentMenuProps) {
 	const actions = useDocumentActions();
+	const navigate = useNavigate();
+	const { download, downloading } = useDocumentDownload();
+	const openDialog = useDialogStore((state) => state.openDialog);
 	const { data: session } = authClient.useSession();
 	const [, copy] = useCopyToClipboard();
-	const url = publicResumeUrl(document, session?.user.username);
+	const origin = useShareOrigin();
+	const username = session?.user.username;
+	// A resume's public address, or null while its link is off.
+	const url =
+		document.type === "resume" && document.isPublic && document.slug && username
+			? publicResumeUrl(origin, { username, slug: document.slug })
+			: null;
 
 	const trashEntries: MenuEntry[] = [
 		{ icon: "arrow-counter-clockwise", label: t`Restore`, onSelect: () => void actions.restore(document) },
@@ -260,6 +449,23 @@ export function DocumentMenuContent({
 	];
 	const liveEntries: MenuEntry[] = [
 		{ icon: "arrow-square-out", label: t`Open`, onSelect: onOpen },
+		...(document.type === "resume"
+			? [
+					{
+						icon: "share-network",
+						label: t`Share…`,
+						// The editor's Share view: public link, password, web page and download settings.
+						onSelect: () =>
+							void navigate({ to: "/builder/$resumeId", params: { resumeId: document.id }, search: { mode: "share" } }),
+					} satisfies MenuEntry,
+				]
+			: []),
+		{
+			icon: "file-pdf",
+			label: t`Download PDF`,
+			onSelect: () => void download(document.type, document.id),
+			disabled: downloading === document.id,
+		},
 		...(url
 			? [
 					{
@@ -275,9 +481,28 @@ export function DocumentMenuContent({
 		document.type === "resume"
 			? { icon: "briefcase", label: t`Copy for a job…`, onSelect: () => actions.copyForJob(document) }
 			: { icon: "briefcase", label: t`Link to application…`, onSelect: onLink, disabled: document.isLocked },
+		...(document.type === "resume"
+			? [
+					{
+						icon: "link-simple-horizontal",
+						label: t`Link to application…`,
+						onSelect: onLink,
+						disabled: document.isLocked,
+					} satisfies MenuEntry,
+				]
+			: []),
+		...(document.type === "resume"
+			? [
+					{
+						icon: "envelope-simple",
+						label: t`Write a letter…`,
+						onSelect: () => openDialog("document.new", { context: "letters", sourceResumeId: document.id }),
+					} satisfies MenuEntry,
+				]
+			: []),
 		{ icon: "tag", label: t`Tags…`, onSelect: onTags, disabled: document.isLocked },
 		document.isLocked
-			? { icon: "lock-open", label: t`Unlock`, onSelect: () => actions.setLocked(document, false) }
+			? { icon: "lock-open", label: t`Unlock editing`, onSelect: () => actions.setLocked(document, false) }
 			: { icon: "lock", label: t`Lock editing`, onSelect: () => actions.setLocked(document, true) },
 		{
 			icon: "trash",
@@ -295,15 +520,16 @@ export function DocumentMenuContent({
 
 	return (
 		<Content align="end" className="w-60">
+			{/* Visible, not a tooltip: keyboard and touch users never see a title. */}
+			{entries.some((entry) => entry.disabled) && (
+				<p className="px-2 pt-1 pb-1.5 text-xs text-ink-3">
+					<Trans>Locked. Unlock it to rename, tag or move it to Trash.</Trans>
+				</p>
+			)}
 			{entries.map((entry) => (
 				<div key={entry.label} className="contents">
 					{entry.danger && <Separator />}
-					<Item
-						variant={entry.danger ? "destructive" : "default"}
-						disabled={entry.disabled}
-						onClick={entry.onSelect}
-						title={entry.disabled ? t`Unlock it first` : undefined}
-					>
+					<Item variant={entry.danger ? "destructive" : "default"} disabled={entry.disabled} onClick={entry.onSelect}>
 						<Icon name={entry.icon} />
 						{entry.label}
 					</Item>
@@ -328,12 +554,14 @@ export function TagsDialog({ documents: requested, onClose }: TagsDialogProps) {
 	// Closing keeps the documents' tags on screen until the dialog has faded out.
 	const [documents, onDocumentsOpenChangeComplete] = useClosingValue(requested);
 	const [tags, setTags] = useState<string[] | null>(null);
+	const commitTags = useRef<(() => string[]) | null>(null);
 	const setDocumentTags = useMutation(orpc.documents.setTags.mutationOptions());
 	const shared = documents ? sharedTags(documents) : [];
+	const suggestions = useExistingTags(documents?.map((document) => document.type) ?? [], requested !== null);
 
 	const save = async () => {
 		if (!documents) return;
-		const next = tags ?? shared;
+		const next = commitTags.current?.() ?? tags ?? shared;
 		const removed = shared.filter((tag) => !next.includes(tag));
 		const added = next.filter((tag) => !shared.includes(tag));
 		const results = await Promise.allSettled(
@@ -366,7 +594,7 @@ export function TagsDialog({ documents: requested, onClose }: TagsDialogProps) {
 				if (!open) setTags(null);
 			}}
 		>
-			<DialogContent>
+			<DialogContent closeLabel={t`Close`}>
 				<DialogHeader>
 					<DialogTitle>
 						{documents && documents.length > 1 ? (
@@ -386,7 +614,14 @@ export function TagsDialog({ documents: requested, onClose }: TagsDialogProps) {
 						)}
 					</DialogDescription>
 				</DialogHeader>
-				<ChipInput value={tags ?? shared} onChange={setTags} />
+				<ChipInput
+					commitRef={commitTags}
+					value={tags ?? shared}
+					onChange={setTags}
+					placeholder={t`Add a tag…`}
+					suggestions={suggestions}
+					suggestionsLabel={t`Your tags`}
+				/>
 				<DialogFooter>
 					<Button onClick={() => void save()} disabled={setDocumentTags.isPending}>
 						<Trans>Save tags</Trans>
@@ -397,6 +632,13 @@ export function TagsDialog({ documents: requested, onClose }: TagsDialogProps) {
 	);
 }
 
+// The Save a job form reads postings and is large; the library loads it only when someone adds a job here.
+const AddApplicationDialog = lazy(() =>
+	import("@/features/applications/components/add-application-dialog").then((module) => ({
+		default: module.AddApplicationDialog,
+	})),
+);
+
 type LinkApplicationDialogProps = { document: DocumentSummary | null; onClose: () => void };
 
 /** Link to application… for letters: the job the letter is for. */
@@ -406,12 +648,14 @@ export function LinkApplicationDialog({ document: requested, onClose }: LinkAppl
 	const [document, onOpenChangeComplete] = useClosingValue(requested);
 	const { data: applications } = useQuery({ ...applicationsListQueryOptions(), enabled: requested !== null });
 	const link = useMutation(orpc.documents.linkApplication.mutationOptions());
+	const [addingJob, setAddingJob] = useState(false);
 
 	const choose = async (applicationId: string | null) => {
 		if (!document) return;
 		try {
 			await link.mutateAsync({ type: document.type, id: document.id, applicationId });
 			await queryClient.invalidateQueries({ queryKey: orpc.documents.key() });
+			await queryClient.invalidateQueries({ queryKey: orpc.applications.key() });
 			onClose();
 		} catch (error) {
 			toastError(
@@ -421,6 +665,9 @@ export function LinkApplicationDialog({ document: requested, onClose }: LinkAppl
 		}
 	};
 
+	const submitted =
+		document?.type === "letter" &&
+		applications?.some((item) => item.coverLetterId === document.id && item.sentCoverLetterVersionId);
 	const jobs = (applications ?? []).filter((application) => application.status !== "closed");
 
 	return (
@@ -429,43 +676,81 @@ export function LinkApplicationDialog({ document: requested, onClose }: LinkAppl
 			onOpenChange={(open) => !open && onClose()}
 			onOpenChangeComplete={onOpenChangeComplete}
 		>
-			<DialogContent>
+			<DialogContent closeLabel={t`Close`}>
 				<DialogHeader>
 					<DialogTitle>
 						<Trans>Link to application</Trans>
 					</DialogTitle>
 					<DialogDescription>
-						<Trans>The application this letter is for.</Trans>
+						<Trans>The application this document is for.</Trans>
 					</DialogDescription>
 				</DialogHeader>
+				{submitted && (
+					<p className="text-sm text-ink-2">
+						<Trans>This letter is recorded as sent. Its application link stays with that submission.</Trans>
+					</p>
+				)}
 				<div className="grid max-h-72 gap-1 overflow-y-auto">
 					{jobs.map((application) => (
 						<Button
 							key={application.id}
 							variant={document?.application?.id === application.id ? "secondary" : "ghost"}
 							className="h-auto justify-start py-2 text-start"
-							disabled={link.isPending}
+							disabled={
+								link.isPending ||
+								Boolean(submitted) ||
+								Boolean(
+									document?.type === "letter" &&
+									application.sentCoverLetterVersionId &&
+									application.coverLetterId !== document.id,
+								)
+							}
 							onClick={() => void choose(application.id)}
 						>
 							<Icon name="briefcase" className="text-ink-2" />
 							<span className="grid min-w-0">
 								<span className="truncate font-medium">{application.role}</span>
 								<span className="truncate text-xs text-ink-3">{application.company}</span>
+								{document?.type === "letter" &&
+									application.sentCoverLetterVersionId &&
+									application.coverLetterId !== document.id && (
+										<span className="text-xs text-ink-3">
+											<Trans>Letter already sent</Trans>
+										</span>
+									)}
 							</span>
 						</Button>
 					))}
 					{jobs.length === 0 && (
 						<p className="text-sm text-ink-2">
-							<Trans>No applications yet. Add one in Applications first.</Trans>
+							<Trans>No applications yet.</Trans>
 						</p>
 					)}
 				</div>
-				{document?.application && (
-					<DialogFooter>
-						<Button variant="ghost" disabled={link.isPending} onClick={() => void choose(null)}>
+				<DialogFooter>
+					{document?.application && (
+						<Button variant="ghost" disabled={link.isPending || Boolean(submitted)} onClick={() => void choose(null)}>
 							<Trans>Unlink</Trans>
 						</Button>
-					</DialogFooter>
+					)}
+					<Button
+						variant="secondary"
+						disabled={link.isPending || Boolean(submitted)}
+						onClick={() => setAddingJob(true)}
+					>
+						<Icon name="plus" />
+						<Trans>Add a job…</Trans>
+					</Button>
+				</DialogFooter>
+				{addingJob && (
+					<Suspense fallback={null}>
+						<AddApplicationDialog
+							forPicker
+							open
+							onOpenChange={setAddingJob}
+							onAdded={(applicationId) => void choose(applicationId)}
+						/>
+					</Suspense>
 				)}
 			</DialogContent>
 		</Dialog>

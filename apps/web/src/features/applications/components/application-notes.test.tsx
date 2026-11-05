@@ -18,7 +18,19 @@ vi.mock("@/libs/orpc/client", () => ({
 vi.mock("../use-application-actions", () => ({ useInvalidateApplications: () => mocks.invalidate }));
 vi.mock("@reactive-resume/ui/components/toast", () => ({ toast: { add: vi.fn() } }));
 
-afterEach(() => vi.resetAllMocks());
+afterEach(() => {
+	vi.resetAllMocks();
+	sessionStorage.clear();
+	localStorage.clear();
+});
+vi.mock("@tanstack/react-router", () => ({ useRouteContext: () => ({ session: { user: { id: "notes-owner" } } }) }));
+
+/** Types and leaves the field: leaving saves at once, so no test waits out the 800 ms typing pause. */
+function type(value: string) {
+	const field = screen.getByRole("textbox", { name: "Notes" });
+	fireEvent.change(field, { target: { value } });
+	fireEvent.blur(field);
+}
 
 function open(id: string, client = new QueryClient({ defaultOptions: { mutations: { retry: false } } })) {
 	i18n.load("en", {});
@@ -36,21 +48,24 @@ function open(id: string, client = new QueryClient({ defaultOptions: { mutations
 it("retains a failed note across closing and reopening, then retries it", async () => {
 	mocks.update.mockRejectedValue(new Error("offline"));
 	const view = open("failed-notes");
-	fireEvent.change(screen.getByRole("textbox", { name: "Notes" }), { target: { value: "Keep this draft" } });
-	await waitFor(() => expect(mocks.update).toHaveBeenCalled(), { timeout: 2000 });
+	type("Keep this draft");
+	await waitFor(() => expect(mocks.update).toHaveBeenCalled());
 	await act(async () => {
 		view.unmount();
 	});
-	mocks.update.mockResolvedValue({});
+	// Only the retry may count: the failed call already carried the same text.
+	mocks.update.mockReset().mockResolvedValue({});
 	open("failed-notes");
 	expect((screen.getByRole("textbox", { name: "Notes" }) as HTMLTextAreaElement).value).toBe("Keep this draft");
-	await waitFor(
-		() =>
-			expect(mocks.update).toHaveBeenLastCalledWith(
-				{ id: "failed-notes", notes: "Keep this draft" },
-				expect.anything(),
-			),
-		{ timeout: 2000 },
+	// A recovered draft waits for the user: leaving the field must not replay it over newer server notes.
+	await act(async () => {
+		fireEvent.blur(screen.getByRole("textbox", { name: "Notes" }));
+	});
+	expect(mocks.update).not.toHaveBeenCalled();
+	fireEvent.click(screen.getByRole("button", { name: "Save recovered draft" }));
+	fireEvent.blur(screen.getByRole("textbox", { name: "Notes" }));
+	await waitFor(() =>
+		expect(mocks.update).toHaveBeenCalledWith({ id: "failed-notes", notes: "Keep this draft" }, expect.anything()),
 	);
 });
 
@@ -59,11 +74,9 @@ it("keeps acknowledged notes in the cache when the sheet reopens before refetch"
 	const client = new QueryClient();
 	client.setQueryData(["application", "acknowledged-notes"], { notes: "Saved" });
 	const view = open("acknowledged-notes", client);
-	fireEvent.change(screen.getByRole("textbox", { name: "Notes" }), { target: { value: "Acknowledged draft" } });
-	await waitFor(
-		() =>
-			expect(client.getQueryData(["application", "acknowledged-notes"])).toMatchObject({ notes: "Acknowledged draft" }),
-		{ timeout: 2000 },
+	type("Acknowledged draft");
+	await waitFor(() =>
+		expect(client.getQueryData(["application", "acknowledged-notes"])).toMatchObject({ notes: "Acknowledged draft" }),
 	);
 	view.unmount();
 	open("acknowledged-notes", client);
@@ -77,8 +90,8 @@ it("serializes note saves so a delayed response cannot overwrite newer text", as
 	});
 	mocks.update.mockReturnValueOnce(first).mockResolvedValue({});
 	const view = open("ordered-notes");
-	fireEvent.change(screen.getByRole("textbox", { name: "Notes" }), { target: { value: "First" } });
-	await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(1), { timeout: 2000 });
+	type("First");
+	await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(1));
 	fireEvent.change(screen.getByRole("textbox", { name: "Notes" }), { target: { value: "Second" } });
 	await act(async () => {
 		view.unmount();
@@ -90,4 +103,24 @@ it("serializes note saves so a delayed response cannot overwrite newer text", as
 	await waitFor(() =>
 		expect(mocks.update).toHaveBeenLastCalledWith({ id: "ordered-notes", notes: "Second" }, expect.anything()),
 	);
+});
+
+it("still saves notes when the browser refuses a recovery copy", async () => {
+	const setItem = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+		throw new DOMException("Storage denied", "QuotaExceededError");
+	});
+	try {
+		mocks.update.mockResolvedValue({});
+		open("denied-storage");
+		type("Save despite denied recovery");
+		expect(screen.getByText(/could not keep a recovery copy/)).toBeTruthy();
+		await waitFor(() =>
+			expect(mocks.update).toHaveBeenCalledWith(
+				{ id: "denied-storage", notes: "Save despite denied recovery" },
+				expect.anything(),
+			),
+		);
+	} finally {
+		setItem.mockRestore();
+	}
 });

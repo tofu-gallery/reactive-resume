@@ -1,4 +1,6 @@
+import type { UpdateOptions } from "@/draft";
 import type { Basics, CustomField } from "@reactive-resume/schema/resume/data";
+import { i18n } from "@lingui/core";
 import { useLingui } from "@lingui/react/macro";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
@@ -7,13 +9,13 @@ import { View } from "react-native";
 import { generateId } from "@reactive-resume/utils/string";
 import { BoundText, LinkField, useValidators } from "./entry-fields";
 import { EditorScreen } from "./entry-screen";
-import { useUndoToast, useWriteData } from "./hooks";
+import { useWriteData } from "./hooks";
 import { IconPickerSheet, PromptSheet } from "./pickers";
 import { resolvePictureUrl } from "./picture-screen";
 import { useSession } from "@/auth/session";
 import { useIsResumeLocked, useResumeStore } from "@/draft";
 import { routes } from "@/routes";
-import { Button, Icon, IconButton, Text, TextField, useTheme } from "@/ui";
+import { Button, Icon, IconButton, Text, TextField, showToast, useTheme } from "@/ui";
 
 type TextKey = "name" | "headline" | "email" | "phone" | "location";
 
@@ -79,7 +81,15 @@ export function BasicsScreen({ resumeId, focusField }: BasicsScreenProps) {
 					}
 				/>
 			</View>
-			<CustomFields fields={basics.customFields} locked={locked} focusField={focusField} />
+			<CustomFields
+				fields={basics.customFields}
+				locked={locked}
+				focusField={focusField}
+				update={(mutate, options) => {
+					const store = useResumeStore.getState();
+					if (store.document?.id === resumeId) store.update((draft) => mutate(draft.basics.customFields), options);
+				}}
+			/>
 		</EditorScreen>
 	);
 }
@@ -139,14 +149,20 @@ function PhotoRow({ resumeId, locked }: { resumeId: string; locked: boolean }) {
 	);
 }
 
-/** Extra contact details: icon, text and an optional link; move up and remove (with Undo). */
-type CustomFieldsProps = { fields: CustomField[]; locked: boolean; focusField?: string | undefined };
+/**
+ * Extra contact details: icon, text and an optional link; move up and remove (with Undo). `update` and `undo` act on
+ * the list where it's kept: the resume's basics, or a letter's own sender details.
+ */
+type CustomFieldsProps = {
+	fields: CustomField[];
+	locked: boolean;
+	focusField?: string | undefined;
+	update: (mutate: (list: CustomField[]) => void, options: UpdateOptions) => void;
+};
 
-function CustomFields({ fields, locked, focusField }: CustomFieldsProps) {
+export function CustomFields({ fields, locked, focusField, update }: CustomFieldsProps) {
 	const { t } = useLingui();
 	const { colors, radius, space } = useTheme();
-	const update = useResumeStore((state) => state.update);
-	const undoToast = useUndoToast();
 	const [iconFor, setIconFor] = useState<string | null>(null);
 	const [group, index, part] = focusField?.split("/") ?? [];
 	const targeted = group === "customFields" ? fields[Number(index)] : undefined;
@@ -155,7 +171,7 @@ function CustomFields({ fields, locked, focusField }: CustomFieldsProps) {
 	);
 
 	const edit = (key: string, mutate: (list: CustomField[]) => void) =>
-		update((draft) => mutate(draft.basics.customFields), { coalesceKey: `basics.customFields.${key}` });
+		update(mutate, { coalesceKey: `basics.customFields.${key}` });
 	const editField = (id: string, key: string, mutate: (field: CustomField) => void) =>
 		edit(`${id}.${key}`, (list) => {
 			const target = list.find((field) => field.id === id);
@@ -178,7 +194,7 @@ function CustomFields({ fields, locked, focusField }: CustomFieldsProps) {
 					}}
 				>
 					<TextField
-						label={t`Field ${index + 1}`}
+						label={t`Field ${i18n.number(index + 1)}`}
 						value={field.text}
 						editable={!locked}
 						autoFocus={!locked && targeted?.id === field.id && part === "text"}
@@ -215,8 +231,21 @@ function CustomFields({ fields, locked, focusField }: CustomFieldsProps) {
 							label={t`Remove field`}
 							disabled={locked}
 							onPress={() => {
-								update((draft) => void draft.basics.customFields.splice(index, 1), { newStep: true });
-								undoToast(t`Field removed`);
+								update((list) => void list.splice(index, 1), { newStep: true });
+								showToast({
+									message: t`Field removed`,
+									action: {
+										label: t`Undo`,
+										onPress: () =>
+											update(
+												(list) => {
+													if (!list.some((item) => item.id === field.id))
+														list.splice(Math.min(index, list.length), 0, field);
+												},
+												{ newStep: true },
+											),
+									},
+								});
 							}}
 						/>
 					</View>
@@ -228,12 +257,9 @@ function CustomFields({ fields, locked, focusField }: CustomFieldsProps) {
 					icon="plus"
 					label={t`Add field`}
 					onPress={() =>
-						update(
-							(draft) => void draft.basics.customFields.push({ id: generateId(), icon: "acorn", text: "", link: "" }),
-							{
-								newStep: true,
-							},
-						)
+						update((list) => void list.push({ id: generateId(), icon: "acorn", text: "", link: "" }), {
+							newStep: true,
+						})
 					}
 				/>
 			) : null}

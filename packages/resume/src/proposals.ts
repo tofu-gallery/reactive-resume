@@ -1,4 +1,6 @@
 import type { ResumeData } from "@reactive-resume/schema/resume/data";
+import { syncResumeDates, upgradeResumeDates } from "@reactive-resume/schema/resume/dates";
+import { parseResumeDataForWrite } from "@reactive-resume/schema/resume/write";
 import { escapeHtml, fnv1a } from "@reactive-resume/utils/string";
 
 /**
@@ -7,9 +9,36 @@ import { escapeHtml, fnv1a } from "@reactive-resume/utils/string";
  */
 
 /** A field that holds rich text: the summary's content, an entry's description, or a letter's body. */
-export type ProposalTarget = { sectionId: string; itemId?: string; roleId?: string; field: string };
+export type ProposalTarget = {
+	sectionId: string;
+	itemId?: string | undefined;
+	roleId?: string | undefined;
+	field: string;
+};
 
 type ProposalSource = "check" | "assistant" | "improve";
+
+/** What a claim the document doesn't back is about. The model names the first six; "term" is a word the server found nowhere in the document. */
+export const UNSUPPORTED_CLAIM_KINDS = ["employer", "title", "date", "figure", "skill", "responsibility"] as const;
+
+/** A claim in an edit's new text that nothing checked backs. Shown for review; never saved as a fact. */
+export type UnsupportedClaim = { kind: (typeof UNSUPPORTED_CLAIM_KINDS)[number] | "term"; text: string };
+
+/**
+ * What the assistant cited for an edit or a posting requirement. A citation is the model's pointer, never proof: the
+ * reviewer checks it. A fact is kept by id only, so its text shows only while it's still in Knowledge.
+ */
+export type ProposalEvidence = { kind: "passage"; location: string; text: string } | { kind: "fact"; id: string };
+
+/** How the assistant read one posting requirement, for a set of edits. */
+export type RequirementCoverage = {
+	text: string;
+	/** An edit addresses it; the assistant cites existing support; it found none; or it wasn't assessed. */
+	status: "edited" | "cited" | "missing" | "unassessed";
+	evidence: ProposalEvidence[];
+	/** Citations that matched nothing the assistant could read. */
+	unresolved?: number | undefined;
+};
 
 export type Proposal = {
 	id: string;
@@ -24,7 +53,144 @@ export type Proposal = {
 	why: string;
 	status: "pending" | "accepted" | "rejected";
 	source: ProposalSource;
+	/** Private request references from the saved result that proposed this edit, outside resume content. */
+	aiOperationIds?: string[] | undefined;
+	/** The posting requirement the edit addresses, when tailoring to a job. */
+	requirement?: string | undefined;
+	/** What the assistant cited for the edit, unverified. */
+	evidence?: ProposalEvidence[] | undefined;
+	/** Citations that matched nothing the assistant could read. */
+	unresolved?: number | undefined;
+	/** What the new text says that nothing checked backs: the model's own list plus what the server found. */
+	unsupported?: UnsupportedClaim[] | undefined;
+	/** The user rewrote the new text before deciding. */
+	edited?: boolean | undefined;
+	/** Atomic structured changes; before/after remain readable for older clients. */
+	snapshot?: { before: string; after: string } | undefined;
+	/** The new text says something nothing checked says: the user confirms it, so Accept all leaves it out. */
+	addsClaims?: boolean | undefined;
+	/** A later suggestion in the conversation replaced this undecided one; it reads as rejected. */
+	superseded?: boolean | undefined;
 };
+
+// A number with what makes it a claim: a currency before it, a unit symbol after it, or the word it counts. "40 people"
+// and "$40" are different claims; a bare "40" is its own.
+const NUMBER = /([$€£¥₹])?(\d+(?:[.,]\d+)*)(?:\s?([%+]|[kmbx]\b)|\s+(\p{L}{3,}))?/giu;
+const YEAR = /^(?:19|20)\d{2}$/;
+const singular = (word: string) => {
+	const lower = word.toLowerCase().replace(/['’]s$/, "");
+	return lower.length > 3 && lower.endsWith("s") ? lower.slice(0, -1) : lower;
+};
+
+function numbersIn(text: string) {
+	return Array.from(text.matchAll(NUMBER), ([match, currency = "", digits = "", symbol, word]) => {
+		const number = digits.replace(/,/g, "");
+		// A year is a date whatever follows it.
+		if (YEAR.test(number)) return { key: number, text: number, date: true };
+		const unit = symbol ? symbol.toLowerCase() : word ? ` ${singular(word)}` : "";
+		return { key: `${currency}${number}${unit}`, text: match.trim(), date: false };
+	});
+}
+
+function wordsIn(text: string) {
+	const segmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+	return Array.from(segmenter.segment(text)).flatMap(({ segment, isWordLike }) =>
+		isWordLike && !/^\d/.test(segment) && segment.length > 1 ? [segment] : [],
+	);
+}
+
+// Claims are compared clause by clause: a full stop (not a decimal point), comma (not a digit separator), semicolon or
+// line ends one.
+const clausesOf = (text: string) => text.split(/[;!?\n]+|\.(?!\d)|,(?!\d)/).filter((clause) => clause.trim());
+// Short subjects matter regardless of case; exclude common short grammar and verbs rather than guessing names.
+const SHORT_GLUE = new Set([
+	"an",
+	"and",
+	"as",
+	"at",
+	"be",
+	"by",
+	"for",
+	"in",
+	"is",
+	"it",
+	"of",
+	"on",
+	"or",
+	"the",
+	"to",
+	"we",
+	"was",
+	"our",
+	"you",
+	"cut",
+	"led",
+	"ran",
+	"use",
+]);
+const isSubject = (word: string) => !SHORT_GLUE.has(word.toLowerCase());
+const contentWords = (text: string) =>
+	new Set(wordsIn(text).flatMap((word) => (isSubject(word) ? [singular(word)] : [])));
+
+/**
+ * What an edit's new text says that the document can't be shown to back, found without trusting the model.
+ *
+ * A clause with numbers is backed only when one clause of the edited entry (or role) has all of them, units and years
+ * included, and every substantive word it uses (including short names such as aws, gcp, SQL or QA):
+ * "Reduced delivery delays 40% in 2020" isn't
+ * backed by "Reduced costs 40% in 2020" and "Reduced delivery delays 10% in 2023", so its numbers are flagged rather
+ * than reassigned. A reworded claim may be flagged too; the user confirms it. Words that appear nowhere in the
+ * document, or in the facts it cites, are flagged too. These are cautious checks, not proof either way.
+ */
+export function unverifiedClaims(text: string, known: { entry: string; document: string }): UnsupportedClaim[] {
+	const sources = clausesOf(known.entry).map((clause) => ({
+		numbers: new Set(numbersIn(clause).map((number) => number.key)),
+		words: contentWords(clause),
+	}));
+	const words = new Set(wordsIn(known.document).map(singular));
+	const claims = new Map<string, UnsupportedClaim>();
+	for (const clause of clausesOf(text)) {
+		const numbers = numbersIn(clause);
+		if (numbers.length === 0) continue;
+		const about = [...contentWords(clause)];
+		const backed = sources.some(
+			(source) =>
+				numbers.every((number) => source.numbers.has(number.key)) && about.every((word) => source.words.has(word)),
+		);
+		if (backed) continue;
+		for (const number of numbers)
+			if (!claims.has(number.key)) claims.set(number.key, { kind: number.date ? "date" : "figure", text: number.text });
+	}
+	for (const word of wordsIn(text)) {
+		const key = singular(word);
+		if (!words.has(key) && !claims.has(key)) claims.set(key, { kind: "term", text: word });
+	}
+	return [...claims.values()];
+}
+
+/**
+ * The proposal with the user's own wording in place of the new text. Flags whose words the user removed go; the rest
+ * stay, because editing one word doesn't confirm the others.
+ */
+export function withEditedText<P extends Pick<Proposal, "before" | "after" | "unsupported">>(
+	proposal: P,
+	text: string,
+): P & { edited: true } {
+	const addition =
+		proposal.before !== "" &&
+		proposal.after.length > proposal.before.length &&
+		proposal.after.startsWith(proposal.before);
+	const added = addition ? proposal.after.slice(proposal.before.length) : proposal.after;
+	const leaf = new RegExp(LEAF_BLOCK.source, "i").exec(added)?.[0] ?? added;
+	const block = added.replace(leaf, () => replaceBlockText(leaf, text));
+	const written = blockText(block).toLowerCase();
+	return {
+		...proposal,
+		after: addition ? `${proposal.before}${block}` : block,
+		unsupported: proposal.unsupported?.filter((claim) => written.includes(claim.text.toLowerCase())),
+		edited: true,
+	};
+}
 
 /** Out of date is not stored: it's whenever the passage is no longer in the field. */
 export type ProposalState = Proposal["status"] | "stale";
@@ -33,6 +199,55 @@ export type ProposalState = Proposal["status"] | "stale";
 export const LETTER_SECTION_ID = "letter";
 
 type Entry = { id: string } & Record<string, unknown>;
+
+function stableJson(value: unknown): string {
+	return JSON.stringify(value, (_key, item: unknown) =>
+		item && typeof item === "object" && !Array.isArray(item)
+			? Object.fromEntries(Object.entries(item).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)))
+			: item,
+	);
+}
+
+function normalizedSnapshot(value: string, data: ResumeData) {
+	try {
+		const snapshot = JSON.parse(value);
+		// Language-copy reviews bind their text to the page language; other structural reviews remain locale-neutral.
+		if (snapshot.locale !== undefined && snapshot.locale !== data.metadata.page.locale) return value;
+		return resumeStructureSnapshot({
+			...data,
+			basics: snapshot.basics,
+			summary: snapshot.summary,
+			sections: snapshot.sections,
+			customSections: snapshot.customSections,
+			metadata: { ...data.metadata, layout: snapshot.layout },
+		});
+	} catch {
+		return value;
+	}
+}
+
+/** Content/layout only: proposal history must not duplicate pictures, styles or private metadata. */
+export function resumeStructureSnapshot(data: ResumeData): string {
+	// JSONB key order and read/save date upgrades must not make unchanged content stale.
+	const content = JSON.parse(
+		JSON.stringify({
+			basics: data.basics,
+			summary: data.summary,
+			sections: data.sections,
+			customSections: data.customSections,
+			metadata: { page: data.metadata.page, layout: data.metadata.layout },
+		}),
+	) as ResumeData;
+	upgradeResumeDates(content);
+	syncResumeDates(content);
+	return stableJson({
+		basics: content.basics,
+		summary: content.summary,
+		sections: content.sections,
+		customSections: content.customSections,
+		layout: content.metadata.layout,
+	});
+}
 
 function findEntry(data: ResumeData, { sectionId, itemId, roleId }: ProposalTarget): Entry | undefined {
 	const builtin = (data.sections as Record<string, { items: Entry[] } | undefined>)[sectionId];
@@ -53,6 +268,29 @@ export function readTarget(data: ResumeData, target: ProposalTarget): string | u
 	return typeof value === "string" ? value : undefined;
 }
 
+// An entry's text, one line per field or bullet, without ids, links or other roles, whose digits aren't claims.
+const entryLines = (value: unknown, key = ""): string[] => {
+	if (typeof value === "string") {
+		if (key === "id" || key === "url") return [];
+		const blocks = splitBlocks(value);
+		return blocks.length > 0 ? blocks.map((block) => block.text) : [blockText(value)];
+	}
+	if (Array.isArray(value)) return key === "roles" ? [] : value.flatMap((item) => entryLines(item));
+	if (value && typeof value === "object")
+		return Object.entries(value).flatMap(([name, item]) => entryLines(item, name));
+	return [];
+};
+
+/**
+ * What the edited entry says, one line per field or bullet: its own dates and fields, and for a role only that role.
+ * An edit's figures are checked against it.
+ */
+export function entryText(data: ResumeData, target: ProposalTarget): string {
+	if (!target.itemId) return target.sectionId === "summary" ? entryLines(data.summary.content).join("\n") : "";
+	const { roleId, ...entry } = target;
+	return [...entryLines(findEntry(data, entry)), ...(roleId ? entryLines(findEntry(data, target)) : [])].join("\n");
+}
+
 export function writeTarget(draft: ResumeData, target: ProposalTarget, value: string) {
 	if (!target.itemId) {
 		if (target.sectionId === "summary" && target.field === "content") draft.summary.content = value;
@@ -63,44 +301,280 @@ export function writeTarget(draft: ResumeData, target: ProposalTarget, value: st
 	if (entry) entry[target.field] = value;
 }
 
-/** A pending proposal can be applied only while its passage is still in the text, word for word. */
-export function canApplyTo(value: string | undefined, { before }: Pick<Proposal, "before">) {
-	if (value === undefined) return false;
-	if (!before) return value === "";
-	const index = value.indexOf(before);
-	return index >= 0 && value.indexOf(before, index + 1) < 0;
+/**
+ * Acceptance decisions travel with draft history, separately from authored document data. `false` takes an edit back.
+ * Applying records the wording the user reviewed (the edit's `after`), or `snapshot:<id>` for a structural proposal.
+ * Structural IDs name immutable server-generated snapshots; a different proposal always gets a new ID.
+ * The receipt binds to that version of the edit,
+ * whatever the field becomes through other edits at the same place, refinement or undo and redo. `true` (older apps,
+ * API clients) applies without naming a version.
+ */
+export type ProposalApplications = Readonly<Record<string, boolean | string>>;
+export type ProposalSnapshot<T> = { data: T; applications: ProposalApplications };
+
+/** Longest reviewed wording a decision may carry. */
+export const MAX_REVIEWED_WORDING = 20_000;
+
+/** Structural summaries can exceed the receipt bound; their immutable identity needs no copy of the summary. */
+export const appliedApplications = (
+	applied: readonly Pick<Proposal, "id" | "after" | "snapshot">[],
+): ProposalApplications =>
+	Object.fromEntries(
+		applied.map((proposal) => [proposal.id, proposal.snapshot ? `snapshot:${proposal.id}` : proposal.after]),
+	);
+
+export const proposalAiOperationIds = (applied: readonly Pick<Proposal, "aiOperationIds">[]): string[] => [
+	...new Set(applied.flatMap((proposal) => proposal.aiOperationIds ?? [])),
+];
+
+/** Recovery data is untrusted; only own decisions are restored. */
+export function readProposalApplications(value: unknown): ProposalApplications {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	return Object.fromEntries(
+		Object.entries(value).filter(
+			([id, applied]) =>
+				id.length > 0 &&
+				id.length <= 128 &&
+				(typeof applied === "boolean" || (typeof applied === "string" && applied.length <= MAX_REVIEWED_WORDING)),
+		),
+	);
 }
 
+/** Keep decisions made while a save was in flight; acknowledge only the submitted values. */
+export const acknowledgeProposalApplications = (
+	pending: ProposalApplications,
+	submitted: ProposalApplications,
+): ProposalApplications =>
+	Object.fromEntries(Object.entries(pending).filter(([id, applied]) => submitted[id] !== applied));
+
+export const queueProposalApplications = (
+	previous: ProposalApplications,
+	next: ProposalApplications,
+	pending: ProposalApplications,
+): ProposalApplications => ({
+	...pending,
+	...Object.fromEntries(Object.entries(next).filter(([id, applied]) => previous[id] !== applied)),
+});
+
+/** IDs absent from an older checkpoint were explicitly undone; normal edits never call this. */
+export const restoreProposalApplications = (
+	current: ProposalApplications,
+	snapshot: ProposalApplications,
+): ProposalApplications => ({
+	...Object.fromEntries(Object.keys(current).map((id) => [id, false])),
+	...snapshot,
+});
+
+export function proposalStatus(proposal: Proposal, applications: ProposalApplications = {}): Proposal["status"] {
+	if (proposal.status === "rejected") return "rejected";
+	const applied = applications[proposal.id];
+	return applied === undefined ? proposal.status : applied === false ? "pending" : "accepted";
+}
+
+// TipTap serializes text-node quotes literally. Canonicalize only quotes in text, retaining source offsets and
+// keeping escaped markup distinct from real tags. Other structure still has to match exactly.
+function quoteNormalized(html: string) {
+	let text = "";
+	const offsets: number[] = [];
+	let inTag = false;
+	let attributeQuote: string | undefined;
+	for (let index = 0; index < html.length; index++) {
+		const char = html[index] ?? "";
+		if (!inTag && char === "<") inTag = true;
+		else if (inTag) {
+			if (attributeQuote) {
+				if (char === attributeQuote) attributeQuote = undefined;
+			} else if (char === '"' || char === "'") attributeQuote = char;
+			else if (char === ">") inTag = false;
+		}
+		const entity =
+			!inTag && char === "&" ? /^&(?:apos|quot|#0*(?:34|39)|#x0*(?:22|27));/i.exec(html.slice(index))?.[0] : undefined;
+		offsets.push(index);
+		text += entity ? decodeEntities(entity) : char;
+		if (entity) index += entity.length - 1;
+	}
+	offsets.push(html.length);
+	return { text, offsets };
+}
+
+function passageRange(value: string | undefined, before: string): { start: number; end: number } | undefined {
+	if (value === undefined) return undefined;
+	if (!before) return value === "" ? { start: 0, end: 0 } : undefined;
+	const actual = quoteNormalized(value);
+	const expected = quoteNormalized(before).text;
+	const start = actual.text.indexOf(expected);
+	if (start < 0 || actual.text.indexOf(expected, start + 1) >= 0) return undefined;
+	return { start: actual.offsets[start] ?? 0, end: actual.offsets[start + expected.length] ?? value.length };
+}
+
+/** A pending proposal requires one unambiguous original passage; equivalent text-node quotes are allowed. */
+export const canApplyTo = (value: string | undefined, { before }: Pick<Proposal, "before">) =>
+	passageRange(value, before) !== undefined;
 export const canApply = (data: ResumeData, proposal: Proposal) =>
-	canApplyTo(readTarget(data, proposal.target), proposal);
+	proposal.snapshot
+		? resumeStructureSnapshot(data) === normalizedSnapshot(proposal.snapshot.before, data)
+		: canApplyTo(readTarget(data, proposal.target), proposal);
 
 /**
- * What a proposal shows as, given the text it targets. Pending ones whose passage has changed are out of date;
- * accepted ones whose edit was undone (the passage is back, the new text gone) are pending again.
+ * Whether the resume holds the proposal exactly as proposed: a structural change's whole proposed structure, or a
+ * passage edit's new text once. Receipts that don't name the wording they applied (`true`, older apps) need this.
  */
-export function getStateIn(value: string, proposal: Proposal): ProposalState {
-	if (proposal.status === "rejected") return "rejected";
-	if (proposal.status === "accepted")
-		return canApplyTo(value, proposal) && !value.includes(proposal.after) ? "pending" : "accepted";
-	return canApplyTo(value, proposal) ? "pending" : "stale";
+export const holdsProposal = (data: ResumeData, proposal: Pick<Proposal, "after" | "target" | "snapshot">) =>
+	proposal.snapshot
+		? resumeStructureSnapshot(data) === normalizedSnapshot(proposal.snapshot.after, data)
+		: canApplyTo(readTarget(data, proposal.target), { before: proposal.after });
+
+/** Recorded acceptance survives refinements and normalization. Text is placement evidence, never acceptance proof. */
+export function getStateIn(
+	value: string | undefined,
+	proposal: Proposal,
+	applications: ProposalApplications = {},
+): ProposalState {
+	const status = proposalStatus(proposal, applications);
+	if (status !== "pending") return status;
+	return applyTo(value, proposal) !== undefined ? "pending" : "stale";
+}
+export function getProposalState(
+	data: ResumeData,
+	proposal: Proposal,
+	applications: ProposalApplications = {},
+): ProposalState {
+	if (!proposal.snapshot) return getStateIn(readTarget(data, proposal.target), proposal, applications);
+	const status = proposalStatus(proposal, applications);
+	if (status !== "pending") return status;
+	const current = resumeStructureSnapshot(data);
+	return current === normalizedSnapshot(proposal.snapshot.before, data) &&
+		current !== normalizedSnapshot(proposal.snapshot.after, data)
+		? "pending"
+		: "stale";
 }
 
-export const getProposalState = (data: ResumeData, proposal: Proposal): ProposalState =>
-	getStateIn(readTarget(data, proposal.target) ?? "", proposal);
-
-/** The text with `after` in place of `before`, or `undefined` when the proposal is out of date. */
+/** The text with `after` in place of the unique original passage, or undefined when it cannot be placed. */
 export function applyTo(value: string | undefined, proposal: Pick<Proposal, "before" | "after">) {
-	if (value === undefined || !canApplyTo(value, proposal)) return undefined;
-	// A replacer function, so "$&" or "$1" in the new text stay literal.
-	return value.replace(proposal.before, () => proposal.after);
+	if (value === undefined || proposal.before === proposal.after) return undefined;
+	const range = passageRange(value, proposal.before);
+	if (!range) return undefined;
+	// For additions, preserve the live anchor's serialization instead of putting model-era HTML back.
+	const after = proposal.after.startsWith(proposal.before)
+		? value.slice(range.start, range.end) + proposal.after.slice(proposal.before.length)
+		: proposal.after;
+	const next = value.slice(0, range.start) + after + value.slice(range.end);
+	return next === value ? undefined : next;
 }
 
-/** Puts `after` in place of `before`. Returns false (changing nothing) when the proposal is out of date. */
 export function applyProposal(draft: ResumeData, proposal: Proposal): boolean {
+	if (proposal.snapshot) {
+		if (
+			proposal.target.sectionId !== "resume" ||
+			proposal.target.field !== "data" ||
+			resumeStructureSnapshot(draft) !== normalizedSnapshot(proposal.snapshot.before, draft)
+		)
+			return false;
+		try {
+			const snapshot = JSON.parse(proposal.snapshot.after);
+			const next = parseResumeDataForWrite({
+				...draft,
+				basics: snapshot.basics,
+				summary: snapshot.summary,
+				sections: snapshot.sections,
+				customSections: snapshot.customSections,
+				metadata: { ...draft.metadata, layout: snapshot.layout },
+			});
+			if (resumeStructureSnapshot(next) === resumeStructureSnapshot(draft)) return false;
+			Object.assign(draft, {
+				basics: next.basics,
+				summary: next.summary,
+				sections: next.sections,
+				customSections: next.customSections,
+				metadata: next.metadata,
+			});
+			return true;
+		} catch {
+			return false;
+		}
+	}
 	const next = applyTo(readTarget(draft, proposal.target), proposal);
 	if (next === undefined) return false;
 	writeTarget(draft, proposal.target, next);
 	return true;
+}
+
+export type ProposalApplicationResult = { applied: Proposal[]; stale: Proposal[] };
+
+/**
+ * Whether accepting this needs the user's own check first: it adds a detail. The server also sets it for a figure,
+ * date, employer, title, skill or responsibility nothing checked backs.
+ */
+export const needsConfirmation = (proposal: Pick<Proposal, "addsClaims">) => proposal.addsClaims === true;
+const isAddition = ({ before, after, snapshot }: Proposal) =>
+	!snapshot && after.startsWith(before) && after.length > before.length;
+
+/** Additions first (backwards at a shared anchor, yielding proposal order), then rewrites. Record only real writes. */
+export function applyProposals(
+	proposals: readonly Proposal[],
+	read: (target: ProposalTarget) => string | undefined,
+	write: (target: ProposalTarget, value: string) => void,
+	applications: ProposalApplications = {},
+): ProposalApplicationResult {
+	return applyDecisions(
+		proposals,
+		(proposal) => {
+			if (proposal.snapshot) return false;
+			const next = applyTo(read(proposal.target), proposal);
+			if (next === undefined) return false;
+			write(proposal.target, next);
+			return true;
+		},
+		applications,
+	);
+}
+
+/** Resume snapshots and passage edits use the same ordering and successful-write receipts. */
+export function applyResumeProposals(
+	draft: ResumeData,
+	proposals: readonly Proposal[],
+	applications: ProposalApplications = {},
+): ProposalApplicationResult {
+	return applyDecisions(proposals, (proposal) => applyProposal(draft, proposal), applications);
+}
+
+function applyDecisions(
+	proposals: readonly Proposal[],
+	apply: (proposal: Proposal) => boolean,
+	applications: ProposalApplications,
+): ProposalApplicationResult {
+	const unique = [...new Map(proposals.map((proposal) => [proposal.id, proposal])).values()];
+	const applied = new Set<string>();
+	const stale = new Set<string>();
+	const ordered = [...unique.filter(isAddition).reverse(), ...unique.filter((proposal) => !isAddition(proposal))];
+	for (const proposal of ordered) {
+		if (applied.has(proposal.id) || proposalStatus(proposal, applications) !== "pending") continue;
+		if (apply(proposal)) applied.add(proposal.id);
+		else stale.add(proposal.id);
+	}
+	return {
+		applied: unique.filter((proposal) => applied.has(proposal.id)),
+		stale: unique.filter((proposal) => stale.has(proposal.id)),
+	};
+}
+
+export const proposalText = (proposal: Pick<Proposal, "before" | "after" | "snapshot">, side: "before" | "after") =>
+	proposal.snapshot ? proposal[side] : passageLines(proposal[side]);
+
+/** The visible text of a passage, one line per paragraph or list item, so added blocks don't run together. */
+export function passageLines(html: string) {
+	const blocks = splitBlocks(html);
+	return blocks.length > 1 ? blocks.map((block) => block.text).join("\n") : blockText(html);
+}
+
+/**
+ * An addition read as one: the passage it follows and the new text, instead of the passage struck through and
+ * replaced by itself plus the addition.
+ */
+export function additionParts(proposal: Pick<Proposal, "before" | "after" | "snapshot">) {
+	const { before, after, snapshot } = proposal;
+	if (snapshot || !before || !after.startsWith(before) || after.length === before.length) return undefined;
+	return { anchor: passageLines(before), added: passageLines(after.slice(before.length)) };
 }
 
 const BLOCK = /^(<(p|li)(?:\s[^>]*)?>)([\s\S]*)(<\/\2>)$/i;
@@ -166,16 +640,20 @@ export type Block = { html: string; text: string; bullet: boolean };
 /** The leaf paragraphs and list items of rich text, in order, skipping empty ones. */
 export function splitBlocks(html: string): Block[] {
 	const blocks: Block[] = [];
+	let scannedTo = 0;
+	let listDepth = 0;
 
 	for (const match of html.matchAll(LEAF_BLOCK)) {
 		const text = blockText(match[2] ?? "");
 		if (!text) continue;
 
 		// Inside a list when more <li> have opened than closed before this block.
-		const preceding = html.slice(0, match.index);
+		const preceding = html.slice(scannedTo, match.index);
 		const opened = preceding.match(/<li[\s>]/gi)?.length ?? 0;
 		const closed = preceding.match(/<\/li>/gi)?.length ?? 0;
-		blocks.push({ html: match[0], text, bullet: match[1]?.toLowerCase() === "li" || opened > closed });
+		listDepth += opened - closed;
+		scannedTo = match.index;
+		blocks.push({ html: match[0], text, bullet: match[1]?.toLowerCase() === "li" || listDepth > 0 });
 	}
 
 	return blocks;

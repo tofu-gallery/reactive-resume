@@ -33,8 +33,13 @@ function ToastFuse({ timeout }: { timeout: number }) {
 	);
 }
 
+/**
+ * Pressing a toast's action closes the toast, once its own handler has run; the handler can keep it open with
+ * `event.preventBaseUIHandler()`. Once closed, the action does nothing while the toast animates out, so a second
+ * click can't run Undo twice.
+ */
 function ToastList({ closeLabel, timeout }: { closeLabel: string; timeout: number }) {
-	const { toasts } = ToastPrimitive.useToastManager();
+	const { toasts, close } = ToastPrimitive.useToastManager();
 
 	return toasts.map((toastItem) => (
 		<ToastPrimitive.Root
@@ -53,6 +58,15 @@ function ToastList({ closeLabel, timeout }: { closeLabel: string; timeout: numbe
 				{toastItem.actionProps && (
 					<ToastPrimitive.Action
 						data-slot="toast-action"
+						onClickCapture={(event) => {
+							if (event.currentTarget.dataset.actionRan === undefined) return;
+							event.preventDefault();
+							event.stopPropagation();
+						}}
+						onClick={(event) => {
+							event.currentTarget.dataset.actionRan = "";
+							close(toastItem.id);
+						}}
 						className="-my-1 shrink-0 rounded-sm px-1 py-1 text-sm font-semibold underline underline-offset-3 transition-opacity hover:opacity-80"
 					/>
 				)}
@@ -74,12 +88,15 @@ function ToastList({ closeLabel, timeout }: { closeLabel: string; timeout: numbe
 type ToasterProps = ToastPrimitive.Provider.Props & {
 	/** Accessible name of the close button on toasts that stay until dismissed; pass a translated string. */
 	closeLabel?: string;
+	/** Accessible name of the region screen readers announce toasts in; pass a translated string. */
+	regionLabel?: string;
 };
 
 function Toaster({
 	children,
 	toastManager = toast,
 	closeLabel = "Close notification",
+	regionLabel = "Notifications",
 	limit = 1,
 	timeout = DEFAULT_TIMEOUT,
 	...props
@@ -90,7 +107,8 @@ function Toaster({
 			<ToastPrimitive.Portal data-slot="toast-portal">
 				<ToastPrimitive.Viewport
 					data-slot="toast-viewport"
-					className="pointer-events-none fixed inset-x-4 bottom-7 z-200 grid justify-items-center outline-none"
+					aria-label={regionLabel}
+					className="pointer-events-none fixed inset-x-4 bottom-[var(--toast-bottom,1.75rem)] z-200 grid justify-items-center outline-none"
 				>
 					<ToastList closeLabel={closeLabel} timeout={timeout} />
 				</ToastPrimitive.Viewport>

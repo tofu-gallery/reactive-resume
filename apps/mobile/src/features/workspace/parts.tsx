@@ -1,26 +1,23 @@
 // Small pieces every workspace tab uses, ported from apps/web/src/features/career/shared.tsx.
 import type { IconName } from "@/ui";
 import type { ColorToken } from "@/ui/tokens";
-import type { GenerateTask, WorkspaceTab } from "@reactive-resume/schema/career";
+import type { GenerateTask } from "@reactive-resume/schema/career";
+import type { DisclosureItem } from "@reactive-resume/schema/career-disclosure";
 import type { ReactNode } from "react";
 import { t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
-import { Children, useEffect, useState } from "react";
+import { useRouter } from "expo-router";
+import { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, View } from "react-native";
+import { aiModelForTask } from "@reactive-resume/ai/task-models";
+import { disclosureItemsFromPresence } from "@reactive-resume/schema/career-disclosure";
+import { formatList } from "@reactive-resume/utils/locale";
+import { useFacts, useStories } from "./hooks";
 import { AIProviderSetupSheet, useHasAIProvider } from "@/features/ai/providers";
 import { ReportAiContent } from "@/features/ai/report-content";
 import { Banner, Button, Card, Icon, Text, useTheme } from "@/ui";
 
-export const tabLabel = (tab: WorkspaceTab) =>
-	({
-		fit: t({ message: "Fit", context: "Application workspace tab: how well a job fits your experience" }),
-		apply: t`Apply`,
-		prepare: t`Prepare`,
-		practise: t`Practice`,
-		debrief: t`Debrief`,
-		messages: t`Messages`,
-		saved: t({ message: "Saved", context: "Application workspace tab: earlier results kept for this job" }),
-	})[tab];
+export { workspaceTabLabel as tabLabel } from "@/shell/workspace-tab-label";
 
 /** What each piece of tab work goes through, in order, before the general phrases take over. */
 export const workingSteps = (task: GenerateTask["task"] | "tighten") =>
@@ -35,8 +32,8 @@ export const workingSteps = (task: GenerateTask["task"] | "tighten") =>
 	})[task];
 
 /**
- * A 10–30 second wait reads as progress: the label moves through the work's steps every 2.2 seconds, then loops
- * through general phrases. Returns `idle` until `busy`.
+ * A 10–30 second wait reads as progress: the label moves through the work's steps every 2.2 seconds, then stays on
+ * "Still working". Returns `idle` until `busy`.
  */
 export function useWorking(busy: boolean, steps: string[], idle: string) {
 	const [state, setState] = useState({ busy, tick: 0 });
@@ -48,9 +45,32 @@ export function useWorking(busy: boolean, steps: string[], idle: string) {
 	}, [busy]);
 	const tick = state.tick;
 	if (!busy) return idle;
-	const general = [t`Thinking`, t`Cooking`, t`Connecting the dots`, t`Double-checking`, t`Polishing`];
-	const phrase = tick < steps.length ? steps[tick] : general[(tick - steps.length) % general.length];
-	return `${phrase ?? ""}…`;
+	return `${tick < steps.length ? (steps[tick] ?? "") : t`Still working`}…`;
+}
+
+type GenerateNoticeProps = {
+	generate: { isPending: boolean; failure: string | null; stop: () => void; reset: () => void };
+	onRetry: () => void;
+};
+
+/** Beside a workspace AI action: Stop while it runs; when it failed, the reason inline with Try again. */
+export function GenerateNotice({ generate, onRetry }: GenerateNoticeProps) {
+	const { t } = useLingui();
+	const router = useRouter();
+	if (generate.isPending)
+		return <Button variant="ghost" size="sm" icon="stop" label={t`Stop`} onPress={generate.stop} />;
+	if (!generate.failure) return null;
+	return (
+		<Banner
+			tone="danger"
+			message={generate.failure}
+			actions={[
+				{ label: t`Try again`, onPress: onRetry },
+				{ label: t`AI settings`, onPress: () => router.push("/settings/ai-providers") },
+			]}
+			onDismiss={generate.reset}
+		/>
+	);
 }
 
 type CheckRowProps = {
@@ -188,11 +208,66 @@ export function PrivacyLine({ children, centered = false }: PrivacyLineProps) {
  * Where an AI button's data goes, or, with no usable connection, a button that adds one in place. Tabs show their AI
  * buttons only when `useHasAIProvider().defaultProvider` is set.
  */
-type AiNoticeProps = { sends?: string | undefined; centered?: boolean };
+type DisclosureApplication = {
+	id: string;
+	resumeId: string | null;
+	coverLetterId: string | null;
+	jobDescription: string | null;
+	requirements: readonly string[];
+	notes?: string | null | undefined;
+	contacts: readonly unknown[];
+};
 
-export function AiNotice({ sends, centered = false }: AiNoticeProps) {
-	const { t } = useLingui();
+type AiNoticeProps = {
+	/** Names exactly what this action sends; the list comes from the same schema the server builds its prompt from. */
+	task?: GenerateTask["task"] | undefined;
+	application?: DisclosureApplication | null | undefined;
+	interview?: boolean | undefined;
+	/** A short, explicit sentence for an action outside the structured tasks (a letter draft, reading a posting). */
+	sends?: string | undefined;
+	centered?: boolean;
+};
+
+const itemLabel = (item: DisclosureItem, task: GenerateTask["task"]): string => {
+	switch (item) {
+		case "preferences":
+			return t`your preferences`;
+		case "posting":
+			return t`this posting`;
+		case "requirements":
+			return t`its requirements`;
+		case "notes":
+			return t`your notes`;
+		case "contacts":
+			return t`your contacts`;
+		case "resume":
+			return t`the resume for this job`;
+		case "letter":
+			return t`the cover letter for this job`;
+		case "knowledge":
+			return t`enabled Knowledge`;
+		case "interview":
+			return t`the interview details`;
+		case "answers":
+			return t`your form answers`;
+		case "offer":
+			return t`the saved offer`;
+		case "replies":
+			return t`the last messages`;
+		case "input":
+			return task === "reply"
+				? t`the employer's message`
+				: task === "debrief"
+					? t`the question and what you said`
+					: t`the question and your answer`;
+	}
+};
+
+export function AiNotice({ task, application, interview = false, sends, centered = false }: AiNoticeProps) {
+	const { t, i18n } = useLingui();
 	const connection = useHasAIProvider();
+	const facts = useFacts(application?.id ?? null, Boolean(task));
+	const stories = useStories(application?.id ?? null, Boolean(task));
 	const [setup, setSetup] = useState(false);
 	const provider = connection.defaultProvider;
 	if (connection.isLoading) return <ActivityIndicator />;
@@ -211,51 +286,34 @@ export function AiNotice({ sends, centered = false }: AiNoticeProps) {
 				<AIProviderSetupSheet open={setup} onClose={() => setSetup(false)} />
 			</>
 		);
-	const label = provider.label;
+	const label = `${provider.label} · ${task ? provider.model : aiModelForTask(provider, "capable")}`;
+	const presence: Partial<Record<DisclosureItem, boolean>> = {
+		preferences: true,
+		posting: Boolean(application?.jobDescription?.trim()),
+		requirements: Boolean(application?.requirements.length),
+		notes: Boolean(application?.notes?.trim()),
+		contacts: Boolean(application?.contacts.length),
+		resume: Boolean(application?.resumeId),
+		letter: Boolean(application?.coverLetterId),
+		knowledge: Boolean(
+			facts.isPending ||
+			facts.isError ||
+			stories.isPending ||
+			stories.isError ||
+			facts.data?.length ||
+			stories.data?.length,
+		),
+		interview,
+		input: true,
+	};
+	const labels = task ? disclosureItemsFromPresence(task, presence).map((item) => itemLabel(item, task)) : [];
+	const sentence =
+		sends ?? (task && labels.length > 0 ? t`Sends ${formatList(i18n.locale, labels)} to ${label}.` : null);
 	return (
 		<>
-			<PrivacyLine centered={centered}>
-				{sends ??
-					t`Sends this application's posting, notes and documents, plus Knowledge that's switched on, to ${label}.`}
-			</PrivacyLine>
+			{sentence ? <PrivacyLine centered={centered}>{sentence}</PrivacyLine> : null}
 			<ReportAiContent source="career" />
 		</>
-	);
-}
-
-type EmptyNoticeProps = { title: string; message?: string | undefined; children?: ReactNode };
-
-/** A dashed first-run card: what the tab does and the one action that starts it. */
-export function EmptyNotice({ title, message, children }: EmptyNoticeProps) {
-	const { colors, radius, space } = useTheme();
-	return (
-		<View
-			style={{
-				alignItems: "center",
-				gap: space.s3,
-				padding: space.s6,
-				borderRadius: radius.rLg,
-				borderWidth: 1,
-				borderStyle: "dashed",
-				borderColor: colors.line2,
-			}}
-		>
-			<Text variant="heading" align="center">
-				{title}
-			</Text>
-			{message ? (
-				<Text color="ink2" align="center">
-					{message}
-				</Text>
-			) : null}
-			{Children.map(children, (child) => (
-				<View
-					style={{ width: "100%", flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: space.s3 }}
-				>
-					{child}
-				</View>
-			))}
-		</View>
 	);
 }
 
@@ -326,19 +384,22 @@ export function SaveError({ autosave }: SaveErrorProps) {
 	const { space } = useTheme();
 	if (!autosave.error) return null;
 	const conflict = autosave.error === "CONFLICT";
+	const recovered = autosave.error === "RECOVERED_DRAFT";
 	const takeServer = autosave.takeServerVersion;
 	return (
 		<View style={{ gap: space.s2 }}>
 			<Banner
 				tone="danger"
 				message={
-					conflict
-						? t`This changed somewhere else, so it wasn't saved. Your text is kept here; Retry saves it over the other copy.`
-						: t`This wasn't saved. Your text is kept on this device.`
+					recovered
+						? t`Recovered an unsaved draft. Review it before saving over the current version.`
+						: conflict
+							? t`This changed somewhere else, so it wasn't saved. Your text is kept here; Retry saves it over the other copy.`
+							: t`This wasn't saved. Your text is kept on this device.`
 				}
 				action={autosave.resolving ? undefined : { label: t`Retry`, onPress: autosave.retry }}
 			/>
-			{conflict && takeServer ? (
+			{(conflict || recovered) && takeServer ? (
 				<Button
 					variant="secondary"
 					size="sm"

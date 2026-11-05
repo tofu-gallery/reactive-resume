@@ -1,64 +1,124 @@
+import type { DisclosureApplication } from "../disclosure";
 import type { SavedData, SavedItem } from "../hooks";
 import type { WorkspaceTabProps } from "./shell";
-import type { CareerWorkspace } from "@reactive-resume/schema/career";
+import type { CareerWorkspace, GenerateTask } from "@reactive-resume/schema/career";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@reactive-resume/ui/components/button";
+import { EmptyState } from "@reactive-resume/ui/components/empty-state";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Skeleton } from "@reactive-resume/ui/components/skeleton";
 import { Textarea } from "@reactive-resume/ui/components/textarea";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { cn } from "@reactive-resume/utils/style";
+import { DisclosureText } from "../disclosure";
 import { latest, useDefaultProvider, useGenerate, useSavedItems, useWorkspace } from "../hooks";
-import { PrivacyLine, StatusPill, Swap, Working, workingSteps } from "../shared";
+import { StatusPill, Swap, GenerateNotice, Working, workingSteps } from "../shared";
+import { useDialogStore } from "@/dialogs/store";
+import { SetUpAi } from "@/features/assistant/provider-setup";
 import { AiProviderLoadState } from "@/features/settings/integrations/ai-provider-load-state";
+import { getAccountGeneration } from "@/libs/auth/account-scope";
 import { toastError } from "@/libs/error-message";
-import { orpc } from "@/libs/orpc/client";
+import { client, orpc } from "@/libs/orpc/client";
 
 type FitItem = SavedItem & { data: SavedData<"fit"> };
 type Requirement = SavedData<"fit">["requirements"][number];
 
-type AiNoticeProps = { className?: string };
+type AiNoticeProps = {
+	task?: GenerateTask["task"];
+	application?: DisclosureApplication | null;
+	interview?: boolean;
+	className?: string;
+};
 
 /**
- * What an AI button in a workspace tab sends, and where; or, with no usable connection, where to add one. Tabs show
- * their AI buttons only when `useDefaultProvider().provider` is set.
+ * What an AI button in a workspace tab sends, and where; or, with no usable connection, where to add one. The list
+ * comes from the same schema the server builds its prompt from. Tabs show their AI buttons only when a provider is set.
  */
-export function AiNotice({ className }: AiNoticeProps) {
+export function AiNotice({ task, application, interview, className }: AiNoticeProps) {
 	const connection = useDefaultProvider();
-	const { provider } = connection;
 	if (connection.isUnavailable) return <AiProviderLoadState state={connection} />;
-	if (!provider)
-		return (
-			<Link
-				to="/dashboard/settings/ai"
-				className={cn(
-					"flex w-fit items-center gap-1.5 text-[13px] text-accent-text underline-offset-4 hover:underline",
-					className,
-				)}
-			>
-				<Icon name="key" size={16} />
-				<Trans>Connect an AI provider in Settings</Trans>
-			</Link>
-		);
+	if (!connection.provider) return <SetUpAi />;
+	// Without a task there is nothing to name; the provider states above still explain how to connect one.
+	if (!task) return null;
 	return (
-		<PrivacyLine className={cn(className)}>
-			{t`Sends this application's posting, notes and documents, plus Knowledge that's switched on, to ${provider.label}.`}
-		</PrivacyLine>
+		<DisclosureText
+			task={task}
+			application={application ?? null}
+			interview={Boolean(interview)}
+			providerLabel={connection.provider.label}
+			{...(className ? { className } : {})}
+		/>
 	);
 }
 
 /** W1–W3: each requirement from the posting against the user's evidence, with gaps closed in place. */
 export function FitTab({ application, version }: WorkspaceTabProps) {
+	const navigate = useNavigate();
+	const proposing = useRef<AbortController | null>(null);
+	const proposalKey = JSON.stringify([getAccountGeneration(), application.id]);
+	const [proposalOwner, setProposalOwner] = useState<string | null>(null);
+	const proposalPending = proposalOwner === proposalKey;
+	useEffect(
+		() => () => {
+			proposing.current?.abort();
+			proposing.current = null;
+		},
+		[proposalKey],
+	);
+	const openDialog = useDialogStore((state) => state.openDialog);
+	const tailor = () =>
+		application.resumeId
+			? void navigate({
+					to: "/builder/$resumeId",
+					params: { resumeId: application.resumeId },
+					search: { mode: "check", checkTab: "match", applicationId: application.id },
+				})
+			: openDialog("document.new", { step: "copy", applicationId: application.id, destination: "job-match" });
 	const queryClient = useQueryClient();
 	const saved = useSavedItems(application.id);
 	const workspace = useWorkspace(application.id);
+	const proposeEvidence = async (factId: string) => {
+		if (proposing.current) return;
+		const controller = new AbortController();
+		const account = getAccountGeneration();
+		proposing.current = controller;
+		setProposalOwner(proposalKey);
+		try {
+			await workspace.settled();
+			if (controller.signal.aborted || account !== getAccountGeneration()) return;
+			const result = await client.applications.ai.proposeEvidence(
+				{ id: application.id, factId },
+				{ signal: controller.signal },
+			);
+			if (controller.signal.aborted || account !== getAccountGeneration()) return;
+			await navigate({
+				to: "/builder/$resumeId",
+				params: { resumeId: result.resumeId },
+				search: { assistant: result.conversation?.thread.id ?? "new" },
+			});
+		} catch (error) {
+			if (!controller.signal.aborted && account === getAccountGeneration())
+				toastError(error, t`Couldn't complete this action. Try again.`);
+		} finally {
+			if (proposing.current === controller) {
+				proposing.current = null;
+				if (account === getAccountGeneration()) setProposalOwner(null);
+			}
+		}
+	};
 	const generate = useGenerate(application.id);
 	const { provider } = useDefaultProvider();
 	const { data: facts } = useQuery(orpc.career.facts.queryOptions({ input: { applicationId: application.id } }));
+	const evidenceState = useQuery(orpc.career.fitEvidence.queryOptions({ input: { applicationId: application.id } }));
+	const documents = useQuery(orpc.documents.list.queryOptions({ input: { trashed: false } }));
+	const linkResume = useMutation(orpc.applications.update.mutationOptions());
+	const [resumeChoice, setResumeChoice] = useState("");
+	const [evidenceFailure, setEvidenceFailure] = useState(false);
+	const hasEvidence = evidenceState.data?.usable === true;
 	const forget = useMutation(orpc.career.forgetFact.mutationOptions());
 	const readOnly = version?.data.kind === "fit";
 	const item = (readOnly ? version : latest(saved.data, "fit")) as FitItem | undefined;
@@ -71,28 +131,98 @@ export function FitTab({ application, version }: WorkspaceTabProps) {
 			</div>
 		);
 
-	const check = () => void generate.run({ task: "fit" }).catch(() => undefined);
+	const check = () => {
+		if (!hasEvidence || evidenceState.isPending) return;
+		void generate.run({ task: "fit" }).catch(() => undefined);
+	};
 
 	if (!item)
 		return (
-			<div className="grid justify-items-center gap-3 rounded-xl border border-dashed border-line-2 p-7 text-center">
-				<h2 className="font-display text-[22px] leading-7 font-medium">
-					<Trans>Check this role against your evidence</Trans>
-				</h2>
-				<p className="max-w-[420px] text-sm text-ink-2">
+			<EmptyState
+				title={<Trans>Check this role against your evidence</Trans>}
+				description={
 					<Trans>
 						Each requirement in the posting is checked against the facts and stories in your Knowledge. Gaps show as
 						missing evidence, never missing ability.
 					</Trans>
-				</p>
-				<AiNotice className="max-w-[420px] text-start" />
-				{provider && (
-					<Button loading={generate.isPending} onClick={check}>
-						<Icon name="list-checks" size={18} />
-						{generate.isPending ? <Working steps={workingSteps("fit")} /> : <Trans>Check fit</Trans>}
-					</Button>
+				}
+				action={
+					provider ? (
+						<Button disabled={!hasEvidence || evidenceState.isPending} loading={generate.isPending} onClick={check}>
+							<Icon name="list-checks" size={18} />
+							{generate.isPending ? <Working steps={workingSteps("fit")} /> : <Trans>Check fit</Trans>}
+						</Button>
+					) : undefined
+				}
+			>
+				<AiNotice task="fit" application={application} className="max-w-[420px] text-start" />
+				<GenerateNotice generate={generate} onRetry={check} className="max-w-[420px]" />
+				{evidenceState.isError && (
+					<div role="alert">
+						<p>
+							<Trans>Couldn't check your evidence.</Trans>
+						</p>
+						<Button onClick={() => void evidenceState.refetch()}>
+							<Trans>Retry</Trans>
+						</Button>
+					</div>
 				)}
-			</div>
+				{!hasEvidence && (
+					<div className="grid gap-2 text-sm">
+						<p>
+							<Trans>
+								Fit needs evidence. Add facts to Knowledge or choose a resume to link before sending a request.
+							</Trans>
+						</p>
+						<Link to="/dashboard/career/knowledge">
+							<Trans>Add facts</Trans>
+						</Link>
+						<label htmlFor="fit-evidence">
+							<Trans>Resume to use as evidence</Trans>
+						</label>
+						<select
+							id="fit-evidence"
+							className="rounded border border-line bg-surface p-2"
+							value={resumeChoice}
+							onChange={(event) => setResumeChoice(event.target.value)}
+						>
+							<option value="">{t`Choose a resume`}</option>
+							{documents.data
+								?.filter((d) => d.type === "resume")
+								.map((d) => (
+									<option key={d.id} value={d.id}>
+										{d.name}
+									</option>
+								))}
+						</select>
+						<Button
+							type="button"
+							size="sm"
+							disabled={!resumeChoice || linkResume.isPending}
+							onClick={() =>
+								linkResume.mutate(
+									{ id: application.id, resumeId: resumeChoice },
+									{
+										onSuccess: () => {
+											setEvidenceFailure(false);
+											void queryClient.invalidateQueries({ queryKey: orpc.applications.key() });
+											void queryClient.invalidateQueries({ queryKey: orpc.career.fitEvidence.key() });
+										},
+										onError: () => setEvidenceFailure(true),
+									},
+								)
+							}
+						>
+							<Trans>Use this resume as evidence</Trans>
+						</Button>
+						{evidenceFailure && (
+							<p role="alert">
+								<Trans>Couldn't link the resume. Try again.</Trans>
+							</p>
+						)}
+					</div>
+				)}
+			</EmptyState>
 		);
 
 	const evidence = readOnly ? {} : workspace.data.evidence;
@@ -136,7 +266,7 @@ export function FitTab({ application, version }: WorkspaceTabProps) {
 		<div className="grid gap-5">
 			<div className="grid items-end gap-x-6 gap-y-2 @xl:grid-cols-[minmax(0,1fr)_auto]">
 				<div className="grid gap-1">
-					<h2 className="font-display text-[22px] leading-7 font-medium">{item.data.headline}</h2>
+					<h2 className="font-display text-[22px] leading-7">{item.data.headline}</h2>
 					<p className="max-w-[560px] text-sm leading-[19px] text-ink-2">{item.data.summary}</p>
 				</div>
 				<p className="flex flex-wrap items-baseline gap-x-2 font-mono text-xs font-medium text-ink-2">
@@ -154,7 +284,8 @@ export function FitTab({ application, version }: WorkspaceTabProps) {
 					)}
 				</p>
 			</div>
-			{item.outdated && !readOnly && <AiNotice className="-mt-2" />}
+			{item.outdated && !readOnly && <AiNotice task="fit" application={application} className="-mt-2" />}
+			{!readOnly && <GenerateNotice generate={generate} onRetry={check} className="-mt-2 w-fit" />}
 
 			<div
 				role="table"
@@ -187,11 +318,30 @@ export function FitTab({ application, version }: WorkspaceTabProps) {
 							status={statusOf(requirement)}
 							evidence={factId ? (factText(factId) ?? requirement.evidence) : requirement.evidence}
 							readOnly={readOnly}
+							onTailor={tailor}
 							onSaved={(id) => onSaved(requirement, id)}
+							onPropose={
+								application.resumeId && factId && facts?.some((fact) => fact.id === factId && fact.status === "active")
+									? () => void proposeEvidence(factId)
+									: undefined
+							}
+							proposalPending={proposalPending}
 						/>
 					);
 				})}
 			</div>
+			{proposalPending && (
+				<Button
+					variant="secondary"
+					onClick={() => {
+						proposing.current?.abort();
+						proposing.current = null;
+						setProposalOwner(null);
+					}}
+				>
+					<Trans>Stop</Trans>
+				</Button>
+			)}
 
 			{(item.data.checks.length > 0 || item.data.ask) && (
 				<div className="grid items-start gap-4 @xl:grid-cols-2">
@@ -234,10 +384,22 @@ type RequirementRowProps = {
 	evidence: string;
 	readOnly: boolean;
 	onSaved: (factId: string) => void;
+	onTailor: () => void;
+	onPropose?: (() => void) | undefined;
+	proposalPending: boolean;
 };
 
 /** One requirement. Below 1024px From and Status sit under the name; on phones each row is a card. */
-function RequirementRow({ requirement, status, evidence, readOnly, onSaved }: RequirementRowProps) {
+function RequirementRow({
+	requirement,
+	status,
+	evidence,
+	readOnly,
+	onSaved,
+	onTailor,
+	onPropose,
+	proposalPending,
+}: RequirementRowProps) {
 	const [editing, setEditing] = useState(false);
 	const from = requirement.origin === "posting" ? t`Posting` : t`Inferred`;
 	const canAdd = !readOnly && (status === "missing" || status === "partial");
@@ -262,6 +424,16 @@ function RequirementRow({ requirement, status, evidence, readOnly, onSaved }: Re
 			</div>
 			<div role="cell" className="grid content-start justify-items-start gap-2.5">
 				<p className={cn("text-sm leading-5", status === "missing" ? "text-ink-2" : "text-ink")}>{evidence}</p>
+				{!readOnly && onPropose && (
+					<Button size="sm" variant="secondary" disabled={proposalPending} onClick={onPropose}>
+						{proposalPending ? <Trans>Preparing…</Trans> : <Trans>Propose a resume bullet</Trans>}
+					</Button>
+				)}
+				{(status === "missing" || status === "partial") && (
+					<Button size="sm" variant="link" onClick={onTailor}>
+						<Trans>Tailor resume for this job</Trans>
+					</Button>
+				)}
 				{canAdd && (
 					<Swap id={editing ? "editor" : "action"} className="w-full">
 						{editing ? (
@@ -363,7 +535,7 @@ function WorthAsking({ ask, applicationId, readOnly }: WorthAskingProps) {
 					}
 				>
 					<Icon name={added ? "check" : "plus"} size={16} />
-					{added ? <Trans>Added to Prepare</Trans> : <Trans>Add to questions</Trans>}
+					{added ? <Trans>Added to Interview prep</Trans> : <Trans>Add to questions</Trans>}
 				</Button>
 			)}
 		</section>

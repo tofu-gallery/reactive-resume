@@ -1,8 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import { expect, test } from "../fixtures/test";
 
+const invalidRequest =
+	"This connection request is invalid or has expired. Start the connection again from your client.";
+
 test("requires explicit OAuth consent before denying or allowing access", async ({ authPage: page, baseURL }) => {
 	const origin = new URL(baseURL ?? "http://localhost:3000").origin;
+	await page.goto("/auth/consent?client_id=unknown-client&sig=forged");
+	await expect(page.getByText(invalidRequest)).toBeVisible();
 	const metadata = await page.request.get("/.well-known/oauth-protected-resource");
 	expect(metadata.status()).toBe(200);
 	const advertisedResource = (await metadata.json()).resource;
@@ -28,6 +33,12 @@ test("requires explicit OAuth consent before denying or allowing access", async 
 	});
 	query.append("resource", origin);
 	await page.route(`${callback}**`, (route) => route.fulfill({ body: "Client callback" }));
+	await page.goto(`/api/auth/oauth2/authorize?${query}`);
+	const tampered = new URL(page.url()).searchParams;
+	tampered.set("state", "tampered");
+	await page.goto(`/auth/consent?${tampered}`);
+	await expect(page.getByText(invalidRequest)).toBeVisible();
+	await expect(page.getByRole("button", { name: "Allow access", exact: true })).toHaveCount(0);
 	for (const accept of [false, true]) {
 		await page.goto(`/api/auth/oauth2/authorize?${query}`);
 		await expect(page.getByRole("heading", { name: "Connect an application" })).toBeVisible();

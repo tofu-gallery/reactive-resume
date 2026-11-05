@@ -9,12 +9,15 @@ For focused work on one job, open its details and select **Open workspace**. [Ca
 
 To open it, select **Applications** in the sidebar (on a phone, it's in the bottom tab bar).
 
-<Frame caption="The Applications page in the List view, with the follow-up reminder at the top">
+<Frame caption="Next steps and follow-up reminders in Applications">
   <img
-    src="/images/guides/tracking-job-applications/applications-list-view.webp"
-    alt="Applications page showing a follow-up reminder banner, the List, Board, Insights and Calendar tabs, a search field, Show closed, and applications grouped under Interview, Offer, Screening, Applied and Saved"
+    src="/images/guides/tracking-job-applications/applications-next-step-list.webp"
+    alt="Applications page showing a follow-up reminder for 2 applications with Show, the List, Board, Insights and Calendar tabs, a search field, Show closed, and applications grouped under Interview, Offer, Screening and Applied, with next steps such as Waiting for interview feedback, Decide on the offer and No reply in 35 days"
   />
 </Frame>
+
+Interview and activity times use your interface language’s 12- or 24-hour clock on web and native.
+Their timezone follows **Settings → Preferences**.
 
 ## How stages work
 
@@ -29,7 +32,9 @@ Every application sits in one stage. The first five stages form a pipeline you m
 | **Offer**     | You received an offer.                                                   |
 | **Closed**    | The application ended, whatever the outcome.                             |
 
-You can close an application from any stage. Closing asks for a reason (**Not selected**, **I withdrew**, **Accepted another offer** or **No response**), which Insights uses later. Closed applications are hidden until you turn on **Show closed**. See [Managing an application](/guides/managing-an-application#closing-an-application).
+You can rename, recolor and reorder stages, and add your own, such as **Take-home assignment** or **Ghosted**. Each one you add counts as one of these stages. See [Customizing application stages](/guides/customizing-application-stages).
+
+You can close an application from any stage. Closing asks for a reason (**Accepted offer**, **Not selected**, **I withdrew**, **Accepted another offer** or **No response**), which Insights uses later. Closing from **Offer** starts on **Accepted offer**. Closed applications are hidden until you turn on **Show closed applications**. See [Managing an application](/guides/managing-an-application#closing-an-application).
 
 <Note>
   When an application with a linked resume or letter reaches **Applied** or a later stage, Reactive Resume saves a copy
@@ -39,28 +44,31 @@ You can close an application from any stage. Closing asks for a reason (**Not se
 
 ## Choosing a view
 
-Use the tabs above the list to switch views. Your choice is kept in the page address, so a bookmark opens the same view.
+In the web app, use the tabs above the list to switch views. Your choice is kept in the page address, so a bookmark opens the same view. In the native mobile app, open **Applications** and use the view selector below the heading: **List**, **Board**, **Calendar** or **Insights**. All four views are available on phones and tablets.
 
 <Tabs>
   <Tab title="List">
-    The default view. Applications are grouped by stage in the order that usually needs you first: **Interview**, **Offer**, **Screening**, **Applied**, **Saved**, then **Closed** when shown.
+    The default view. Categories that usually need you first appear first: **Interview**, **Offer**, **Screening**, **Applied**, **Saved**, then **Closed** when shown. Custom stages within a category follow your configured stage order.
 
     - Select a group heading to collapse or expand it.
+    - Within each group, rows follow **Next step**: dated interviews, offer deadlines and follow-ups first, soonest first, then the application that has waited longest in its stage. The wait counts from the stage's own date, such as the stage date in an imported CSV, not from when the row was added or last changed. An imported stage without a date has no elapsed wait and sorts after known stage dates. Moving between custom lanes in the same stage does not restart that clock. Web and native use the same ordering; equal dates keep a stable order.
     - Select the **Role**, **Next step** or **Updated** column heading to sort within each group. Select it again to reverse the order.
-    - The **Next step** column shows the next interview, the follow-up you set, or how long you've been waiting. It turns amber when something is overdue or you've had no reply for 10 days or more.
-    - The **Sent** column shows an icon for a linked resume and a linked letter. It says **None** in amber when an application was sent without a linked document.
+    - The **Next step** column shows the next interview, the follow-up you set, or what the stage is waiting on: how long ago you applied, **Waiting to hear back** after screening, **Waiting for interview feedback** once your interviews are done, **No interview scheduled** in Interview without an interview date, or **Reply to the offer**, **Add the offer's terms** or **Decide on the offer** in Offer, depending on the saved terms and deadline. It turns amber when something is overdue, when you've had no reply for 10 days or more, and for an offer to decide.
+    - The **Sent** column shows an icon for a linked resume and a linked letter. It says **No documents attached** in amber when an application was sent without a linked document.
     - Select a row to open its details.
 
   </Tab>
   <Tab title="Board">
-    One column per stage, with a card for each application. Drag a card to another column to move it to that stage. Each card also has a **⋯** menu with **Move to…**, **Close…** and **Delete…**, which is handy if you prefer the keyboard. When **Show closed** is on, a **Closed** column appears too. Dragging a card there asks why it ended before closing it, so Insights can use the outcome. In the mobile app, the **Closed** column is always the last column on the board.
+    One column per stage, with a card for each application. Drag a card to another column to move it to that stage. Each card also has a **⋯** menu with **Move to…**, **Mark as closed…** and **Delete…**, which is handy if you prefer the keyboard. When **Show closed applications** is on, a **Closed** column appears too. Dragging a card there asks why it ended before closing it, so Insights can use the outcome. In the mobile app, the **Closed** column is always the last column on the board.
 
-    <Frame caption="The Board view">
-      <img src="/images/guides/tracking-job-applications/applications-board-view.webp" alt="Board view with Saved, Applied, Screening and Interview columns, each card showing the role, company and next step" />
+    At a 1440px desktop browser width, the five standard open stages fit together, including **Offer**. Native tablet lanes also adapt to the available board width. Narrower boards and boards with extra stages keep horizontal scrolling so cards stay readable.
+
+    <Frame caption="Board view groups applications by stage">
+      <img src="/images/guides/tracking-job-applications/default-application-board.png" alt="Applications board with Saved, Applied, Screening, Interview and Offer fully visible, and a fictional Platform Engineer application in Interview" />
     </Frame>
 
     <Frame caption="A card's menu, with Move to… open">
-      <img src="/images/guides/tracking-job-applications/board-card-move-to-menu.webp" alt="Card menu with Move to…, Close… and Delete…, and the Move to submenu listing Saved, Applied, Screening, Interview and Offer" />
+      <img src="/images/guides/tracking-job-applications/board-card-move-to-menu.webp" alt="Card menu with Move to…, Mark as closed… and Delete…, and the Move to submenu listing Saved, Applied, Screening, Interview and Offer" />
     </Frame>
 
   </Tab>
@@ -68,44 +76,114 @@ Use the tabs above the list to switch views. Your choice is kept in the page add
     Charts about how your applications are going: how far they get, how often and how quickly people reply, and where your applications come from. See [Viewing application insights](/guides/viewing-application-insights).
   </Tab>
   <Tab title="Calendar">
-    A month calendar of your interviews, with a list of upcoming ones beside it. See [Scheduling interviews](/guides/scheduling-interviews).
+    A month calendar of your interviews, with a list of upcoming ones beside it in the web app. In a phone browser, a chronological agenda replaces the grid; use the month arrows to browse dates. The native mobile app also shows follow-ups, with the selected day and **Coming up** below the month on phones. See [Scheduling interviews](/guides/scheduling-interviews).
   </Tab>
 </Tabs>
 
-On phones, the page shows **List** and **Insights** only, and list rows show the company and next step on a second line.
+In a narrow phone browser, the web page shows **List**, **Insights** and **Calendar**, and list rows show the company and next step on a second line. **Board** remains available on wider browser layouts. The native mobile app offers all four views on phones and tablets.
+
+## Keyboard triage in List
+
+In the web app, use <kbd>Tab</kbd> to focus an application's role button. Its outline shows which application receives shortcuts. Moving focus outside the row stops bare-key triage. In the native app with a hardware keyboard, choose **Keyboard triage** in List; the outlined row and its role/company identify the current application. Choose **Stop keyboard triage** to turn it off.
+
+| Key                         | Action                                                                                                                                                                                               |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| <kbd>j</kbd> / <kbd>k</kbd> | Focus the next / previous displayed application. Stops at the ends; follows sorting, filters and expanded groups.                                                                                    |
+| <kbd>Enter</kbd>            | Open the focused application's details.                                                                                                                                                              |
+| <kbd>1</kbd>–<kbd>5</kbd>   | Move to **Saved**, **Applied**, **Screening**, **Interview** or **Offer**, respectively, using that category's default stage. **Undo** cancels the pending move; a newer stage saved elsewhere wins. |
+| <kbd>x</kbd>                | Toggle the focused application in the existing bulk selection.                                                                                                                                       |
+| <kbd>f</kbd>                | Record **Followed up** for an open application beyond Saved. Sends no message; see [Managing an application](/guides/managing-an-application).                                                       |
+
+Typing in a field or editor, composing text, modifier chords, and open dialogs, menus or sheets do not trigger background triage. Holding a command key does not repeat stage, selection or contact actions. A hidden or removed application cannot receive the next action.
+
+Native bare-key triage requires an updated iOS or Android store build. Older installed binaries retain their existing controls and modifier shortcuts.
+
+<Frame caption="The role button's outline identifies keyboard focus; x selected the same fictional application for bulk actions.">
+  <img
+    src="/images/guides/career/applications-keyboard-triage.png"
+    alt="Fictional Cedar Platform engineer in Interview with an outlined role button, checked selection and one selected in the bulk toolbar"
+  />
+</Frame>
 
 ## Finding applications
 
 Type in **Search applications** to filter the list as you type. Search looks at the role, company, location, contact names and tags. If nothing matches, select **Clear search**.
 
-**Show closed** adds closed applications to the List, Board and Calendar views. Insights always counts every application.
+In the web app, press <kbd>/</kbd> with an Applications view focused, outside a text field, to focus search. In the native mobile app, use <kbd>⌘</kbd> <kbd>F</kbd> on an iPad hardware keyboard or <kbd>Ctrl</kbd> <kbd>F</kbd> on Android. Open sheets and alerts keep keyboard focus.
 
-## Acting on several applications at once
-
-In the List view on a computer or tablet, select the checkboxes next to the applications you want. A bar appears at the bottom of the page with:
-
-- **Move to…** to move them all to one stage
-- **Add tag** to add the same tag to each
-- **Close…** to close them all with one reason
-- **Delete…** to delete them permanently (you're asked to confirm)
-- **Clear** to deselect
-
-<Frame caption="Two applications selected, with the bulk actions bar">
+<Frame caption="Selecting a tag searches for it; here the fictional list shows Northwind Labs">
   <img
-    src="/images/guides/tracking-job-applications/list-bulk-actions-bar.webp"
-    alt="Two application rows checked in the List view and a dark bar reading 2 selected with Move to…, Add tag, Close…, Delete… and Clear"
+    src="/images/guides/career/applications-search-shortcut.png"
+    alt="Applications search filled with platform after selecting that tag on the Staff Engineer row at fictional Northwind Labs, with the tag chips still visible"
   />
 </Frame>
 
-Selection follows the visible rows. Hiding closed applications, collapsing a stage or changing the search removes hidden selections before a bulk action.
+In the web app, **Show closed applications** adds closed applications to the List, Board and Calendar views. The native mobile calendar shows only open applications. Insights always counts every application.
+
+Rows and board cards show up to two of an application's tags, with a count for the rest. Select a tag to search for it without leaving the list; the search box shows the tag, and **Clear search** returns to every application.
+
+## Acting on several applications at once
+
+In the List view on a computer or tablet, select the checkboxes next to the applications you want. The checkbox in the table header selects every row in the expanded stages, or clears them; it shows a partial state while only some are selected. After you select at least one row, a bar appears at the bottom of the page with:
+
+- **Select all** to add every matching application in expanded stages
+- **Tags…** to add the same tag to each
+- **Move to…** to move them all to one stage
+- **Close…** to close them all with one reason
+- **Clear selection** (×) to deselect
+- **Delete permanently…** to delete them permanently (you're asked to confirm)
+
+<Frame caption="Act on selected applications">
+  <img
+    src="/images/guides/tracking-job-applications/list-bulk-actions-bar.png"
+    alt="Five fictional applications with every visible row checked from the header checkbox, above a selection bar with 5 selected, Tags…, Move to…, Close…, clear and Move to Trash"
+  />
+</Frame>
+
+Bulk moves and keyboard triage show the new stage and **Undo** once the pending move is ready. They're saved when the message goes away, when you reload or close the tab, or when the native app goes to the background; **Undo** puts the selected applications back where they were, without recording a stage change. If you move one of them again before then, here or on another device, that later move stays, even if it moved away and back to the same stage: the bulk move leaves it and says so, and **Undo** leaves it too. Other edits, such as a note, don't stop the move. If you move the same applications again before the first move is saved, or while a move of one of them from its own menu or details, **Mark as applied**, or a message's changes are still being saved, the later move is saved after the earlier one, so it's the one that stays. Removing a stage in **Stages** moves its applications to another stage of the same kind without counting as a change. Tags and deletions are saved straight away.
+
+<Frame caption="The fictional application shows Offer while Undo can still cancel the pending move.">
+  <img
+    src="/images/guides/tracking-job-applications/stage-move-undo.png"
+    alt="Fictional Cedar Platform engineer in Offer with a Moved to Offer message and Undo button"
+  />
+</Frame>
+
+You can act on up to 200 applications at once. Larger selections show a reminder; deselect rows or narrow the search before choosing an action. The list leaves room to scroll its final rows above the selection bar, including when its buttons wrap.
+
+In the native mobile app, open a row's **⋯** actions to start a selection, then tap other rows to add them. The selection controls appear above the list with **Select all**, **Tags…**, **Move to…**, **Close…**, **Clear selection** and **Delete permanently…**.
+
+Selection follows the visible rows. Hiding closed applications, collapsing a stage, changing the search or applying **Needs you** removes hidden selections before a bulk action.
+
+## Focus on what needs you
+
+Select **Needs you** in Applications to show jobs whose next step needs your attention: an interview within a week, a follow-up due within a day or overdue, a long wait without a reply, or an offer to decide. The filter uses the same next-step rules as [Career → Today](/guides/career-overview), on your account's timezone. Closed applications need no action and stay out of this filter.
+
+The filter works in List, Board, Calendar and Insights, and stays on when you switch views. Search can narrow it further. Turn **Needs you** off to show the other applications again; if no applications match, **Clear filters** removes the search and attention filters. Filtering changes what you see, without changing any saved application or stage.
+
+Calendar shows events from matching applications. An application whose next interview is more than a week away may be hidden; turn **Needs you** off to see its events. Calendar and Insights offer **Clear filters** when the filtered results have no events or sent applications to show.
+
+<Frame caption="Needs you narrows the list to fictional applications with an actionable next step">
+  <img
+    src="/images/guides/tracking-job-applications/applications-needs-you.png"
+    alt="Applications with Needs you selected and four fictional jobs awaiting a reply, follow-up, upcoming interview or offer decision"
+  />
+</Frame>
+
+The native mobile app has the same **Needs you** chip above its views. Its search and attention filter clear when you switch accounts.
 
 ## Follow-up reminders
 
-When an application has been at **Applied** for 10 days or more without a reply, a reminder appears above the list for the one that has waited longest, for example "Harborlight Labs: no reply for 17 days." Select **Open** to go to that application, or **×** to dismiss the reminder. Dismissing is remembered in this browser, so that application's reminder doesn't come back here.
+A reminder appears above the list when applications owe a follow-up: the follow-up date you set is due, an application has been at **Applied** or **Screening** for 10 days without a reply, or 10 days have passed since its last recorded interview ended.
+
+- With one, the reminder names it, for example "Harborlight Labs: no reply for 17 days." Select **Open** to go to that application.
+- With several, it counts them, for example "8 applications need a follow-up." Select **Show** to list only those applications, then **Show all** to return to the full list.
+
+Select **×** to dismiss the reminder. Dismissing is remembered on this device, so those applications don't come back in it here. The same rules feed **Needs you** in [Career → Today](/guides/career-overview), which also lists interviews in the next week and offers to decide. The native mobile app shows the same reminder above its list.
 
 ## Opening Applications from anywhere
 
-Press <kbd>⌘</kbd> <kbd>K</kbd> (<kbd>Ctrl</kbd> <kbd>K</kbd> on Windows and Linux) and choose **Applications** to go to the page or to search your applications by company or role. Run **New application** to open the add dialog. See [Using the command bar](/guides/using-the-command-bar).
+Press <kbd>⌘</kbd> <kbd>K</kbd> (<kbd>Ctrl</kbd> <kbd>K</kbd> on Windows and Linux) and type a company or role to find an application from the first list, or choose **Applications** to go to the page. Run **Save job** to open the add dialog. See [Using the command bar](/guides/using-the-command-bar).
 
 ## Related guides
 
@@ -125,3 +203,12 @@ Press <kbd>⌘</kbd> <kbd>K</kbd> (<kbd>Ctrl</kbd> <kbd>K</kbd> on Windows and L
 </CardGroup>
 
 You can also manage applications from an AI client over MCP. See [Managing applications with MCP](/guides/managing-applications-with-mcp).
+
+<Frame caption="German application labels describe closed applications, commands, and attached documents. This example is fictional.">
+  <img
+    src="/images/guides/tracking-job-applications/german-contextual-labels.png"
+    alt="German Applications page for Maya Chen, showing Accessibility Engineer at fictional Lumen Workshop, Geschlossene Bewerbungen anzeigen, and Keine Dokumente angehängt"
+  />
+</Frame>
+The dates you choose for stage history do not change which move happened last. After retrying a submission or message
+change whose response was lost, reload the list before moving it again.

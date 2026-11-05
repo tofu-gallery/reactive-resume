@@ -1,5 +1,7 @@
 import type { IconName } from "./icon";
 import type { ColorToken } from "./tokens";
+import type { ComponentRef, Ref } from "react";
+import type { Pressable } from "react-native";
 import { ActivityIndicator, Platform, View } from "react-native";
 import { Icon } from "./icon";
 import { FeedbackPressable } from "./pressable";
@@ -21,6 +23,7 @@ export type ButtonProps = {
 	/** Shows a spinner and blocks presses while an action runs. */
 	loading?: boolean | undefined;
 	fullWidth?: boolean | undefined;
+	expanded?: boolean | undefined;
 	accessibilityHint?: string | undefined;
 	testID?: string | undefined;
 };
@@ -45,6 +48,7 @@ export function Button({
 	disabled,
 	loading,
 	fullWidth,
+	expanded,
 	accessibilityHint,
 	testID,
 }: ButtonProps) {
@@ -76,7 +80,7 @@ export function Button({
 			accessibilityRole="button"
 			accessibilityLabel={label}
 			accessibilityHint={accessibilityHint}
-			accessibilityState={{ disabled: !!inactive, busy: !!loading }}
+			accessibilityState={{ disabled: !!inactive, busy: !!loading, expanded }}
 			disabled={inactive}
 			onPress={onPress}
 			testID={testID}
@@ -108,6 +112,7 @@ export function Button({
 }
 
 export type IconButtonProps = {
+	ref?: Ref<ComponentRef<typeof Pressable>> | undefined;
 	icon: IconName;
 	/** The accessible name; icons are decorative. */
 	label: string;
@@ -126,6 +131,7 @@ export type IconButtonProps = {
 };
 
 export function IconButton({
+	ref,
 	icon,
 	label,
 	onPress,
@@ -145,6 +151,7 @@ export function IconButton({
 
 	return (
 		<FeedbackPressable
+			ref={ref}
 			accessibilityRole="button"
 			accessibilityLabel={label}
 			accessibilityHint={accessibilityHint}

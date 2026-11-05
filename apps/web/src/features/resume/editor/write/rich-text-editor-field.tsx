@@ -1,13 +1,15 @@
 import type { ImproveLine } from "./improve";
+import type { ImproveKind } from "./improve";
 import type { Menu } from "@base-ui/react/menu";
 import type { IconName } from "@reactive-resume/ui/components/icon";
 import type { Editor } from "@tiptap/react";
 import type { ReactNode } from "react";
+import { Toolbar } from "@base-ui/react/toolbar";
 import { t } from "@lingui/core/macro";
 import { Plural, Trans } from "@lingui/react/macro";
+import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import {
 	DropdownMenu,
 	DropdownMenuCheckboxItem,
@@ -26,9 +28,10 @@ import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { useKeyboardInset } from "@reactive-resume/ui/hooks/use-keyboard-inset";
 import { cn } from "@reactive-resume/utils/style";
 import { ImprovePanel, lineAtCaret } from "./improve";
+import { acceptImproveLine, improveSourceChanges } from "./improve-history";
+import { cleanPastedHtml } from "@/components/input/pasted-html";
 import { richTextExtensions } from "@/components/input/rich-text-extensions";
-import { hasUnsupportedTableMarkup } from "@/components/input/rich-text-markup";
-import { openAssistantFrom } from "@/features/assistant/open";
+import { hasUnsupportedTableMarkup, toPreviewHtml } from "@/components/input/rich-text-markup";
 import { AiProviderLoadState } from "@/features/settings/integrations/ai-provider-load-state";
 import { useHasUsableAiProvider } from "@/features/settings/integrations/hooks/use-has-usable-ai-provider";
 import { usePrompt } from "@/hooks/use-confirm";
@@ -44,6 +47,11 @@ type ToolbarAction = {
  * Bold, Italic, Underline, Link, then lists; alignment and the rarer formatting (strikethrough, code, highlight,
  * headings, colour, indent, a rule and Clear formatting) sit in two menus so the toolbar fits a narrow column.
  */
+
+/** An address as typed, with `https://` when it names no scheme ("priya.dev"); mailto:, tel: and the rest stay. */
+const withLinkScheme = (address: string) =>
+	/^[a-z][a-z\d+.-]*:/i.test(address) || address.startsWith("#") ? address : `https://${address}`;
+
 function useToolbarActions(): ToolbarAction[] {
 	const prompt = usePrompt();
 
@@ -75,11 +83,14 @@ function useToolbarActions(): ToolbarAction[] {
 				const href = await prompt(t`Link address`, {
 					defaultValue: current || "https://",
 					description: t`Leave it empty to remove the link.`,
+					confirmText: current ? t`Save link` : t`Add link`,
 				});
 				if (href === null) return editor.commands.focus();
 				const chain = editor.chain().focus().extendMarkRange("link");
-				if (!href.trim() || href.trim() === "https://") chain.unsetLink().run();
-				else chain.setLink({ href: href.trim() }).run();
+				const address = href.trim();
+				if (!address || address === "https://") chain.unsetLink().run();
+				// "priya.dev" would be a relative link, broken in the PDF: an address without a scheme is a web address.
+				else chain.setLink({ href: withLinkScheme(address) }).run();
 			},
 		},
 		{
@@ -170,7 +181,14 @@ export type RichTextEditorProps = {
 	/** Accessible name of the text box. */
 	label: string;
 	value: string;
-	onChange: (html: string) => void;
+	onChange: (
+		html: string,
+		options?: {
+			newStep?: boolean;
+			aiOperationIds?: string[] | undefined;
+			removedAiOperationIds?: string[] | undefined;
+		},
+	) => void;
 	/** Guidance under the text while editing, e.g. "2–3 sentences reads best". */
 	hint?: ReactNode;
 	disabled?: boolean;
@@ -179,6 +197,8 @@ export type RichTextEditorProps = {
 	id?: string;
 	/** Replaces the text area's default height (88px to 360px). */
 	heightClassName?: string;
+	/** Improve's presets for a cover letter's body, instead of the resume ones. */
+	improve?: ImproveKind | undefined;
 };
 
 /**
@@ -197,6 +217,7 @@ export function RichTextEditor({
 	id,
 	heightClassName = "max-h-[360px] min-h-[88px]",
 	focusRequest,
+	improve,
 }: RichTextEditorProps & { focusRequest?: FocusRequest }) {
 	const [focused, setFocused] = useState(false);
 	const toolbar = useRef<HTMLDivElement>(null);
@@ -205,15 +226,55 @@ export function RichTextEditor({
 	const ai = useHasUsableAiProvider();
 	const mobile = useBreakpoint() === "mobile";
 	const keyboardInset = useKeyboardInset();
+	const acceptedReplacement = useRef<Parameters<RichTextEditorProps["onChange"]>[1]>(undefined);
 	const readOnlyTable = useMemo(() => hasUnsupportedTableMarkup(value), [value]);
+	const editorValue = useMemo(() => (readOnlyTable ? toPreviewHtml(value) : value), [readOnlyTable, value]);
 
+	// ⌘K / Ctrl+K adds a link here, as in most writing tools, instead of opening the command palette.
+	const linkShortcut = useRef<(() => void) | null>(null);
 	const editor = useEditor({
 		extensions: richTextExtensions,
-		content: value,
+		content: editorValue,
 		editable: !disabled && !readOnlyTable,
 		immediatelyRender: false,
 		shouldRerenderOnTransaction: false,
 		editorProps: {
+			handleKeyDown: (view, event) => {
+				if (event.key === "Tab") {
+					// Commit the live range before focus leaves: the browser's selectionchange can still be queued.
+					const range = view.dom.ownerDocument.getSelection();
+					if (
+						range?.anchorNode &&
+						range.focusNode &&
+						view.dom.contains(range.anchorNode) &&
+						view.dom.contains(range.focusNode)
+					) {
+						const anchor = view.posAtDOM(range.anchorNode, range.anchorOffset);
+						const head = view.posAtDOM(range.focusNode, range.focusOffset);
+						const current = view.state.selection;
+						const sameNode =
+							current instanceof NodeSelection &&
+							Math.min(anchor, head) === current.from &&
+							Math.max(anchor, head) === current.to;
+						if (!sameNode) {
+							const selection = TextSelection.between(view.state.doc.resolve(anchor), view.state.doc.resolve(head));
+							if (!selection.eq(current)) view.dispatch(view.state.tr.setSelection(selection));
+						}
+					}
+					return false;
+				}
+				const mod = event.metaKey || event.ctrlKey;
+				if (!mod || event.altKey || event.shiftKey || event.key.toLowerCase() !== "k" || !linkShortcut.current)
+					return false;
+				event.preventDefault();
+				event.stopPropagation();
+				linkShortcut.current();
+				return true;
+			},
+			transformPastedHTML: (pasted) => {
+				const html = cleanPastedHtml(pasted);
+				return hasUnsupportedTableMarkup(html) ? toPreviewHtml(html) : html;
+			},
 			attributes: {
 				...(id ? { id } : {}),
 				"aria-label": label,
@@ -227,7 +288,17 @@ export function RichTextEditor({
 				),
 			},
 		},
-		onUpdate: ({ editor }) => onChange(editor.getHTML()),
+		onTransaction: ({ editor, transaction }) => {
+			const sources = improveSourceChanges(transaction);
+			if (!sources || transaction.getMeta("preventUpdate") || !transaction.before.eq(editor.state.doc)) return;
+			acceptedReplacement.current = undefined;
+			onChange(editor.getHTML(), sources);
+		},
+		onUpdate: ({ editor, transaction }) => {
+			const options = improveSourceChanges(transaction) ?? acceptedReplacement.current;
+			acceptedReplacement.current = undefined;
+			onChange(editor.getHTML(), options);
+		},
 	});
 
 	const state = useEditorState({
@@ -243,12 +314,21 @@ export function RichTextEditor({
 				: { characters: 0, active: [] as boolean[], canImprove: false, formatting: DEFAULT_FORMATTING },
 	});
 	const menus = useToolbarMenus(editor, () => setFocused(false));
+	useEffect(() => {
+		const link = actions.find((action) => action.icon === "link-simple-horizontal");
+		linkShortcut.current =
+			editor && link
+				? () => {
+						if (editor.isEditable) link.run(editor);
+					}
+				: null;
+	}, [actions, editor]);
 
 	// Undo, the page and the assistant change the text from outside; keep the editor in step.
 	useEffect(() => {
-		if (!editor || editor.getHTML() === value) return;
-		editor.commands.setContent(value, { emitUpdate: false });
-	}, [editor, value]);
+		if (!editor || editor.getHTML() === editorValue) return;
+		editor.commands.setContent(editorValue, { emitUpdate: false });
+	}, [editor, editorValue]);
 
 	useEffect(() => {
 		editor?.setEditable(!disabled && !readOnlyTable, false);
@@ -266,10 +346,21 @@ export function RichTextEditor({
 
 	const editing = focused || improving !== null || menus.open;
 
+	const acceptImprove = (line: ImproveLine, text: string, aiOperationIds?: string[]) => {
+		if (!editor?.isEditable || editor.state.doc.textBetween(line.from, line.to) !== line.text) return;
+		acceptedReplacement.current = { newStep: true, aiOperationIds };
+		acceptImproveLine(editor, line, text, aiOperationIds);
+		// Identical wording can still have an accepted source; Tiptap emits no content update in that case.
+		if (acceptedReplacement.current) {
+			const options = acceptedReplacement.current;
+			acceptedReplacement.current = undefined;
+			onChange(editor.getHTML(), options);
+		}
+	};
+
 	const startImprove = () => {
 		if (!editor || ai.isUnavailable) return;
 		// Without a provider, the assistant's inline setup connects one.
-		if (!ai.hasUsableProvider) return void openAssistantFrom({ assistant: "new" });
 		setImproving(lineAtCaret(editor));
 	};
 
@@ -277,7 +368,7 @@ export function RichTextEditor({
 	const toolbarButtons = (
 		<>
 			{actions.map((action, index) => (
-				<button
+				<Toolbar.Button
 					key={action.icon}
 					type="button"
 					aria-label={action.label}
@@ -294,7 +385,7 @@ export function RichTextEditor({
 					)}
 				>
 					<Icon name={action.icon} />
-				</button>
+				</Toolbar.Button>
 			))}
 			{editor && (
 				<FormattingMenus
@@ -305,7 +396,7 @@ export function RichTextEditor({
 					menus={menus}
 				/>
 			)}
-			<button
+			<Toolbar.Button
 				type="button"
 				aria-expanded={improving !== null}
 				disabled={ai.isUnavailable || (!state?.canImprove && improving === null)}
@@ -322,7 +413,7 @@ export function RichTextEditor({
 				<span className="@max-[24rem]:sr-only">
 					<Trans>Improve</Trans>
 				</span>
-			</button>
+			</Toolbar.Button>
 		</>
 	);
 
@@ -336,41 +427,12 @@ export function RichTextEditor({
 				if (!event.currentTarget.contains(next) && !toolbar.current?.contains(next) && !inMenu) setFocused(false);
 			}}
 			className={cn(
-				"rounded-lg border border-line-2 bg-raised transition-[border-color,box-shadow] duration-quick",
+				"rounded-lg border border-control-border bg-raised transition-[border-color,box-shadow] duration-quick",
 				editing && "border-accent shadow-[0_0_0_3px_var(--accent-soft)]",
 				disabled && "bg-sunken",
 				className,
 			)}
 		>
-			{/* On phones the toolbar docks above the keyboard, with Done to put the keyboard away. */}
-			{editing &&
-				!readOnlyTable &&
-				mobile &&
-				createPortal(
-					<div
-						ref={toolbar}
-						role="toolbar"
-						aria-label={t`Formatting`}
-						style={{ bottom: keyboardInset }}
-						className="fixed inset-x-0 z-50 flex h-11 items-center gap-0.5 border-t border-line bg-raised px-1.5 shadow-e2"
-					>
-						<div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">{toolbarButtons}</div>
-						<button
-							type="button"
-							onMouseDown={(event) => event.preventDefault()}
-							onClick={() => {
-								setImproving(null);
-								setFocused(false);
-								editor?.commands.blur();
-							}}
-							className="flex h-11 shrink-0 items-center rounded-md px-3 text-sm font-semibold text-accent-text"
-						>
-							<Trans>Done</Trans>
-						</button>
-					</div>,
-					document.body,
-				)}
-
 			{readOnlyTable && (
 				<p role="status" className="border-b border-line px-3 py-2 text-xs text-ink-2">
 					<Trans>
@@ -380,18 +442,43 @@ export function RichTextEditor({
 			)}
 
 			<EditorContent editor={editor} />
+			{/* On phones the toolbar docks above the keyboard, with Done to put the keyboard away. */}
+			{editing && !readOnlyTable && mobile && (
+				<Toolbar.Root
+					ref={toolbar}
+					aria-label={t`Formatting`}
+					style={{ bottom: keyboardInset }}
+					className="fixed inset-x-0 z-50 flex h-11 items-center gap-0.5 border-t border-line bg-raised px-1.5 shadow-e2"
+				>
+					<div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">{toolbarButtons}</div>
+					<Toolbar.Button
+						type="button"
+						onMouseDown={(event) => event.preventDefault()}
+						onClick={() => {
+							setImproving(null);
+							setFocused(false);
+							editor?.commands.blur();
+						}}
+						className="flex h-11 shrink-0 items-center rounded-md px-3 text-sm font-semibold text-accent-text"
+					>
+						<Trans>Done</Trans>
+					</Toolbar.Button>
+				</Toolbar.Root>
+			)}
+
 			{editing && <AiProviderLoadState state={ai} />}
+			{/* Room for the docked toolbar, so the end of the text and its hints can scroll clear of it. */}
+			{editing && !readOnlyTable && mobile && <div aria-hidden="true" className="h-11" />}
 
 			{/* Under the text, so focusing the field never moves the line you clicked. */}
 			{editing && !readOnlyTable && !mobile && (
-				<div
+				<Toolbar.Root
 					ref={toolbar}
-					role="toolbar"
 					aria-label={t`Formatting`}
 					className="@container flex flex-wrap gap-0.5 border-t border-line px-1.5 py-1"
 				>
 					{toolbarButtons}
-				</div>
+				</Toolbar.Root>
 			)}
 
 			{editor && improving && (
@@ -401,6 +488,8 @@ export function RichTextEditor({
 					line={improving}
 					where={label}
 					onClose={() => setImproving(null)}
+					onAccept={(text, aiOperationIds) => acceptImprove(improving, text, aiOperationIds)}
+					kind={improve}
 				/>
 			)}
 
@@ -461,13 +550,14 @@ function FormattingMenus({ editor, formatting, buttonClassName, side, menus }: F
 	return (
 		<>
 			<DropdownMenu {...menus.rootProps("align")}>
-				<DropdownMenuTrigger
+				<Toolbar.Button
+					render={<DropdownMenuTrigger />}
 					aria-label={t`Text alignment`}
 					title={t`Text alignment`}
 					className={cn(buttonClassName, "ms-1.5", formatting.align !== "left" && "bg-accent-soft text-accent-text")}
 				>
 					<Icon name={ALIGNMENT_ICONS[formatting.align]} />
-				</DropdownMenuTrigger>
+				</Toolbar.Button>
 				<DropdownMenuContent side={side} className="w-44" {...menus.contentProps}>
 					<DropdownMenuRadioGroup
 						value={formatting.align}
@@ -486,9 +576,14 @@ function FormattingMenus({ editor, formatting, buttonClassName, side, menus }: F
 			</DropdownMenu>
 
 			<DropdownMenu {...menus.rootProps("more")}>
-				<DropdownMenuTrigger aria-label={t`More formatting`} title={t`More formatting`} className={buttonClassName}>
+				<Toolbar.Button
+					render={<DropdownMenuTrigger />}
+					aria-label={t`More formatting`}
+					title={t`More formatting`}
+					className={buttonClassName}
+				>
 					<Icon name="dots-three" />
-				</DropdownMenuTrigger>
+				</Toolbar.Button>
 				<DropdownMenuContent side={side} className="w-56" {...menus.contentProps}>
 					<DropdownMenuCheckboxItem checked={formatting.strike} onCheckedChange={() => chain().toggleStrike().run()}>
 						<Icon name="text-strikethrough" />

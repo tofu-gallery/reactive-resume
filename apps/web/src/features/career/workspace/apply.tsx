@@ -1,11 +1,16 @@
 import type { Fact } from "../hooks";
 import type { WorkspaceTabProps } from "./shell";
 import type { CareerWorkspace } from "@reactive-resume/schema/career";
-import { plural, t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural, t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { AnimatePresence } from "motion/react";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { answerLimit } from "@reactive-resume/schema/application-answers";
+import { hasApplicationSubmission } from "@reactive-resume/schema/applications/data";
+import { applicationReviewChecks, nextPreparationStep } from "@reactive-resume/schema/applications/preparation";
 import { careerWorkspaceSchema } from "@reactive-resume/schema/career";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Checkbox } from "@reactive-resume/ui/components/checkbox";
@@ -22,15 +27,32 @@ import { Textarea } from "@reactive-resume/ui/components/textarea";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@reactive-resume/ui/components/tooltip";
 import { downloadWithAnchor, generateFilename } from "@reactive-resume/utils/file";
+import { rewriteSummary } from "@reactive-resume/utils/string";
 import { cn } from "@reactive-resume/utils/style";
-import { latest, useDebouncedSave, useDefaultProvider, useGenerate, useSavedItems, useWorkspace } from "../hooks";
-import { CollapseRow, Swap, useCareerTime, withUndo, Working, workingSteps } from "../shared";
+import { DraftRecovery } from "../draft-recovery";
+import {
+	latest,
+	useDebouncedSave,
+	useDefaultProvider,
+	useGenerate,
+	useSavedItems,
+	useSessionDraft,
+	useWorkspace,
+} from "../hooks";
+import { CollapseRow, Swap, withUndo, GenerateNotice, Working, workingSteps } from "../shared";
+import { AnswerLibrary } from "./answer-library";
 import { AiNotice } from "./fit";
+import { Preparation } from "./preparation";
+import { PrepareReview } from "./prepare-review";
+import { SentDocuments } from "@/features/applications/components/detail/sent-documents";
 import { useInvalidateApplications } from "@/features/applications/use-application-actions";
+import { getAccountGeneration } from "@/libs/auth/account-scope";
 import { toastError } from "@/libs/error-message";
-import { orpc } from "@/libs/orpc/client";
+import { client, orpc, prepareRpc } from "@/libs/orpc/client";
+import { invalidateMutationQueries } from "@/libs/query/client";
 
 type Answer = CareerWorkspace["answers"][number];
+type AnswerSnapshot = Pick<Answer, "answer" | "factIds" | "aiOperationIds">;
 type CountUnit = "words" | "characters";
 
 const countWords = (text: string) => text.split(/\s+/).filter(Boolean).length;
@@ -41,34 +63,47 @@ const shortLabel = (text: string) => {
 	return words.length > 4 ? `${words.slice(0, 4).join(" ")}…` : text;
 };
 
-const checklistItems = () => [
-	t`Review the selected resume and cover letter in their editors.`,
-	t`Check every claim, date and result against your experience.`,
-	t`Review required form answers and remove unsupported claims.`,
-	t`Submit through the employer's application page yourself.`,
-	t`Mark the application as applied to keep the versions you sent.`,
-];
+/** The review checks, by their persisted checklist index. Submitting yourself (3) is moot once a submission is recorded. */
+const checklistItems = () =>
+	[
+		t`Review the selected resume and cover letter in their editors.`,
+		t`Check every claim, date and result against your experience.`,
+		t`Review required form answers and remove unsupported claims.`,
+		t`Submit through the employer's application page yourself.`,
+	] as const;
 
 /** W4–W5: the written answers for the employer's form, and a checklist before submitting there yourself. */
-export function ApplyTab({ application, version }: WorkspaceTabProps) {
-	const { day } = useCareerTime();
+export function ApplyTab({ application, version, go }: WorkspaceTabProps) {
+	const queryClient = useQueryClient();
 	const saved = useSavedItems(application.id);
 	const workspace = useWorkspace(application.id);
 	const { data: facts } = useQuery(orpc.career.facts.queryOptions({ input: { applicationId: application.id } }));
 	const readOnlyVersion = version?.data.kind === "answers" ? version.data : undefined;
-	const sentItem = latest(saved.data, "answers");
+	const recorded = saved.data?.find((item) => item.submission && item.data.kind === "answers");
+	const reviewed =
+		saved.data?.find((item) => item.id === workspace.data?.submissionReview?.answerVersionId) ?? recorded;
+	const candidate = recorded ?? (!hasApplicationSubmission(application) ? latest(saved.data, "answers") : undefined);
+	const sentItem = candidate?.data.kind === "answers" ? { ...candidate, data: candidate.data } : undefined;
 	// Removed questions wait out their Undo here; the workspace drops them when the toast closes.
 	const [removed, setRemoved] = useState<string[]>([]);
+	const removing = useRef(new Set<string>());
 	const [unit, setUnit] = useState<CountUnit>("words");
 	const [submitting, setSubmitting] = useState(false);
 	const [canSubmit, setCanSubmit] = useState(true);
+	const [writtenDrafts, setWrittenDrafts] = useState<ReadonlyMap<string, boolean>>(new Map());
 	const drafts = useRef(new Map<string, () => Answer>());
 	const registerDraft = useCallback((id: string, read: () => Answer) => {
 		drafts.current.set(id, read);
-		const updateValidity = () =>
-			setCanSubmit(
-				careerWorkspaceSchema.shape.answers.safeParse([...drafts.current.values()].map((value) => value())).success,
-			);
+		const updateValidity = () => {
+			const answers = [...drafts.current.values()].map((value) => value());
+			setCanSubmit(careerWorkspaceSchema.shape.answers.safeParse(answers).success);
+			setWrittenDrafts((previous) => {
+				const next = new Map(answers.map((answer) => [answer.id, Boolean(answer.answer.trim())]));
+				return next.size === previous.size && [...next].every(([key, value]) => previous.get(key) === value)
+					? previous
+					: next;
+			});
+		};
 		updateValidity();
 		return () => {
 			drafts.current.delete(id);
@@ -91,39 +126,115 @@ export function ApplyTab({ application, version }: WorkspaceTabProps) {
 		? stored.answers.map((answer, index) => ({ ...answer, id: `stored-${index}`, factIds: [] }))
 		: live.filter((answer) => !removed.includes(answer.id));
 
-	const saveAnswer = (id: string, patch: Partial<Answer>) =>
-		workspace.save({
-			answers: workspace.current().answers.map((answer) => (answer.id === id ? { ...answer, ...patch } : answer)),
-		});
+	const saveAnswer = (id: string, patch: Partial<Answer>, accepted?: AnswerSnapshot) => {
+		const answers = workspace.current().answers;
+		const current = answers.find((answer) => answer.id === id);
+		if (
+			accepted &&
+			(!current ||
+				current.answer !== accepted.answer ||
+				JSON.stringify(current.factIds) !== JSON.stringify(accepted.factIds) ||
+				JSON.stringify(current.aiOperationIds ?? []) !== JSON.stringify(accepted.aiOperationIds ?? []))
+		) {
+			toast.add({ description: t`The answer changed since, so it wasn't restored.` });
+			return Promise.resolve(false);
+		}
+		return workspace.save(
+			{ answers: answers.map((answer) => (answer.id === id ? { ...answer, ...patch } : answer)) },
+			accepted
+				? { answers: answers.map((answer) => (answer.id === id ? { ...answer, ...accepted } : answer)) }
+				: undefined,
+		);
+	};
 	const currentAnswers = () => shown.map((answer) => drafts.current.get(answer.id)?.() ?? answer);
 	const removeAnswer = (id: string) => {
-		setRemoved((ids) => [...ids, id]);
+		const generation = getAccountGeneration();
+		const key = JSON.stringify([generation, application.id, id]);
+		if (removing.current.has(key)) return;
+		removing.current.add(key);
+		const current = () => generation === getAccountGeneration();
+		const reconcile = async () => {
+			removing.current.delete(key);
+			await workspace.settled();
+			if (!current()) return;
+			const queryKey = orpc.career.workspace.queryKey({ input: { applicationId: application.id } });
+			void invalidateMutationQueries(queryClient, queryKey);
+			await queryClient.cancelQueries({ queryKey });
+			if (!current()) return;
+			await queryClient.invalidateQueries({ queryKey, refetchType: "all" }, { throwOnError: true });
+			if (current()) setRemoved((ids) => ids.filter((item) => item !== id));
+		};
+		const failed = () => {
+			if (!current()) return;
+			toast.add({
+				type: "error",
+				description: t`Couldn't save that change. Check your connection and try again.`,
+				actionProps: {
+					children: t`Retry`,
+					onClick: () => {
+						void reconcile().catch(failed);
+					},
+				},
+			});
+		};
 		withUndo({
 			description: t`Question removed`,
-			commit: () => workspace.save({ answers: workspace.current().answers.filter((answer) => answer.id !== id) }),
-			onUndo: () => setRemoved((ids) => ids.filter((item) => item !== id)),
+			onReady: () => setRemoved((ids) => [...ids, id]),
+			prepare: async () => {
+				const value = await workspace.settled();
+				if (!current()) throw new DOMException("", "AbortError");
+				const expected = value.answers.find((answer) => answer.id === id);
+				if (!expected) throw new Error("Answer no longer available");
+				return prepareRpc(client.career.deleteWorkspaceAnswer, { applicationId: application.id, id, expected });
+			},
+			onPrepareError: () => {
+				failed();
+				void reconcile().catch(failed);
+			},
+			commit: (result) => result.catch(failed).then(() => reconcile().catch(failed)),
+			onUndo: () => reconcile().catch(failed),
 		});
 	};
 
 	return (
 		<div className="grid items-start gap-5 @3xl:grid-cols-[minmax(0,1fr)_280px] @5xl:grid-cols-[minmax(0,1fr)_320px]">
-			<div className="grid gap-4">
-				{application.status !== "saved" && (
-					<p className="flex gap-2.5 rounded-xl bg-accent-soft px-4 py-3 text-[13px] leading-[18px] text-accent-text">
-						<Icon name="check-circle" size={18} className="mt-px shrink-0" />
-						<span>
-							<Trans>
-								<strong className="font-semibold">Submitted on {day(application.appliedAt)}.</strong> The versions you
-								sent are kept in Saved. Edits here don't change what {application.company} received.
-							</Trans>
-						</span>
-					</p>
-				)}
+			{!version && (
+				<div className="grid gap-4 @3xl:col-start-1">
+					{hasApplicationSubmission(application) ? (
+						<SentDocuments application={application} disabled={submitting} variant="workspace" />
+					) : (
+						<>
+							<Preparation key={application.id} application={application} disabled={submitting} />
+							<PrepareReview key={`review:${application.id}`} application={application} disabled={submitting} />
+						</>
+					)}
+				</div>
+			)}
 
+			<Checklist
+				application={application}
+				answerCount={
+					shown.filter((answer) =>
+						stored ? answer.answer.trim() : (writtenDrafts.get(answer.id) ?? Boolean(answer.answer.trim())),
+					).length
+				}
+				currentAnswers={currentAnswers}
+				readOnly={!!readOnlyVersion}
+				versionId={readOnlyVersion ? version?.id : undefined}
+				canSubmit={canSubmit}
+				submitting={submitting}
+				onSubmittingChange={setSubmitting}
+			/>
+
+			<div className="grid gap-4 @3xl:col-start-1">
 				{stored && !readOnlyVersion && (
 					<div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-sunken px-3.5 py-2.5 text-sm">
 						<span>
-							<Trans>These are the answers saved when you applied.</Trans>
+							{recorded ? (
+								<Trans>These are the answers saved when you applied.</Trans>
+							) : (
+								<Trans>These are saved draft answers.</Trans>
+							)}
 						</span>
 						<Button
 							size="sm"
@@ -143,6 +254,41 @@ export function ApplyTab({ application, version }: WorkspaceTabProps) {
 					</div>
 				)}
 
+				<div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+					<h2 id="application-answers" tabIndex={-1} className="text-base font-semibold">
+						<Trans>Form answers</Trans>
+					</h2>
+					<Link to="/dashboard/settings/profile" className="text-sm underline">
+						<Trans>Edit profile</Trans>
+					</Link>
+					{!version &&
+						hasApplicationSubmission(application) &&
+						(reviewed ? (
+							<Button
+								size="sm"
+								variant="ghost"
+								className="-me-2.5"
+								onClick={() => go("apply", { version: reviewed.id })}
+							>
+								<Icon name="clock-counter-clockwise" size={16} />
+								<Trans>View recorded answers</Trans>
+							</Button>
+						) : (
+							<span className="text-[13px] text-ink-3">
+								<Trans>No recorded answers are available.</Trans>
+							</span>
+						))}
+				</div>
+				{!stored && (
+					<AnswerLibrary
+						company={application.company}
+						applicationId={application.id}
+						disabled={submitting || live.length >= 30}
+						onUse={(answer) =>
+							workspace.save({ answers: [...workspace.current().answers, { ...answer, id: crypto.randomUUID() }] })
+						}
+					/>
+				)}
 				{shown.length > 0 && (
 					<div>
 						<AnimatePresence initial={false}>
@@ -155,10 +301,11 @@ export function ApplyTab({ application, version }: WorkspaceTabProps) {
 										answer={answer}
 										facts={facts}
 										applicationId={application.id}
+										company={application.company}
 										readOnly={stored !== undefined}
 										disabled={submitting}
 										registerDraft={registerDraft}
-										onSave={(patch) => saveAnswer(answer.id, patch)}
+										onSave={(patch, accepted) => saveAnswer(answer.id, patch, accepted)}
 										onRemove={() => removeAnswer(answer.id)}
 										unit={unit}
 										onToggleUnit={() => setUnit(unit === "words" ? "characters" : "words")}
@@ -171,7 +318,7 @@ export function ApplyTab({ application, version }: WorkspaceTabProps) {
 
 				{!stored && (
 					<>
-						{shown.length > 0 && <AiNotice />}
+						{shown.length > 0 && <AiNotice task="answer" application={application} />}
 						<button
 							type="button"
 							disabled={submitting || live.length >= 30}
@@ -196,16 +343,6 @@ export function ApplyTab({ application, version }: WorkspaceTabProps) {
 					</>
 				)}
 			</div>
-
-			<Checklist
-				application={application}
-				answers={shown}
-				currentAnswers={currentAnswers}
-				readOnly={!!readOnlyVersion}
-				canSubmit={canSubmit}
-				submitting={submitting}
-				onSubmittingChange={setSubmitting}
-			/>
 		</div>
 	);
 }
@@ -214,10 +351,11 @@ type AnswerCardProps = {
 	answer: Answer;
 	facts: Fact[] | undefined;
 	applicationId: string;
+	company: string;
 	readOnly: boolean;
 	disabled: boolean;
 	registerDraft: (id: string, read: () => Answer) => () => void;
-	onSave: (patch: Partial<Answer>) => void;
+	onSave: (patch: Partial<Answer>, accepted?: AnswerSnapshot) => Promise<boolean>;
 	onRemove: () => void;
 	unit: CountUnit;
 	onToggleUnit: () => void;
@@ -231,6 +369,7 @@ function AnswerCard({
 	answer,
 	facts,
 	applicationId,
+	company,
 	readOnly,
 	disabled,
 	registerDraft,
@@ -239,40 +378,136 @@ function AnswerCard({
 	unit,
 	onToggleUnit,
 }: AnswerCardProps) {
-	const [text, setText] = useState(answer.answer);
-	const [question, setQuestion] = useState(answer.question);
+	const textDraft = useSessionDraft(
+		readOnly ? null : `answer:${applicationId}:${answer.id}`,
+		answer.answer,
+		(value) => (typeof value === "string" ? value : undefined),
+		true,
+	);
+	const questionDraft = useSessionDraft(
+		readOnly ? null : `question:${applicationId}:${answer.id}`,
+		answer.question,
+		(value) => (typeof value === "string" ? value : undefined),
+		true,
+	);
+	const { value: text, setValue: setText } = textDraft;
+	const { value: question, setValue: setQuestion } = questionDraft;
 	useLayoutEffect(
-		() => registerDraft(answer.id, () => ({ ...answer, question, answer: text })),
-		[answer, question, text, registerDraft],
+		() => (readOnly ? undefined : registerDraft(answer.id, () => ({ ...answer, question, answer: text }))),
+		[answer, question, text, registerDraft, readOnly],
 	);
 	const [editingQuestion, setEditingQuestion] = useState(answer.question === "");
 	// Edit question focuses the field as its menu closes; the menu would otherwise take focus back and end the edit.
 	const questionField = useRef<HTMLTextAreaElement>(null);
-	const [proposal, setProposal] = useState<{ text: string; factIds: string[] } | null>(null);
+	// A draft or tightening, with the answer it was written from: Accept saves it, and Undo restores that answer.
+	const [proposal, setProposal] = useState<{
+		text: string;
+		factIds: string[];
+		note?: string | null;
+		aiOperationIds?: string[] | undefined;
+		before: { text: string; factIds: string[]; aiOperationIds: string[] };
+	} | null>(null);
+	// The answer as it reads now, for a toast's Undo that runs after later renders.
+	const current = useRef({ text, question, factIds: answer.factIds, aiOperationIds: answer.aiOperationIds ?? [] });
+	useLayoutEffect(() => {
+		current.current = { text, question, factIds: answer.factIds, aiOperationIds: answer.aiOperationIds ?? [] };
+	});
+	const previousSaved = useRef({ text: answer.answer, question: answer.question });
+	useLayoutEffect(() => {
+		// A refetch is not a local edit to autosave. Keep only text the user changed since the last saved copy.
+		if (previousSaved.current.text !== answer.answer && current.current.text === previousSaved.current.text)
+			setText(answer.answer);
+		if (
+			previousSaved.current.question !== answer.question &&
+			current.current.question === previousSaved.current.question
+		)
+			setQuestion(answer.question);
+		previousSaved.current = { text: answer.answer, question: answer.question };
+	}, [answer.answer, answer.question, setText, setQuestion]);
 	const generate = useGenerate(applicationId);
 	const { provider } = useDefaultProvider();
-	const flushAnswer = useDebouncedSave(disabled || readOnly ? answer.answer : text, answer.answer, (value) =>
-		onSave({ answer: value }),
+	const flushAnswer = useDebouncedSave(
+		disabled || readOnly || textDraft.restored ? answer.answer : text,
+		answer.answer,
+		(value) => onSave({ answer: value }),
 	);
-	const flushQuestion = useDebouncedSave(disabled || readOnly ? answer.question : question, answer.question, (value) =>
-		onSave({ question: value }),
+	const flushQuestion = useDebouncedSave(
+		disabled || readOnly || questionDraft.restored ? answer.question : question,
+		answer.question,
+		(value) => onSave({ question: value }),
 	);
 
-	const words = countWords(text);
-	const characters = [...text].length;
+	// While a draft waits for Accept, the count is the draft's, so its fit against the form's limit shows first.
+	const counted = proposal?.text ?? text;
+	const words = countWords(counted);
+	const characters = [...counted].length;
+	const was = proposal ? (unit === "words" ? countWords(text) : [...text].length) : null;
 	const backing = answer.factIds.flatMap((id) => facts?.find((fact) => fact.id === id) ?? []);
 	const empty = !text.trim();
 
 	const ask = async () => {
+		// Save the current question even when Draft is clicked before blur.
+		flushQuestion();
+		const before = { text, factIds: answer.factIds, aiOperationIds: answer.aiOperationIds ?? [] };
 		const result = await generate.run({ task: "answer", question: question.trim(), answer: text }).catch(() => null);
-		if (result?.answer) setProposal(result.answer);
+		if (!result?.answer) return;
+		// Written from an older copy: offering it would replace what the user typed since.
+		if (current.current.text !== before.text) {
+			toast.add({ description: t`Your answer changed while the draft was written. Draft again to use it.` });
+			return;
+		}
+		setProposal({ ...result.answer, before });
 	};
+
+	const accept = (chosen: NonNullable<typeof proposal>) => {
+		setText(chosen.text);
+		textDraft.accept();
+		const aiOperationIds = [...new Set([...chosen.before.aiOperationIds, ...(chosen.aiOperationIds ?? [])])];
+		const saved = onSave({ answer: chosen.text, factIds: chosen.factIds, aiOperationIds });
+		setProposal(null);
+		void saved.then(
+			(ok) =>
+				ok &&
+				toast.add({
+					description: t`Answer replaced`,
+					actionProps: {
+						children: t`Undo`,
+						onClick: async () => {
+							// Only while the answer is still the accepted one: later typing (here or on another device) stays.
+							const now = current.current;
+							if (now.text !== chosen.text) {
+								toast.add({ description: t`The answer changed since, so it wasn't restored.` });
+								return;
+							}
+							const restored = await onSave(
+								{
+									answer: chosen.before.text,
+									factIds: chosen.before.factIds,
+									aiOperationIds: chosen.before.aiOperationIds,
+								},
+								{ answer: chosen.text, factIds: chosen.factIds, aiOperationIds },
+							);
+							if (restored && current.current.text === chosen.text) setText(chosen.before.text);
+						},
+					},
+				}),
+		);
+	};
+	const limit = answerLimit(question);
+	const measured = (value: string) => (limit?.kind === "characters" ? [...value].length : countWords(value));
+	const shownLimit = limit && limit.kind === unit ? limit.max : null;
+	const over = shownLimit !== null && (unit === "words" ? words : characters) > shownLimit;
+	const stale = proposal !== null && text !== proposal.before.text;
 
 	return (
 		<section className="grid gap-3 rounded-xl border border-line bg-surface p-4">
+			<DraftRecovery {...textDraft} />
+			<DraftRecovery {...questionDraft} />
 			<div className="flex items-start gap-3">
 				{editingQuestion && !readOnly ? (
 					<Textarea
+						// What people paste or write here can be in any language: its own text sets the direction.
+						dir="auto"
 						// oxlint-disable-next-line jsx-a11y/no-autofocus -- opened by the user's click on Add a question or Edit question
 						autoFocus
 						ref={questionField}
@@ -298,7 +533,10 @@ function AnswerCard({
 						className="field-sizing-content min-h-0 w-full min-w-0 flex-1 resize-none px-2.5 py-1.5 text-[15px] leading-[22px] font-semibold"
 					/>
 				) : (
-					<h2 className="min-w-0 flex-1 text-[15px] leading-[22px] font-semibold">{question}</h2>
+					// Same box as the field it replaces: swapping must not move Draft out from under the pointer.
+					<h2 className="min-w-0 flex-1 rounded-md border border-transparent px-2.5 py-1.5 text-[15px] leading-[22px] font-semibold">
+						{question}
+					</h2>
 				)}
 				{/* Forms limit words or characters; the count switches between them, for every question at once. */}
 				<Tooltip>
@@ -307,13 +545,22 @@ function AnswerCard({
 							<button
 								type="button"
 								onClick={onToggleUnit}
-								className="shrink-0 rounded-sm font-mono text-xs leading-[22px] font-medium text-ink-2 transition-colors duration-quick hover:text-ink"
+								className={cn(
+									"touch-target relative shrink-0 rounded-sm font-mono text-xs leading-[22px] font-medium text-ink-2 transition-colors duration-quick hover:text-ink",
+									over && "text-warn-text hover:text-warn-text",
+								)}
 							/>
 						}
 					>
-						{unit === "words"
-							? plural(words, { one: "# word", other: "# words" })
-							: plural(characters, { one: "# character", other: "# characters" })}
+						{/* The question's own limit, when it states one in this unit: "174 of 150 words". */}
+						{shownLimit
+							? unit === "words"
+								? t`${ph({ words: i18n.number(words) })} of ${ph({ shownLimit: i18n.number(shownLimit) })} words`
+								: t`${ph({ characters: i18n.number(characters) })} of ${ph({ shownLimit: i18n.number(shownLimit) })} characters`
+							: unit === "words"
+								? plural(words, { one: "# word", other: "# words" })
+								: plural(characters, { one: "# character", other: "# characters" })}
+						{was !== null && ` · ${t`was ${was}`}`}
 					</TooltipTrigger>
 					<TooltipContent>{unit === "words" ? t`Count characters` : t`Count words`}</TooltipContent>
 				</Tooltip>
@@ -347,6 +594,7 @@ function AnswerCard({
 			<Swap id={proposal ? "diff" : "text"}>
 				{proposal ? (
 					<div className="grid gap-2.5">
+						<ChangeSummary before={proposal.before.text} after={proposal.text} />
 						<p className="rounded-md border border-line-2 bg-raised px-3.5 py-3 text-sm leading-[22px]">
 							{diffWords(text, proposal.text).map((part, index) => (
 								<span
@@ -360,24 +608,48 @@ function AnswerCard({
 								</span>
 							))}
 						</p>
-						<div className="flex gap-1.5">
-							<Button
-								size="sm"
-								variant="secondary"
-								disabled={disabled}
-								onClick={() => {
-									setText(proposal.text);
-									onSave({ answer: proposal.text, factIds: proposal.factIds });
-									setProposal(null);
-								}}
-							>
+						{proposal.note && (
+							<p role="status" className="flex gap-1.5 rounded-md bg-warn-soft px-3 py-2 text-xs text-warn-text">
+								<Icon name="warning-circle" size={16} className="shrink-0" />
+								<Trans>Check before accepting: {proposal.note}</Trans>
+							</p>
+						)}
+						{stale && (
+							<p role="alert" className="flex gap-1.5 rounded-md bg-danger-soft px-3 py-2 text-xs text-danger-text">
+								<Icon name="warning-circle" size={16} className="shrink-0" />
+								<Trans>Your answer changed while this was drafted. Draft again to review the newer version.</Trans>
+							</p>
+						)}
+						<div className="flex flex-wrap items-center gap-1.5">
+							<Button size="sm" variant="secondary" disabled={disabled || stale} onClick={() => accept(proposal)}>
 								<Icon name="check" size={16} />
 								<Trans>Accept</Trans>
 							</Button>
 							<Button size="sm" variant="ghost" onClick={() => setProposal(null)}>
-								<Trans>Skip</Trans>
+								<Trans>Reject</Trans>
 							</Button>
+							{limit && (
+								<span
+									className={cn(
+										"ms-auto text-xs tabular-nums",
+										measured(proposal.text) > limit.max ? "text-warn-text" : "text-ink-3",
+									)}
+								>
+									{limit.kind === "characters"
+										? t`${i18n.number(measured(proposal.text))} of ${i18n.number(limit.max)} characters`
+										: t`${i18n.number(measured(proposal.text))} of ${i18n.number(limit.max)} words`}
+								</span>
+							)}
 						</div>
+						{proposal.factIds.length > 0 && (
+							<p className="text-xs text-ink-3">
+								{t`Uses: ${proposal.factIds
+									.map((id) => facts?.find((fact) => fact.id === id)?.text)
+									.filter(Boolean)
+									.map((value) => shortLabel(value ?? ""))
+									.join(" · ")}`}
+							</p>
+						)}
 					</div>
 				) : readOnly ? (
 					<p className="rounded-md border border-line bg-raised px-3.5 py-3 text-sm leading-[22px] whitespace-pre-wrap text-ink-2">
@@ -385,6 +657,8 @@ function AnswerCard({
 					</p>
 				) : (
 					<Textarea
+						// What people paste or write here can be in any language: its own text sets the direction.
+						dir="auto"
 						value={text}
 						maxLength={6000}
 						disabled={disabled}
@@ -397,6 +671,21 @@ function AnswerCard({
 				)}
 			</Swap>
 
+			{!readOnly && (
+				<AnswerLibrary
+					company={company}
+					applicationId={applicationId}
+					current={{ ...answer, question, answer: text }}
+					disabled={disabled}
+					onUse={(value) => {
+						setText(value.answer);
+						setQuestion(value.question);
+						textDraft.accept();
+						questionDraft.accept();
+						onSave(value);
+					}}
+				/>
+			)}
 			<div className="flex items-start gap-3">
 				{backing.length > 0 && (
 					<div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
@@ -438,7 +727,39 @@ function AnswerCard({
 					</Button>
 				)}
 			</div>
+			{!readOnly && !proposal && <GenerateNotice generate={generate} onRetry={() => void ask()} className="w-fit" />}
 		</section>
+	);
+}
+
+type ChangeSummaryProps = { before: string; after: string };
+
+/** One line above the diff: how much shorter, and which of the user's sentences go or new ones come in. */
+function ChangeSummary({ before, after }: ChangeSummaryProps) {
+	if (!before.trim()) return null;
+	const { words, removed, added } = rewriteSummary(before, after);
+	const difference = -words;
+	const parts = [
+		difference > 0
+			? plural(difference, { one: "Shorter by # word", other: "Shorter by # words" })
+			: difference < 0
+				? plural(-difference, { one: "Longer by # word", other: "Longer by # words" })
+				: t`Same length`,
+		...(removed > 0
+			? [
+					plural(removed, {
+						one: "changes or removes # of your sentences",
+						other: "changes or removes # of your sentences",
+					}),
+				]
+			: []),
+		...(added > 0 ? [plural(added, { one: "# new or reworded sentence", other: "# new or reworded sentences" })] : []),
+	];
+	return (
+		<p className={cn("text-xs", removed > 0 ? "text-warn-text" : "text-ink-3")}>
+			{parts.join(" · ")}
+			{removed > 0 && ` ${t`Check that nothing you wrote yourself is lost.`}`}
+		</p>
 	);
 }
 
@@ -489,20 +810,22 @@ function diffWords(before: string, after: string): DiffPart[] {
 
 type ChecklistProps = {
 	application: WorkspaceTabProps["application"];
-	answers: Answer[];
+	answerCount: number;
 	currentAnswers: () => Answer[];
 	readOnly: boolean;
+	versionId: string | undefined;
 	canSubmit: boolean;
 	submitting: boolean;
 	onSubmittingChange: (value: boolean) => void;
 };
 
-/** "Before you submit": five ticks stored with the application, copy/download, and Mark as applied before submission. */
+/** Manual content checks survive submission; submission actions follow the application record. */
 function Checklist({
 	application,
-	answers,
+	answerCount,
 	currentAnswers,
 	readOnly,
+	versionId,
 	canSubmit,
 	submitting,
 	onSubmittingChange,
@@ -510,12 +833,28 @@ function Checklist({
 	const queryClient = useQueryClient();
 	const invalidate = useInvalidateApplications();
 	const workspace = useWorkspace(application.id);
+	const { data: documents } = useQuery(orpc.documents.list.queryOptions({ input: { trashed: false } }));
 	const submit = useMutation(orpc.career.submitApplication.mutationOptions());
-	const items = checklistItems();
-	const ticked = workspace.data.checklist;
-	const submitted = application.status !== "saved";
-	const done = items.filter((_, index) => ticked.includes(index)).length;
-	const written = answers.filter((answer) => answer.answer.trim());
+	const review = applicationReviewChecks(application, workspace.data);
+	const { submitted, checklist: ticked } = review;
+	const labels = checklistItems();
+	const recordedVersion =
+		!readOnly || (versionId !== undefined && versionId === workspace.data.submissionReview?.answerVersionId);
+	const items = recordedVersion ? review.indices.map((index) => ({ index, label: labels[index] })) : [];
+	const done = items.filter(({ index }) => ticked.includes(index)).length;
+	// Recording the submission is the one emphasised action only once preparation has nothing left to guide.
+	const primary = nextPreparationStep(application, workspace.data, documents) === "review";
+	const resumeName =
+		documents?.find((document) => document.type === "resume" && document.id === application.resumeId)?.name ??
+		(application.resumeFileUrl ? application.resumeFileName || t`Resume file` : null);
+	const letterName =
+		documents?.find((document) => document.type === "letter" && document.id === application.coverLetterId)?.name ??
+		(application.coverLetterUrl ? application.coverLetterName || t`Cover letter file` : null);
+	const names = [resumeName, letterName].filter((name): name is string => name !== null);
+	const records = [
+		...(names.length > 0 ? names : [t`no documents`]),
+		plural(answerCount, { one: "# answer", other: "# answers" }),
+	];
 
 	const toggle = (index: number, on: boolean) => {
 		const current = workspace.current().checklist;
@@ -553,16 +892,15 @@ function Checklist({
 		onSubmittingChange(true);
 		try {
 			const currentWorkspace = await workspace.settled();
-			await submit.mutateAsync({ applicationId: application.id, answers, expectedAnswers: currentWorkspace.answers });
-			queryClient.setQueryData(orpc.career.workspace.queryKey({ input: { applicationId: application.id } }), {
-				...currentWorkspace,
+			await submit.mutateAsync({
+				applicationId: application.id,
 				answers,
+				expectedAnswers: currentWorkspace.answers,
+				expectedDocuments: { resumeId: application.resumeId, coverLetterId: application.coverLetterId },
 			});
-			// The ticks as they are now, not as they were when the button was pressed.
-			const current = queryClient.getQueryData(
-				orpc.career.workspace.queryKey({ input: { applicationId: application.id } }),
-			)?.checklist;
-			workspace.save({ checklist: [...new Set([...(current ?? ticked), items.length - 1])] });
+			await queryClient.invalidateQueries({
+				queryKey: orpc.career.workspace.queryKey({ input: { applicationId: application.id } }),
+			});
 			toast.add({ description: t`Marked as applied. The versions you sent are kept.` });
 		} catch (error) {
 			toastError(error, t`Couldn't mark it as applied. Try again.`, { allowServerMessage: true });
@@ -574,83 +912,93 @@ function Checklist({
 	};
 
 	return (
-		<aside className="grid gap-3.5 rounded-xl border border-line bg-surface p-4">
+		<aside
+			id="application-readiness"
+			tabIndex={-1}
+			className="grid gap-3.5 rounded-xl border border-line bg-surface p-4 @3xl:sticky @3xl:top-6 @3xl:col-start-2 @3xl:row-span-2 @3xl:row-start-1 @3xl:self-start"
+		>
 			<div className="flex items-baseline justify-between gap-3">
 				<h2 className="text-sm font-semibold">
-					<Trans>Before you submit</Trans>
+					<Trans>Review checks</Trans>
 				</h2>
-				<span className="font-mono text-xs font-medium text-ink-2">{t`${done} of ${items.length}`}</span>
-			</div>
-			<div
-				role="progressbar"
-				aria-label={t`Checklist progress`}
-				aria-valuemin={0}
-				aria-valuemax={items.length}
-				aria-valuenow={done}
-				className="h-1.5 overflow-hidden rounded-sm bg-line"
-			>
-				<div
-					className="h-full rounded-sm bg-accent transition-[width] duration-standard ease-enter"
-					style={{ width: `${(done / items.length) * 100}%` }}
-				/>
+				{!submitted && !readOnly && (
+					<span className="text-xs text-ink-2 tabular-nums">{t`${ph({ done: i18n.number(done) })} of ${i18n.number(items.length)}`}</span>
+				)}
 			</div>
 			<ul className="grid gap-2.5">
-				{items.map((label, index) =>
-					!submitted && !readOnly && index === items.length - 1 ? (
-						<li key={label}>
-							<Button className="w-full" disabled={!canSubmit} loading={submitting} onClick={() => void markApplied()}>
-								<Trans>Mark as applied</Trans>
-							</Button>
-						</li>
-					) : (
-						<li key={label}>
-							<label className="flex cursor-pointer gap-2.5 text-[13px] leading-[19px]">
-								<Checkbox
-									className="mt-px"
-									checked={ticked.includes(index)}
-									disabled={readOnly || submitting}
-									onCheckedChange={(checked) => toggle(index, checked)}
-								/>
-								<span
-									className={cn("transition-colors duration-quick", ticked.includes(index) ? "text-ink-2" : "text-ink")}
-								>
-									{label}
-								</span>
-							</label>
-						</li>
-					),
-				)}
+				{items.map(({ label, index }) => (
+					<li key={label}>
+						<label className="flex cursor-pointer gap-2.5 text-[13px] leading-[19px]">
+							<Checkbox
+								className="mt-px"
+								checked={ticked.includes(index)}
+								disabled={readOnly || submitted || submitting}
+								onCheckedChange={(checked) => toggle(index, checked)}
+							/>
+							<span
+								className={cn("transition-colors duration-quick", ticked.includes(index) ? "text-ink-2" : "text-ink")}
+							>
+								{label}
+							</span>
+						</label>
+					</li>
+				))}
 			</ul>
-			{!canSubmit && !readOnly && (
-				<p role="alert" className="text-xs text-danger-text">
-					<Trans>
-						Shorten questions to 2,000 characters and answers to 6,000 characters before marking this applied.
-					</Trans>
+			{application.status === "saved" && !submitted && !readOnly && (
+				<div className="grid gap-2 border-t border-line pt-3.5">
+					<Button
+						className="w-full"
+						variant={primary ? "primary" : "secondary"}
+						disabled={!canSubmit}
+						loading={submitting}
+						onClick={() => void markApplied()}
+					>
+						<Trans>Mark as applied</Trans>
+					</Button>
+					{canSubmit ? (
+						<p className="text-xs leading-[17px] text-ink-3">
+							<Trans>Records {records.join(" · ")} as sent. You submit on the employer's site yourself.</Trans>
+						</p>
+					) : (
+						<p role="alert" className="text-xs text-danger-text">
+							<Trans>
+								Shorten questions to 2,000 characters and answers to 6,000 characters before marking this applied.
+							</Trans>
+						</p>
+					)}
+				</div>
+			)}
+			{answerCount > 0 && (
+				<div className="flex flex-wrap gap-1.5 border-t border-line pt-3.5">
+					<Button variant="secondary" size="sm" disabled={answerCount === 0} onClick={() => void copy()}>
+						<Icon name="copy" size={16} />
+						<Trans>Copy answers</Trans>
+					</Button>
+					<DropdownMenu>
+						<DropdownMenuTrigger render={<Button variant="ghost" size="sm" disabled={answerCount === 0} />}>
+							<Icon name="download-simple" size={16} />
+							<Trans>Download</Trans>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent>
+							<DropdownMenuItem onClick={() => download("md")}>
+								<Trans>Markdown (.md)</Trans>
+							</DropdownMenuItem>
+							<DropdownMenuItem onClick={() => download("txt")}>
+								<Trans>Plain text (.txt)</Trans>
+							</DropdownMenuItem>
+						</DropdownMenuContent>
+					</DropdownMenu>
+				</div>
+			)}
+			{(submitted || readOnly) && (
+				<p className="text-xs leading-[17px] text-ink-3">
+					{recordedVersion && review.recorded ? (
+						<Trans>Review checks recorded at first submission.</Trans>
+					) : (
+						<Trans>Historical review checks unavailable.</Trans>
+					)}
 				</p>
 			)}
-			<div className="flex flex-wrap gap-1.5 border-t border-line pt-3.5">
-				<Button variant="secondary" size="sm" disabled={written.length === 0} onClick={() => void copy()}>
-					<Icon name="copy" size={16} />
-					<Trans>Copy answers</Trans>
-				</Button>
-				<DropdownMenu>
-					<DropdownMenuTrigger render={<Button variant="ghost" size="sm" disabled={written.length === 0} />}>
-						<Icon name="download-simple" size={16} />
-						<Trans>Download</Trans>
-					</DropdownMenuTrigger>
-					<DropdownMenuContent>
-						<DropdownMenuItem onClick={() => download("md")}>
-							<Trans>Markdown (.md)</Trans>
-						</DropdownMenuItem>
-						<DropdownMenuItem onClick={() => download("txt")}>
-							<Trans>Plain text (.txt)</Trans>
-						</DropdownMenuItem>
-					</DropdownMenuContent>
-				</DropdownMenu>
-			</div>
-			<p className="text-xs leading-[17px] text-ink-3">
-				<Trans>You submit on the employer's site yourself. Marking it applied keeps the exact versions you sent.</Trans>
-			</p>
 		</aside>
 	);
 }

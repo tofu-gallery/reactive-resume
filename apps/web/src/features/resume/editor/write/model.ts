@@ -5,9 +5,12 @@ import type {
 	ResumeData,
 	SectionType,
 } from "@reactive-resume/schema/resume/data";
+import type { ResumeDates } from "@reactive-resume/schema/resume/dates";
 import type { WritableDraft } from "immer";
+import { createEntry } from "@reactive-resume/resume/entries";
+import { nextFreeSectionTitle } from "@reactive-resume/resume/section-title";
 import { sectionTypeSchema } from "@reactive-resume/schema/resume/data";
-import { EMPTY_RESUME_DATES } from "@reactive-resume/schema/resume/dates";
+import { hasUnreadableDateText } from "@reactive-resume/schema/resume/dates";
 import { generateId, stripHtml } from "@reactive-resume/utils/string";
 
 type Data = ResumeData | WritableDraft<ResumeData>;
@@ -110,49 +113,7 @@ export function isDraftEntry(type: CustomSectionType, entry: Entry): boolean {
 	return typeof value !== "string" || !value.trim();
 }
 
-const website = () => ({ url: "", label: "", inlineLink: false });
-const dates = () => ({ ...EMPTY_RESUME_DATES });
-
-/** A new, empty entry of a type: the starting point for "+ Add" and for Add section's first draft. */
-export function createEntry(type: CustomSectionType): Entry {
-	const base = { id: generateId(), hidden: false };
-	const fields: Record<CustomSectionType, Record<string, unknown>> = {
-		profiles: { icon: "", iconColor: "", network: "", username: "", website: website() },
-		experience: {
-			company: "",
-			position: "",
-			location: "",
-			period: "",
-			dates: dates(),
-			website: website(),
-			description: "",
-			roles: [],
-		},
-		education: {
-			school: "",
-			degree: "",
-			area: "",
-			grade: "",
-			location: "",
-			period: "",
-			dates: dates(),
-			website: website(),
-			description: "",
-		},
-		projects: { name: "", period: "", dates: dates(), website: website(), description: "" },
-		skills: { icon: "", iconColor: "", name: "", proficiency: "", level: 0, keywords: [] },
-		languages: { language: "", fluency: "", level: 0 },
-		interests: { icon: "", iconColor: "", name: "", keywords: [] },
-		awards: { title: "", awarder: "", date: "", dates: dates(), website: website(), description: "" },
-		certifications: { title: "", issuer: "", date: "", dates: dates(), website: website(), description: "" },
-		publications: { title: "", publisher: "", date: "", dates: dates(), website: website(), description: "" },
-		volunteer: { organization: "", location: "", period: "", dates: dates(), website: website(), description: "" },
-		references: { name: "", position: "", website: website(), phone: "", description: "" },
-		summary: { content: "" },
-		"cover-letter": { recipient: "", content: "" },
-	};
-	return { ...base, ...fields[type] } as Entry;
-}
+export { createEntry } from "@reactive-resume/resume/entries";
 
 const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
 const join = (...parts: unknown[]) => parts.map(text).filter(Boolean).join(" · ");
@@ -203,12 +164,13 @@ export function describeEntry(type: CustomSectionType, entry: Entry): { title: s
 	}
 }
 
-/** Entries (and roles) whose dates came from text that couldn't be read exactly and still ask for a look. */
+/** Entries (and roles) with nonempty custom date text that could not be read. */
 export function countEntriesToCheck(entries: readonly Entry[]): number {
 	let count = 0;
-	type WithDates = { dates?: { raw?: string }; roles?: readonly { dates?: { raw?: string } }[] };
+	type WithDates = { dates?: ResumeDates; roles?: readonly { dates?: ResumeDates }[] };
 	for (const entry of entries as readonly WithDates[]) {
-		if (entry.dates?.raw !== undefined || entry.roles?.some((role) => role.dates?.raw !== undefined)) count += 1;
+		if (hasUnreadableDateText(entry.dates) || entry.roles?.some((role) => hasUnreadableDateText(role.dates)))
+			count += 1;
 	}
 	return count;
 }
@@ -314,8 +276,28 @@ function ensurePlaced(draft: WritableDraft<ResumeData>, id: string) {
  * Add section: shows the section, places it if needed and gives it one draft entry to fill in. Returns the
  * new entry's id (none for the summary, which is one rich text).
  */
+/**
+ * Experience and Education print in the order the person starts them: the first one added goes above the other in the
+ * page's main column while that one has no entries yet (a student starts with Education; someone with a job, with
+ * Experience). A hidden section with entries counts as started, and layouts set across pages stay as they are.
+ */
+function placeFirstStarted(draft: WritableDraft<ResumeData>, type: "summary" | SectionType) {
+	if (type !== "experience" && type !== "education") return;
+	const other = type === "experience" ? "education" : "experience";
+	const started = draft.sections[other].items.length > 0;
+	if (started) return;
+	for (const page of draft.metadata.layout.pages) {
+		const at = page.main.indexOf(type);
+		const before = page.main.indexOf(other);
+		if (at === -1 || before === -1 || at < before) continue;
+		page.main.splice(at, 1);
+		page.main.splice(before, 0, type);
+	}
+}
+
 export function addBuiltinSection(draft: WritableDraft<ResumeData>, type: "summary" | SectionType): string | null {
 	ensurePlaced(draft, type);
+	placeFirstStarted(draft, type);
 	if (type === "summary") {
 		draft.summary.hidden = false;
 		return null;
@@ -329,7 +311,22 @@ export function addBuiltinSection(draft: WritableDraft<ResumeData>, type: "summa
 }
 
 /** Add section → Custom section: a new section of a type, named after it, with one draft entry. */
-export function addCustomSection(draft: WritableDraft<ResumeData>, type: CustomSectionType, title: string) {
+/** Every title the outline shows: custom sections' own, built-ins' own, and a built-in's default name (`base`) for
+ * the type being added when that section has entries under its default name. */
+function shownTitles(draft: WritableDraft<ResumeData>, type: CustomSectionType, base: string) {
+	const titles = draft.customSections.map((section) => section.title);
+	for (const [key, section] of Object.entries(draft.sections)) {
+		if (section.title.trim()) titles.push(section.title);
+		else if (key === type && section.items.length > 0) titles.push(base);
+	}
+	if (draft.summary.title.trim()) titles.push(draft.summary.title);
+	else if (type === "summary" && draft.summary.content.trim()) titles.push(base);
+	return titles;
+}
+
+export function addCustomSection(draft: WritableDraft<ResumeData>, type: CustomSectionType, base: string) {
+	// A second "Projects" would be indistinguishable in the outline: it is "Projects 2".
+	const title = nextFreeSectionTitle(base, shownTitles(draft, type, base));
 	const entry = createEntry(type);
 	const section = {
 		id: generateId(),

@@ -18,8 +18,17 @@ export const resume = pg.pgTable(
 		name: pg.text("name").notNull(),
 		slug: pg.text("slug").notNull(),
 		tags: pg.text("tags").array().notNull().default([]),
+		// Private request lineage stays outside portable resume data.
+		aiOperationIds: pg.text("ai_operation_ids").array().notNull().default([]),
 		isPublic: pg.boolean("is_public").notNull().default(false),
 		showDownloadButtons: pg.boolean("show_download_buttons").notNull().default(true),
+		allowWordDownload: pg.boolean("allow_word_download").notNull().default(false),
+		// Share settings that decide who sees what. They live here, not in `data`, so a JSON patch, an import or a
+		// version restore can never change them.
+		showInSearchEngines: pg.boolean("show_in_search_engines").notNull().default(false),
+		hideContactDetails: pg.boolean("hide_contact_details").notNull().default(false),
+		// The resume an account's short link and custom domain open; at most one per user.
+		isPrimary: pg.boolean("is_primary").notNull().default(false),
 		isLocked: pg.boolean("is_locked").notNull().default(false),
 		password: pg.text("password"),
 		// "Made for this application": Check's job match, the assistant and Copy for a job use its posting.
@@ -29,6 +38,9 @@ export const resume = pg.pgTable(
 		trashedAt: pg.timestamp("trashed_at", { withTimezone: true }),
 		// A blank resume's name follows its headline until the user renames it.
 		autoName: pg.boolean("auto_name").notNull().default(false),
+		// The address was made by the app and nobody has been sent it: it follows the name until the resume is
+		// published or someone chooses an address.
+		autoSlug: pg.boolean("auto_slug").notNull().default(false),
 		data: pg
 			.jsonb("data")
 			.notNull()
@@ -44,12 +56,20 @@ export const resume = pg.pgTable(
 			.notNull()
 			.defaultNow()
 			.$onUpdate(() => /* @__PURE__ */ new Date()),
+		// When the content (`data`) last changed, for "Last edited". Existing documents were backfilled from
+		// `updated_at` (the time the library already showed); metadata writes move only `updated_at`, the concurrency
+		// check, and stay out of this. A trigger in the migration keeps this one current on every write path.
+		editedAt: pg.timestamp("edited_at", { withTimezone: true }).defaultNow(),
 	},
 	(t) => [
 		pg.unique().on(t.slug, t.userId),
 		pg.index().on(t.createdAt.asc()),
 		pg.index().on(t.userId, t.updatedAt.desc()),
 		pg.index().on(t.isPublic, t.slug, t.userId),
+		pg
+			.uniqueIndex("resume_primary_unique")
+			.on(t.userId)
+			.where(sql`${t.isPrimary}`),
 		// Finds documents past Trash retention without scanning every resume.
 		pg
 			.index()
@@ -93,6 +113,7 @@ export const resumeVersion = pg.pgTable(
 			.references(() => user.id, { onDelete: "cascade" }),
 		// Snapshot of the resume data. A session's autosave is refreshed while the session lasts; the rest are immutable.
 		data: pg.jsonb("data").notNull().$type<ResumeData>(),
+		aiOperationIds: pg.text("ai_operation_ids").array().notNull().default([]),
 		kind: pg.text("kind", { enum: RESUME_VERSION_KINDS }).notNull().default("auto"),
 		// The user's name for a `named` version.
 		name: pg.text("name"),
@@ -181,3 +202,22 @@ export const resumeStatisticsDaily = pg.pgTable(
 	},
 	(t) => [pg.unique().on(t.resumeId, t.date), pg.index().on(t.resumeId, t.date.desc())],
 );
+
+/** One paid writing review per resume, kept independently of the editable document revision. */
+export const resumeWritingReview = pg.pgTable("resume_writing_review", {
+	resumeId: pg
+		.text("resume_id")
+		.primaryKey()
+		.references(() => resume.id, { onDelete: "cascade" }),
+	userId: pg
+		.text("user_id")
+		.notNull()
+		.references(() => user.id, { onDelete: "cascade" }),
+	requestGeneration: pg.integer("request_generation").notNull().default(1),
+	inputText: pg.text("input_text"),
+	passages: pg.jsonb("passages").$type<{ id: string; where: string; text: string }[]>(),
+	review: pg.jsonb("review").$type<Record<string, unknown>>(),
+	aiOperationId: pg.text("ai_operation_id"),
+	requestedAt: pg.timestamp("requested_at", { withTimezone: true }),
+	reviewedAt: pg.timestamp("reviewed_at", { withTimezone: true }),
+});

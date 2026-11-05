@@ -4,8 +4,9 @@ import { and, desc, eq } from "drizzle-orm";
 import z from "zod";
 import { careerSystemPromptTemplate } from "@reactive-resume/ai/prompts";
 import { db } from "@reactive-resume/db/client";
-import { application, careerArtifact } from "@reactive-resume/db/schema";
+import { application, applicationLane, careerArtifact } from "@reactive-resume/db/schema";
 import { careerStoryInputSchema, factCategorySchema } from "@reactive-resume/schema/career";
+import { activeApplications } from "../applications/access";
 import { careerService, modelFact } from "./service";
 
 type CareerToolsInput = {
@@ -15,6 +16,10 @@ type CareerToolsInput = {
 	shareMemory: boolean;
 	tab: WorkspaceTab | undefined;
 	sourceMessageId: string | undefined;
+	/** This application's saved work, newest first, when the user shares the application. */
+	items?: Awaited<ReturnType<typeof careerService.savedItems>>;
+	/** The answers typed in the Apply tab, when the user shares the application. */
+	answers?: { question: string; answer: string }[];
 };
 
 const TABS: Record<WorkspaceTab, string> = {
@@ -48,7 +53,7 @@ function boundedItems<T>(items: T[], budget: number) {
 }
 
 export function buildCareerInstructions(
-	input: Pick<CareerToolsInput, "context" | "shareApplication" | "shareMemory" | "tab"> & {
+	input: Pick<CareerToolsInput, "context" | "shareApplication" | "shareMemory" | "tab" | "items" | "answers"> & {
 		offers?: Array<{ application: { company: string; role: string } | null; data: unknown }>;
 	},
 ) {
@@ -61,9 +66,31 @@ export function buildCareerInstructions(
 	const task = context.application
 		? `Help with this one application${application}. ${input.tab ? `The user is ${TABS[input.tab]}.` : ""}`
 		: "Help with the whole search, across applications. Use list_opportunities to compare them.";
+	// Answers, the newest saved offer and the last replies belong to this application, as its tabs show them.
+	const saved = (input.items ?? []).filter((item) => item.applicationId === context.application?.id);
+	const offer = saved.find((item) => item.data.kind === "offer");
+	const replies = saved
+		.filter((item) => item.data.kind === "reply")
+		.slice(0, 2)
+		.map((item) => ({ data: item.data, at: item.createdAt }));
 	const selected = {
 		...(input.shareApplication
-			? { application: context.application, resume: context.resume, letter: context.letter }
+			? {
+					application: context.application,
+					resume: context.resume,
+					letter: context.letter,
+					answers: boundedItems(
+						(input.answers ?? [])
+							.filter((answer) => answer.answer.trim())
+							.map((answer) => ({
+								question: answer.question.slice(0, 500),
+								answer: answer.answer.slice(0, 4_000),
+							})),
+						8_000,
+					).items,
+					offer: offer?.data.kind === "offer" ? offer.data : null,
+					recentReplies: replies,
+				}
 			: {}),
 		...(input.shareMemory
 			? { preferences: context.profile, facts: context.facts.slice(0, 30), stories: context.stories.slice(0, 8) }
@@ -131,17 +158,34 @@ export function buildCareerTools(input: CareerToolsInput): ToolSet {
 		});
 		tools.save_story = tool({
 			description:
-				"Save a STARR story the user agreed to, grounded in existing fact IDs. Leave Result or Reflection empty rather than inventing them.",
-			inputSchema: careerStoryInputSchema
-				.omit({ applicationId: true })
-				.extend({ factIds: z.array(z.string()).min(1).max(30) }),
-			execute: (story) =>
-				careerService.saveStory(
+				"Propose a STARR story for the user to review and approve before saving. To improve a story the user already saved, pass its `id` and its `updatedAt` as `basedOn` (both exactly as search_knowledge returned them) with the whole revised story: the user reviews the change and it replaces that story. Back it only with IDs of saved facts whose text states what the story claims (the accomplishment and its numbers), never unrelated skills or tenure; a fact that is only proposed has no ID yet. Leave Result or Reflection empty rather than inventing them. Nothing is saved until approval.",
+			inputSchema: careerStoryInputSchema.omit({ applicationId: true }).extend({
+				factIds: z.array(z.string()).min(1).max(30),
+				id: z.string().optional(),
+				basedOn: z.string().optional(),
+			}),
+			execute: async ({ id, basedOn, ...story }) => {
+				// Only a story this conversation can see may be updated; the service checks ownership again.
+				const existing = id ? input.context.stories.find((item) => item.id === id) : undefined;
+				if (id && !existing) throw new Error("That story isn't available here. Propose a new story instead.");
+				// An update replaces the whole story: if the user edited it after the proposal was made, refuse rather
+				// than overwrite their newer version.
+				if (existing && (!basedOn || new Date(basedOn).getTime() !== new Date(existing.updatedAt).getTime()))
+					throw new Error(
+						"That story changed after this proposal. Ask again to propose an update to the current story.",
+					);
+				const saved = await careerService.saveStory(
 					input.userId,
-					{ ...story, applicationId: scope.applicationId },
-					undefined,
+					{ ...story, applicationId: existing ? existing.applicationId : scope.applicationId },
+					id,
 					input.context.memoryVersion,
-				),
+				);
+				// The next model step revalidates stories returned by tools too.
+				const index = input.context.stories.findIndex((item) => item.id === saved.id);
+				if (index === -1) input.context.stories.push(saved);
+				else input.context.stories[index] = saved;
+				return saved;
+			},
 		});
 		const mode = input.context.profile.memoryMode;
 		const sourceMessageId = input.sourceMessageId;
@@ -157,6 +201,15 @@ export function buildCareerTools(input: CareerToolsInput): ToolSet {
 						category,
 						source: { kind: "user-message" as const, id: sourceMessageId, quote },
 					};
+					// Both modes check the quotation against the saved message first: a proposal the user can't save, or
+					// words they never wrote, is never shown as theirs.
+					const source = await careerService.quotedSource(input.userId, fact.source, scope.applicationId);
+					if (!source)
+						return {
+							status: "skipped" as const,
+							fact,
+							reason: "The quote is not in the user's latest message. Remember only their exact words.",
+						};
 					// Ask first: the reply shows the fact as a proposal; the user's Remember saves it.
 					if (mode === "ask") return { status: "proposed" as const, fact };
 					const saved = await careerService.saveFact(input.userId, fact, true);
@@ -175,12 +228,19 @@ export function buildCareerTools(input: CareerToolsInput): ToolSet {
 						company: application.company,
 						role: application.role,
 						status: application.status,
+						laneId: application.laneId,
+						laneLabel: applicationLane.label,
+						closedReason: application.closedReason,
 						location: application.location,
 						salary: application.salary,
 						requirements: application.requirements,
 					})
 					.from(application)
-					.where(eq(application.userId, input.userId))
+					.leftJoin(
+						applicationLane,
+						and(eq(applicationLane.id, application.laneId), eq(applicationLane.userId, input.userId)),
+					)
+					.where(activeApplications(input.userId))
 					.orderBy(desc(application.updatedAt))
 					.limit(50),
 		});

@@ -1,3 +1,4 @@
+import type { DndLabel } from "@/libs/dnd";
 import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core";
 import {
 	closestCenter,
@@ -28,6 +29,7 @@ import { Input } from "@reactive-resume/ui/components/input";
 import { Kbd } from "@reactive-resume/ui/components/kbd";
 import { cn } from "@reactive-resume/utils/style";
 import { useControlledState } from "@/hooks/use-controlled-state";
+import { dndContextProps } from "@/libs/dnd";
 import { isImeComposing } from "@/libs/keyboard";
 import { DRAG_SETTLE } from "@/libs/motion";
 
@@ -77,6 +79,7 @@ function ChipDragOverlay({ activeChip }: ChipDragOverlayProps) {
 function ChipItem({ id, chip, index, isEditing, onEdit, onRemove }: ChipItemProps) {
 	const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
 		id,
+		data: { label: chip } satisfies DndLabel,
 		transition: DRAG_SETTLE,
 	});
 
@@ -152,6 +155,14 @@ type Props = Omit<React.ComponentProps<"div">, "value" | "onChange"> & {
 	defaultValue?: string[];
 	onChange?: (value: string[]) => void;
 	allowCommas?: boolean;
+	/** Explicit document saves include unfinished text without changing blur/autosave behavior. */
+	commitRef?: React.Ref<() => string[]>;
+	/** The empty field's hint; keywords by default. Document tags say "Add a tag…". */
+	placeholder?: string;
+	/** Tags this account already uses. Chosen ones are hidden, and typing narrows the rest. */
+	suggestions?: readonly string[];
+	/** A caption above the suggestions, for example "Your tags". */
+	suggestionsLabel?: string;
 };
 
 export function ChipInput({
@@ -160,6 +171,10 @@ export function ChipInput({
 	onChange,
 	className,
 	allowCommas = false,
+	commitRef,
+	placeholder,
+	suggestions,
+	suggestionsLabel,
 	id: idProp,
 	"aria-describedby": ariaDescribedByProp,
 	"aria-invalid": ariaInvalidProp,
@@ -184,28 +199,43 @@ export function ChipInput({
 	const dndContextId = React.useId();
 	const isEditingKeyword = editingIndex !== null;
 	const hasChips = chips.length > 0;
+	// Suggestions follow what is typed, but never offer a tag that is already on the document.
+	const query = input.trim().toLocaleLowerCase();
+	const offered = (suggestions ?? []).filter(
+		(suggestion) => !chips.includes(suggestion) && suggestion.toLocaleLowerCase().includes(query),
+	);
 
 	const addChips = (values: string[]) => {
 		const nextValues = values.flatMap((chip) => {
 			const trimmed = chip.trim();
 			return trimmed ? [trimmed] : [];
 		});
-		if (nextValues.length === 0) return;
+		if (nextValues.length === 0) return chips;
 
-		setChips([...new Set([...chips, ...nextValues])]);
+		const next = [...new Set([...chips, ...nextValues])];
+		setChips(next);
+		return next;
 	};
 
 	const updateChip = (index: number, newValue: string) => {
 		const trimmed = newValue.trim();
-		if (!trimmed || index < 0 || index >= chips.length) return;
+		if (!trimmed || index < 0 || index >= chips.length) return chips;
 
 		const existingIndex = chips.findIndex((c, i) => c === trimmed && i !== index);
-		if (existingIndex !== -1) return;
+		if (existingIndex !== -1) return chips;
 
 		const newChips = [...chips];
 		newChips[index] = trimmed;
 		setChips(newChips);
+		return newChips;
 	};
+
+	React.useImperativeHandle(commitRef, () => () => {
+		const next = editingIndex === null ? addChips([input]) : updateChip(editingIndex, input);
+		setInput("");
+		setEditingIndex(null);
+		return next;
+	});
 
 	const removeChip = (index: number) => {
 		if (index < 0 || index >= chips.length) return;
@@ -301,6 +331,7 @@ export function ChipInput({
 	return (
 		<div className={cn("space-y-1.5", className)} {...props}>
 			<DndContext
+				{...dndContextProps(true)}
 				id={dndContextId}
 				sensors={sensors}
 				collisionDetection={closestCenter}
@@ -311,7 +342,7 @@ export function ChipInput({
 				<div
 					role="none"
 					onClick={() => inputRef.current?.focus()}
-					className="overflow-hidden rounded-lg border border-line-2 bg-bg/40 transition-colors focus-within:border-accent focus-within:ring-3 focus-within:ring-accent/50 dark:bg-line-2/20"
+					className="overflow-hidden rounded-lg border border-control-border bg-bg/40 transition-colors focus-within:border-accent focus-within:ring-3 focus-within:ring-accent/50 dark:bg-line-2/20"
 				>
 					<div className="flex flex-col">
 						<div
@@ -347,21 +378,14 @@ export function ChipInput({
 								aria-labelledby={labelId}
 								aria-describedby={describedBy}
 								aria-invalid={invalid}
-								placeholder={isEditingKeyword ? t`Editing keyword...` : t`Add a keyword...`}
+								placeholder={isEditingKeyword ? t`Editing keyword…` : (placeholder ?? t`Add a keyword…`)}
 								onKeyDown={handleKeyDown}
 								onChange={handleInputChange}
 								className="h-9 flex-1 border-none p-0 focus-visible:border-none focus-visible:ring-0 dark:bg-transparent"
 							/>
-							{chips.length > 0 && (
-								<span
-									className={cn(
-										"flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md border px-1.5 text-[0.7rem] font-medium tabular-nums",
-										isEditingKeyword
-											? "border-accent/30 bg-accent/10 text-accent-text"
-											: "border-line bg-sunken/50 text-ink/80 opacity-80",
-									)}
-								>
-									{isEditingKeyword ? <Trans>Edit</Trans> : chips.length}
+							{isEditingKeyword && (
+								<span className="flex h-6 shrink-0 items-center rounded-md border border-accent/30 bg-accent/10 px-1.5 text-xs font-medium text-accent-text">
+									<Trans>Edit</Trans>
 								</span>
 							)}
 						</div>
@@ -381,6 +405,35 @@ export function ChipInput({
 					</Trans>
 				)}
 			</p>
+
+			{offered.length > 0 && (
+				<div className="grid gap-1.5">
+					{suggestionsLabel && <p className="text-xs text-ink-3">{suggestionsLabel}</p>}
+					<div className="flex max-h-28 flex-wrap gap-1.5 overflow-y-auto">
+						{offered.map((suggestion) => (
+							<button
+								key={suggestion}
+								type="button"
+								aria-label={t({
+									comment: "Button that adds a suggested tag. Variable is the tag text.",
+									message: `Add ${suggestion}`,
+								})}
+								className="inline-flex min-h-7 max-w-full items-center gap-1 rounded-sm border border-line-2 px-2.5 text-[13px] text-ink-2 transition-colors duration-quick hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none pointer-coarse:min-h-11"
+								onClick={() => {
+									if (editingIndex === null) addChips([suggestion]);
+									else updateChip(editingIndex, suggestion);
+									setInput("");
+									setEditingIndex(null);
+									inputRef.current?.focus();
+								}}
+							>
+								<Icon name="plus" size={12} className="shrink-0 text-ink-3" />
+								<span className="truncate">{suggestion}</span>
+							</button>
+						))}
+					</div>
+				</div>
+			)}
 		</div>
 	);
 }

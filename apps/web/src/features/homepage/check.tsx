@@ -142,7 +142,9 @@ function ParsedTextLive() {
  */
 export function Check() {
 	const sectionRef = useRef<HTMLElement>(null);
-	const check = t`Check your resume’s ATS readability`;
+	// One display word like the other scenes; the keyword sentence stays in the heading for search and screen readers.
+	const check = t({ message: "Check", comment: "Homepage scene title, one word followed by a full stop" });
+	const checkSentence = t`Check your resume’s ATS readability`;
 
 	// The pointer steers the lens while it's over the page; on leaving, the scroll engine takes it back.
 	const moveLens = (event: PointerEvent<HTMLDivElement>) => {
@@ -165,14 +167,19 @@ export function Check() {
 			data-scene={SCENE.check}
 			data-pin
 			aria-labelledby="check-title"
-			className="relative h-[245vh] motion-reduce:h-svh min-[900px]:h-[295vh]"
+			className="relative h-[245vh] min-[900px]:h-[295vh]"
 		>
-			<div className="sticky top-0 h-svh overflow-clip [--chk:var(--sp)] [--dw:calc(clamp(0,(var(--sp)-.42)*20,1)*(1-clamp(0,(var(--sp)-.7)*20,1)))] [--lo:clamp(0,(var(--p)-.04)*10,1)] [--pw:min(62vw,40vh)] [--sp:clamp(0,(var(--p)-.06)/.8,1)] [--sv:clamp(0,var(--p)/.24,1)] min-[900px]:[--pw:min(28vw,58vh)]">
+			{/* The page and lens are already there as the scene rises, so the hand-off never opens on an empty half-screen. */}
+			<div className="sticky top-0 h-svh overflow-clip [--chk:var(--sp)] [--dw:calc(clamp(0,(var(--sp)-.42)*20,1)*(1-clamp(0,(var(--sp)-.7)*20,1)))] [--lo:clamp(.85,var(--p)*20,1)] [--pw:min(62vw,40vh)] [--sp:clamp(0,(var(--p)-.06)/.8,1)] [--sv:clamp(0,var(--p)/.24,1)] min-[900px]:[--pw:min(28vw,58vh)]">
 				<h2
 					id="check-title"
 					className="absolute start-(--gutter) top-[10vh] max-w-[90vw] text-[9vw] leading-[1.05] font-normal text-balance text-ink min-[900px]:top-[11vh] min-[900px]:max-w-[45vw] min-[900px]:text-[clamp(40px,4vw,72px)]"
 				>
-					<span className="font-anybody block font-light tracking-[-.03em] [clip-path:inset(calc(var(--sv)*120%-20%)_0_-20%_0)]">
+					<span className="sr-only">{checkSentence}</span>
+					<span
+						aria-hidden="true"
+						className="font-anybody block font-light tracking-[-.03em] [clip-path:inset(calc(var(--sv)*120%-20%)_0_-20%_0)]"
+					>
 						{check}
 						<span className="text-accent">.</span>
 					</span>
@@ -214,7 +221,7 @@ export function Check() {
 					onPointerMove={moveLens}
 					onPointerLeave={releaseLens}
 					data-lens-page
-					className="@container absolute end-[calc(50%-var(--pw)/2)] bottom-[3vh] aspect-[612/792] w-(--pw) [transform:rotate(1deg)] cursor-crosshair rounded-sm opacity-[clamp(0,var(--p)*20,1)] shadow-paper min-[900px]:end-[10vw] min-[900px]:top-[52%] min-[900px]:bottom-auto min-[900px]:[transform:translateY(-50%)_rotate(1deg)]"
+					className="@container absolute end-[calc(50%-var(--pw)/2)] bottom-[3vh] aspect-[612/792] w-(--pw) [transform:rotate(1deg)] cursor-crosshair rounded-sm opacity-[clamp(.85,var(--p)*20,1)] shadow-paper min-[900px]:end-[10vw] min-[900px]:top-[52%] min-[900px]:bottom-auto min-[900px]:[transform:translateY(-50%)_rotate(1deg)]"
 				>
 					<Sheet />
 					<div
@@ -227,13 +234,15 @@ export function Check() {
 					<Doodle
 						name="magnifier"
 						wipe="1"
+						sizes="(min-width: 900px) 14vw, 31vw"
 						className="top-[calc(var(--ly,16%)-15.9cqw)] left-[calc(var(--lx,50%)-17.4cqw)] w-[48.3cqw] max-w-none [mask-image:radial-gradient(circle_11cqw_at_36.1%_32.9%,transparent_97%,#000_100%)]! [mask-size:100%_100%]! [mask-position:0_0]! opacity-(--lo)!"
 					/>
 					<span
 						aria-hidden="true"
 						className="font-martian pointer-events-none absolute top-[calc(var(--ly,16%)-14.5cqw)] left-(--lx,50%) -translate-x-1/2 -translate-y-full rounded-sm bg-[oklch(0.2_0.03_160)] px-[9px] py-[5px] text-xs leading-none font-medium whitespace-nowrap text-[oklch(0.88_0.09_150)] opacity-(--lo)"
 					>
-						{t`What software reads`}
+						{/* The same name as the ATS checker and the editor's Check, so the doorway leads into the same world. */}
+						{t`What a parser reads`}
 					</span>
 				</div>
 			</div>

@@ -1,13 +1,16 @@
 import type { AuthProvider } from "@reactive-resume/auth/types";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
-import { Button, buttonVariants } from "@reactive-resume/ui/components/button";
+import { useRouteContext } from "@tanstack/react-router";
+import { Button } from "@reactive-resume/ui/components/button";
 import { Switch } from "@reactive-resume/ui/components/switch";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { SettingsRow, SettingsSection } from "../section";
 import { getProviderName, useAuthAccounts, useAuthProviderActions, useEnabledProviders } from "./auth-hooks";
+import { BackupCodesRow } from "./backup-codes";
+import { SessionsRows } from "./sessions";
 import { useDialogStore } from "@/dialogs/store";
 import { useConfirm, usePrompt } from "@/hooks/use-confirm";
 import { authClient } from "@/libs/auth/client";
@@ -15,7 +18,7 @@ import { getReadableErrorMessage } from "@/libs/error-message";
 
 const SOCIAL: AuthProvider[] = ["apple", "google", "github", "linkedin", "custom"];
 
-const monthYear = (date: Date) => date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+const monthYear = (date: Date) => i18n.date(date, { month: "long", year: "numeric" });
 
 export function SecuritySection() {
 	const openDialog = useDialogStore((state) => state.openDialog);
@@ -29,8 +32,9 @@ export function SecuritySection() {
 	const social = SOCIAL.filter((provider) => provider in enabledProviders);
 
 	return (
-		<SettingsSection title={<Trans>Sign-in & security</Trans>}>
+		<SettingsSection id="security" title={<Trans>Sign-in & security</Trans>}>
 			<SettingsRow
+				id="password"
 				title={<Trans>Password</Trans>}
 				description={
 					password ? (
@@ -44,53 +48,75 @@ export function SecuritySection() {
 					<Button size="sm" variant="secondary" onClick={() => openDialog("auth.change-password", undefined)}>
 						<Trans>Change</Trans>
 					</Button>
-				) : (
-					<Link to="/auth/forgot-password" className={buttonVariants({ size: "sm", variant: "secondary" })}>
+				) : "credential" in enabledProviders ? (
+					<Button size="sm" variant="secondary" onClick={() => openDialog("auth.set-password", undefined)}>
 						<Trans>Set a password</Trans>
-					</Link>
-				)}
+					</Button>
+				) : null}
 			</SettingsRow>
 
-			{password && (
-				<SettingsRow
-					title={<Trans>Two-step verification</Trans>}
-					description={<Trans>A code from an authenticator app at sign-in</Trans>}
-				>
-					<Switch
-						aria-label={t`Two-step verification`}
-						checked={twoFactor}
-						// Turning it on walks through the QR code and backup codes; turning it off asks for the password.
-						onCheckedChange={() =>
-							openDialog(twoFactor ? "auth.two-factor.disable" : "auth.two-factor.enable", undefined)
-						}
+			<div id="two-step" className="scroll-mt-6">
+				{!password && (
+					<SettingsRow
+						title={<Trans>Two-step verification</Trans>}
+						description={<Trans>Set a password to turn on two-step verification.</Trans>}
 					/>
-				</SettingsRow>
-			)}
+				)}
+				{password && (
+					<SettingsRow
+						title={<Trans>Two-step verification</Trans>}
+						description={<Trans>A code from an authenticator app at sign-in</Trans>}
+					>
+						<Switch
+							aria-label={t`Two-step verification`}
+							checked={twoFactor}
+							// Turning it on walks through the QR code and backup codes; turning it off asks for the password.
+							onCheckedChange={() =>
+								openDialog(twoFactor ? "auth.two-factor.disable" : "auth.two-factor.enable", undefined)
+							}
+						/>
+					</SettingsRow>
+				)}
+
+				{password && twoFactor && <BackupCodesRow />}
+			</div>
 
 			<Passkeys />
 
-			{social.map((provider) => {
-				const account = getAccountByProviderId(provider);
-				const name =
-					provider === "custom" ? (enabledProviders.custom ?? getProviderName(provider)) : getProviderName(provider);
-				return (
-					<SettingsRow
-						key={provider}
-						title={name}
-						description={hasAccount(provider) ? <Trans>Connected</Trans> : <Trans>Not connected</Trans>}
-					>
-						{account ? (
-							<Button size="sm" variant="ghost" onClick={() => void unlink(provider, account.id)}>
-								<Trans>Disconnect</Trans>
-							</Button>
-						) : (
-							<Button size="sm" variant="secondary" onClick={() => void link(provider)}>
-								<Trans>Connect</Trans>
-							</Button>
-						)}
-					</SettingsRow>
-				);
-			})}
+			<SessionsRows />
+
+			<div id="linked-accounts" className="grid scroll-mt-6">
+				<h3 className="text-sm font-medium">
+					<Trans>Linked accounts</Trans>
+				</h3>
+				{social.length === 0 && (
+					<p className="text-[13px] text-ink-3">
+						<Trans>No social sign-in providers are available on this server.</Trans>
+					</p>
+				)}
+				{social.map((provider) => {
+					const account = getAccountByProviderId(provider);
+					const name =
+						provider === "custom" ? (enabledProviders.custom ?? getProviderName(provider)) : getProviderName(provider);
+					return (
+						<SettingsRow
+							key={provider}
+							title={name}
+							description={hasAccount(provider) ? <Trans>Connected</Trans> : <Trans>Not connected</Trans>}
+						>
+							{account ? (
+								<Button size="sm" variant="ghost" onClick={() => void unlink(provider, account.id)}>
+									<Trans>Disconnect</Trans>
+								</Button>
+							) : (
+								<Button size="sm" variant="secondary" onClick={() => void link(provider)}>
+									<Trans>Connect</Trans>
+								</Button>
+							)}
+						</SettingsRow>
+					);
+				})}
+			</div>
 		</SettingsSection>
 	);
 }
@@ -99,6 +125,10 @@ const PASSKEYS_KEY = ["auth", "passkeys"];
 
 function Passkeys() {
 	const queryClient = useQueryClient();
+	const { data: session } = authClient.useSession();
+	const smtpEnabled = useRouteContext({ strict: false }).flags?.smtpEnabled ?? false;
+	// The server adds passkeys only to verified addresses; say so instead of offering a button that always fails.
+	const verified = session?.user.emailVerified ?? true;
 	const prompt = usePrompt();
 	const confirm = useConfirm();
 	const { data: passkeys = [] } = useQuery({
@@ -154,12 +184,20 @@ function Passkeys() {
 	});
 
 	return (
-		<div className="grid">
+		<div id="passkeys" className="grid scroll-mt-6">
 			<SettingsRow
 				title={<Trans>Passkeys</Trans>}
-				description={<Trans>Sign in with your fingerprint, face or device PIN</Trans>}
+				description={
+					verified ? (
+						<Trans>Sign in with your fingerprint, face or device PIN</Trans>
+					) : smtpEnabled ? (
+						<Trans>Verify your email to add a passkey. The link is in Account details above.</Trans>
+					) : (
+						<Trans>Passkeys need a verified email, which this server can't send.</Trans>
+					)
+				}
 			>
-				<Button size="sm" variant="secondary" loading={add.isPending} onClick={() => add.mutate()}>
+				<Button size="sm" variant="secondary" loading={add.isPending} disabled={!verified} onClick={() => add.mutate()}>
 					<Trans>Add passkey</Trans>
 				</Button>
 			</SettingsRow>

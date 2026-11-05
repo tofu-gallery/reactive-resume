@@ -1,7 +1,10 @@
+import type { AnswerEvidence } from "@reactive-resume/schema/application-answers";
 import type {
 	CareerNotice,
+	CareerFactRevision,
 	CareerProfileData,
 	CareerSource,
+	DiscoverySource,
 	CareerStoryData,
 	CareerWorkspace,
 	SavedItemData,
@@ -52,7 +55,7 @@ export const careerFact = pg.pgTable(
 		source: pg.jsonb("source").notNull().$type<CareerSource>(),
 		sourceKey: pg.text("source_key").notNull(),
 		status: pg.text("status").notNull().default("active"),
-		revisions: pg.jsonb("revisions").notNull().$type<Array<{ text: string; at: string }>>().default([]),
+		revisions: pg.jsonb("revisions").notNull().$type<CareerFactRevision[]>().default([]),
 	},
 	(t) => [pg.index().on(t.userId, t.applicationId, t.status), pg.uniqueIndex().on(t.userId, t.sourceKey)],
 );
@@ -77,6 +80,7 @@ export const careerArtifact = pg.pgTable(
 		evidence: pg.jsonb("evidence").notNull().$type<{ factIds: string[]; storyIds: string[] }>(),
 		jobId: pg.text("job_id").references(() => careerJob.id, { onDelete: "set null" }),
 		inputVersion: pg.text("input_version").notNull(),
+		aiOperationId: pg.text("ai_operation_id"),
 	},
 	(t) => [pg.index().on(t.userId, t.applicationId, t.createdAt), pg.uniqueIndex().on(t.jobId)],
 );
@@ -99,6 +103,8 @@ export const careerSchedule = pg.pgTable(
 		lastQueuedAt: pg.timestamp("last_queued_at", { withTimezone: true }),
 		intervalDays: pg.integer("interval_days"),
 		aiProviderId: pg.text("ai_provider_id").references(() => aiProvider.id, { onDelete: "set null" }),
+		/** Recipient revision approved when this schedule was enabled; never supplied by a client. */
+		aiProviderVersion: pg.text("ai_provider_version"),
 	},
 	(t) => [pg.index().on(t.enabled, t.nextRunAt)],
 );
@@ -145,6 +151,8 @@ export const careerOpportunity = pg.pgTable(
 		company: pg.text("company").notNull().default(""),
 		location: pg.text("location").notNull().default(""),
 		snippet: pg.text("snippet").notNull(),
+		/** Retrieval and posting-check provenance; null for results discovered before this metadata existed. */
+		discoverySource: pg.jsonb("discovery_source").$type<DiscoverySource>(),
 		/** The posting's text, saved with the application when it's tracked. */
 		description: pg.text("description").notNull().default(""),
 		firstSeenAt: pg.timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
@@ -166,7 +174,9 @@ export const careerWorkspace = pg.pgTable("career_workspace", {
 		.text("user_id")
 		.notNull()
 		.references(() => user.id, { onDelete: "cascade" }),
-	data: pg.jsonb("data").notNull().$type<CareerWorkspace>(),
+	data: pg.jsonb("data").notNull().$type<Omit<CareerWorkspace, "submissionReview">>(),
+	/** Old whole-workspace writers must not erase the first-submission receipt. */
+	submissionReview: pg.jsonb("submission_review").$type<NonNullable<CareerWorkspace["submissionReview"]>>(),
 	updatedAt: pg
 		.timestamp("updated_at", { withTimezone: true })
 		.notNull()
@@ -182,6 +192,31 @@ export const careerTranscript = pg.pgTable(
 		original: pg.text("original").notNull(),
 		edited: pg.text("edited").notNull(),
 		model: pg.text("model").notNull(),
+		aiOperationId: pg.text("ai_operation_id"),
 	},
 	(t) => [pg.index().on(t.userId, t.applicationId)],
+);
+
+/** Explicitly reviewed reusable wording, independent of editable workspaces and submitted artifacts. */
+export const careerAnswer = pg.pgTable(
+	"career_answer",
+	{
+		...owned(),
+		question: pg.text("question").notNull(),
+		answer: pg.text("answer").notNull(),
+		aiOperationIds: pg.text("ai_operation_ids").array().notNull().default([]),
+		source: pg.text("source").$type<"manual" | "application" | "ai-assisted">().notNull(),
+		scope: pg.text("scope").$type<"reusable" | "employer" | "application">().notNull(),
+		employer: pg.text("employer").notNull(),
+		applicationId: pg.text("application_id").references(() => application.id, { onDelete: "cascade" }),
+		sourceApplicationId: pg.text("source_application_id").references(() => application.id, { onDelete: "set null" }),
+		factIds: pg.jsonb("fact_ids").notNull().$type<string[]>(),
+		storyIds: pg.jsonb("story_ids").notNull().$type<string[]>(),
+		evidence: pg.jsonb("evidence").notNull().$type<AnswerEvidence[]>(),
+		reviewedAt: pg.timestamp("reviewed_at", { withTimezone: true }).notNull(),
+		revision: pg.integer("revision").notNull().default(1),
+		/** Normalized question plus scope target, hashed by the owning service. */
+		duplicateKey: pg.text("duplicate_key").notNull(),
+	},
+	(t) => [pg.uniqueIndex().on(t.userId, t.duplicateKey)],
 );

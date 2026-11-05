@@ -5,16 +5,19 @@ import type { EvidenceStatus } from "../parts";
 import type { WorkspaceTabProps } from "../shell";
 import type { CareerWorkspace } from "@reactive-resume/schema/career";
 import { useLingui } from "@lingui/react/macro";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
-import { useState } from "react";
+import { useRouter } from "expo-router";
+import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 import { latest, useFacts, useGenerate, useSavedItems, useWorkspace, workspaceError } from "../hooks";
-import { Actions, AiNotice, Block, EmptyNotice, StatusPill, useWorking, workingSteps } from "../parts";
+import { Actions, AiNotice, Block, StatusPill, GenerateNotice, useWorking, workingSteps } from "../parts";
 import { WorkspaceScreen } from "../shell";
-import { orpc } from "@/api/client";
+import { client, orpc } from "@/api/client";
+import { getAccountScope } from "@/auth/session";
 import { useHasAIProvider } from "@/features/ai/providers";
-import { Button, Icon, Skeleton, Text, TextArea, showToast, useTheme } from "@/ui";
+import { routes } from "@/routes";
+import { Banner, Button, EmptyState, Icon, SelectSheet, Skeleton, Text, TextArea, showToast, useTheme } from "@/ui";
 
 type FitItem = SavedItem & { data: SavedData<"fit"> };
 type Requirement = SavedData<"fit">["requirements"][number];
@@ -32,6 +35,61 @@ function Fit({ application, version }: WorkspaceTabProps) {
 	const generate = useGenerate(application.id);
 	const provider = useHasAIProvider().defaultProvider;
 	const facts = useFacts(application.id);
+	const router = useRouter();
+	const proposing = useRef<AbortController | null>(null);
+	const proposalKey = JSON.stringify([getAccountScope(), application.id]);
+	const [proposalOwner, setProposalOwner] = useState<string | null>(null);
+	const proposalPending = proposalOwner === proposalKey;
+	useEffect(
+		() => () => {
+			proposing.current?.abort();
+			proposing.current = null;
+		},
+		[proposalKey],
+	);
+	const proposeEvidence = async (factId: string) => {
+		if (proposing.current) return;
+		const controller = new AbortController();
+		const scope = getAccountScope();
+		proposing.current = controller;
+		setProposalOwner(proposalKey);
+		try {
+			await workspace.settled();
+			if (controller.signal.aborted || scope !== getAccountScope()) return;
+			const result = await client.applications.ai.proposeEvidence(
+				{ id: application.id, factId },
+				{ signal: controller.signal },
+			);
+			if (controller.signal.aborted || scope !== getAccountScope()) return;
+			router.push({
+				pathname: routes.assistant(result.resumeId),
+				params: { applicationId: application.id, thread: result.conversation?.thread.id ?? "new" },
+			});
+		} catch (error) {
+			if (!controller.signal.aborted && scope === getAccountScope())
+				showToast({ message: workspaceError(error, t`Couldn't complete this action. Try again.`) });
+		} finally {
+			if (proposing.current === controller) {
+				proposing.current = null;
+				if (scope === getAccountScope()) setProposalOwner(null);
+			}
+		}
+	};
+	const tailor = () =>
+		application.resumeId
+			? router.push({
+					pathname: routes.builder(application.resumeId, "check", application.id),
+					params: { tab: "match" },
+				})
+			: router.push({
+					pathname: routes.new(),
+					params: { step: "copy", applicationId: application.id, destination: "job-match", context: "applications" },
+				});
+	const evidenceState = useQuery(orpc.career.fitEvidence.queryOptions({ input: { applicationId: application.id } }));
+	const documents = useQuery(orpc.documents.list.queryOptions({ input: { trashed: false } }));
+	const linkResume = useMutation(orpc.applications.update.mutationOptions());
+	const [resumeChoice, setResumeChoice] = useState<string | null>(null);
+	const hasEvidence = evidenceState.data?.usable === true;
 	const forget = useMutation(orpc.career.forgetFact.mutationOptions());
 	const readOnly = version?.data.kind === "fit";
 	const item = (readOnly ? version : latest(saved.data, "fit")) as FitItem | undefined;
@@ -40,19 +98,69 @@ function Fit({ application, version }: WorkspaceTabProps) {
 
 	if (saved.isPending) return <Skeleton height={space.s12 * 6} />;
 
-	const check = () => void generate.run({ task: "fit" }).catch(() => undefined);
+	const check = () => {
+		if (!hasEvidence || evidenceState.isPending) return;
+		void generate.run({ task: "fit" }).catch(() => undefined);
+	};
 
 	if (!item)
 		return (
-			<EmptyNotice
+			<EmptyState
+				variant="card"
 				title={t`Check this role against your evidence`}
 				message={t`Each requirement in the posting is checked against the facts and stories in your Knowledge. Gaps show as missing evidence, never missing ability.`}
 			>
-				<AiNotice centered />
+				<AiNotice task="fit" application={application} centered />
+				{evidenceState.isError && (
+					<Banner
+						tone="danger"
+						message={t`Couldn't check your evidence.`}
+						action={{ label: t`Retry`, onPress: () => void evidenceState.refetch() }}
+					/>
+				)}
+				{!hasEvidence && (
+					<View style={{ gap: space.s2 }}>
+						<Text>{t`Fit needs evidence. Add facts to Knowledge or choose a resume to link before sending a request.`}</Text>
+						<Button label={t`Add facts`} variant="link" onPress={() => router.push("/career/knowledge")} />
+						<SelectSheet
+							label={t`Resume to use as evidence`}
+							value={resumeChoice}
+							options={(documents.data ?? [])
+								.filter((d) => d.type === "resume")
+								.map((d) => ({ value: d.id, label: d.name }))}
+							onChange={setResumeChoice}
+						/>
+						<Button
+							label={t`Use this resume as evidence`}
+							disabled={!resumeChoice}
+							loading={linkResume.isPending}
+							onPress={() => {
+								if (resumeChoice)
+									linkResume.mutate(
+										{ id: application.id, resumeId: resumeChoice },
+										{
+											onSuccess: () => {
+												void queryClient.invalidateQueries({ queryKey: orpc.applications.key() });
+												void queryClient.invalidateQueries({ queryKey: orpc.career.fitEvidence.key() });
+											},
+											onError: () => showToast({ message: t`Couldn't link the resume. Try again.` }),
+										},
+									);
+							}}
+						/>
+					</View>
+				)}
 				{provider ? (
-					<Button icon="list-checks" label={checkLabel} loading={generate.isPending} onPress={check} />
+					<Button
+						disabled={!hasEvidence || evidenceState.isPending}
+						icon="list-checks"
+						label={checkLabel}
+						loading={generate.isPending}
+						onPress={check}
+					/>
 				) : null}
-			</EmptyNotice>
+				<GenerateNotice generate={generate} onRetry={check} />
+			</EmptyState>
 		);
 
 	const evidence = readOnly ? {} : workspace.data.evidence;
@@ -104,7 +212,8 @@ function Fit({ application, version }: WorkspaceTabProps) {
 					{provider ? (
 						<Button variant="secondary" label={againLabel} loading={generate.isPending} onPress={check} />
 					) : null}
-					<AiNotice />
+					<GenerateNotice generate={generate} onRetry={check} />
+					<AiNotice task="fit" application={application} />
 				</View>
 			) : null}
 
@@ -118,7 +227,16 @@ function Fit({ application, version }: WorkspaceTabProps) {
 							status={statusOf(requirement)}
 							evidence={factId ? (factText(factId) ?? requirement.evidence) : requirement.evidence}
 							readOnly={readOnly}
+							onTailor={tailor}
 							onSaved={(id) => onSaved(requirement, id)}
+							onPropose={
+								application.resumeId &&
+								factId &&
+								facts.data?.some((fact) => fact.id === factId && fact.status === "active")
+									? () => void proposeEvidence(factId)
+									: undefined
+							}
+							proposalPending={proposalPending}
 						/>
 					);
 				})}
@@ -130,6 +248,16 @@ function Fit({ application, version }: WorkspaceTabProps) {
 						<CheckLine key={entry.label} met={entry.met} label={entry.label} text={entry.text} />
 					))}
 				</Block>
+			) : null}
+			{proposalPending ? (
+				<Button
+					label={t`Stop`}
+					onPress={() => {
+						proposing.current?.abort();
+						proposing.current = null;
+						setProposalOwner(null);
+					}}
+				/>
 			) : null}
 			{item.data.ask ? <WorthAsking ask={item.data.ask} applicationId={application.id} readOnly={readOnly} /> : null}
 		</View>
@@ -156,9 +284,21 @@ type RequirementCardProps = {
 	evidence: string;
 	readOnly: boolean;
 	onSaved: (factId: string) => void;
+	onTailor: () => void;
+	onPropose?: (() => void) | undefined;
+	proposalPending: boolean;
 };
 
-function RequirementCard({ requirement, status, evidence, readOnly, onSaved }: RequirementCardProps) {
+function RequirementCard({
+	requirement,
+	status,
+	evidence,
+	readOnly,
+	onSaved,
+	onTailor,
+	onPropose,
+	proposalPending,
+}: RequirementCardProps) {
 	const { t } = useLingui();
 	const { space } = useTheme();
 	const [editing, setEditing] = useState(false);
@@ -174,6 +314,18 @@ function RequirementCard({ requirement, status, evidence, readOnly, onSaved }: R
 				</Text>
 			</Actions>
 			<Text color={status === "missing" ? "ink2" : "ink"}>{evidence}</Text>
+			{!readOnly && onPropose ? (
+				<Button
+					size="sm"
+					variant="secondary"
+					disabled={proposalPending}
+					label={proposalPending ? t`Preparing…` : t`Propose a resume bullet`}
+					onPress={onPropose}
+				/>
+			) : null}
+			{status === "missing" || status === "partial" ? (
+				<Button variant="link" size="sm" label={t`Tailor resume for this job`} onPress={onTailor} />
+			) : null}
 			{canAdd ? (
 				editing ? (
 					<EvidenceEditor requirement={requirement} onCancel={() => setEditing(false)} onSaved={onSaved} />
@@ -263,7 +415,7 @@ function WorthAsking({ ask, applicationId, readOnly }: WorthAskingProps) {
 					variant="secondary"
 					size="sm"
 					icon={added ? "check" : "plus"}
-					label={added ? t`Added to Prepare` : t`Add to questions`}
+					label={added ? t`Added to Interview prep` : t`Add to questions`}
 					disabled={added}
 					onPress={() =>
 						workspace.save({

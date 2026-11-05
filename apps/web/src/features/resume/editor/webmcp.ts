@@ -7,12 +7,12 @@ import { useMemo } from "react";
 import z from "zod";
 import { resumePatchOperationsSchema } from "@reactive-resume/ai/tools/resume-tool-contracts";
 import { lintResumeForAts } from "@reactive-resume/resume/ats";
-import { applyResumePatches, ResumePatchError } from "@reactive-resume/resume/patch";
+import { applyResumePatches, describeResumePatchError, ResumePatchError } from "@reactive-resume/resume/patch";
 import { createResumeDataJsonSchema } from "@reactive-resume/schema/resume/json-schema";
 import { templateSchema } from "@reactive-resume/schema/templates";
-import { toast } from "@reactive-resume/ui/components/toast";
 import { buildIssues } from "./check/issues";
 import { useResumeStore, useUpdateResumeData } from "@/features/resume/builder/draft";
+import { undoToast } from "@/features/resume/builder/undo-toast";
 import { defineWebMcpTool, useWebMcpTools } from "@/libs/webmcp";
 
 type Container = Record<string, unknown> | unknown[];
@@ -46,11 +46,7 @@ export function assignChanged(target: Container, before: Container, next: Contai
 }
 
 function describePatchError(error: unknown): string {
-	// Named by op and path: fast-json-patch reports index 0 for some failures, whichever operation it was.
-	if (error instanceof ResumePatchError) {
-		const { op, path } = error.operation;
-		return `The ${op} operation at ${path} failed: ${error.message} Nothing was changed.`;
-	}
+	if (error instanceof ResumePatchError) return `${describeResumePatchError(error)} Nothing was changed.`;
 	const message = error instanceof Error ? error.message : String(error);
 	return `${message} Nothing was changed.`;
 }
@@ -127,11 +123,7 @@ function createResumeTools(
 			if (isEqual(before, next)) return "The patch changed nothing.";
 
 			updateResumeData((draft: WritableDraft<ResumeData>) => assignChanged(draft, before, next), { newStep: true });
-			toast.add({
-				id: "webmcp-resume-edit",
-				description: t`Your browser's AI agent edited this resume.`,
-				actionProps: { children: t`Undo`, onClick: () => useResumeStore.getState().undo() },
-			});
+			undoToast(t`Your browser's AI agent edited this resume.`, { id: "webmcp-resume-edit" });
 
 			const count = operations.length;
 			return `Applied ${count} operation${count === 1 ? "" : "s"}. The change saves automatically.`;

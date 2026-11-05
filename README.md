@@ -50,6 +50,14 @@
         </a>
       </td>
       <td align="center" valign="middle">
+        <a href="https://ola.cv">
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="https://ola.cv/assets/ola-logo-white.png" />
+            <img src="https://ola.cv/assets/ola-logo.png" alt=".cv domains" height="24" />
+          </picture>
+        </a>
+      </td>
+      <td align="center" valign="middle">
         <a href="https://vercel.com/open-source-program">
           <img src="https://vercel.com/oss/program-badge-2026.svg" alt="Vercel OSS Program" height="24" />
         </a>
@@ -269,20 +277,21 @@ This builds the checked-out source. For a deployment using published images, fol
 
 The full documentation lives at [docs.rxresu.me](https://docs.rxresu.me):
 
-| Guide                                                                                                            | Description                                  |
-| ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| [Getting started](https://docs.rxresu.me/getting-started)                                                        | First-time setup and basic usage             |
-| [What's new in v6](https://docs.rxresu.me/guides/whats-new-in-v6)                                                | Changes and where familiar features moved    |
-| [Checking your resume](https://docs.rxresu.me/guides/checking-your-resume)                                       | Readability, job match, and writing reviews  |
-| [Using the assistant](https://docs.rxresu.me/guides/using-the-assistant)                                         | Ask for changes and review proposed edits    |
-| [Writing a cover letter](https://docs.rxresu.me/guides/writing-a-cover-letter)                                   | Create a letter and link it to a resume      |
-| [Tracking job applications](https://docs.rxresu.me/guides/tracking-job-applications)                             | Saved jobs, stages, interviews, and insights |
-| [Exporting your resume](https://docs.rxresu.me/guides/exporting-your-resume)                                     | PDF, Word, Markdown, and JSON downloads      |
-| [API](https://docs.rxresu.me/guides/using-the-api) and [MCP](https://docs.rxresu.me/guides/using-the-mcp-server) | Connect scripts and external assistants      |
-| [Self-hosting](https://docs.rxresu.me/self-hosting/docker)                                                       | Deploy on your own infrastructure            |
-| [Migrating from v5](https://docs.rxresu.me/self-hosting/upgrading-to-v6)                                         | Migrations and integration changes           |
-| [Development setup](https://docs.rxresu.me/contributing/development)                                             | Local development environment                |
-| [Project architecture](https://docs.rxresu.me/contributing/architecture)                                         | Codebase structure and package boundaries    |
+| Guide                                                                                                            | Description                                                     |
+| ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| [Getting started](https://docs.rxresu.me/getting-started)                                                        | First-time setup and basic usage                                |
+| [What's new in v6](https://docs.rxresu.me/guides/whats-new-in-v6)                                                | Changes and where familiar features moved                       |
+| [Checking your resume](https://docs.rxresu.me/guides/checking-your-resume)                                       | Readability, job match, and writing reviews                     |
+| [Using the assistant](https://docs.rxresu.me/guides/using-the-assistant)                                         | Ask for changes and review proposed edits                       |
+| [Resume and career agent skills](plugins/reactive-resume/README.md)                                              | 32 skills for resume writing, specific roles and the job search |
+| [Writing a cover letter](https://docs.rxresu.me/guides/writing-a-cover-letter)                                   | Create a letter and link it to a resume                         |
+| [Tracking job applications](https://docs.rxresu.me/guides/tracking-job-applications)                             | Saved jobs, stages, interviews, and insights                    |
+| [Exporting your resume](https://docs.rxresu.me/guides/exporting-your-resume)                                     | PDF, Word, Markdown, and JSON downloads                         |
+| [API](https://docs.rxresu.me/guides/using-the-api) and [MCP](https://docs.rxresu.me/guides/using-the-mcp-server) | Connect scripts and external assistants                         |
+| [Self-hosting](https://docs.rxresu.me/self-hosting/docker)                                                       | Deploy on your own infrastructure                               |
+| [Migrating from v5](https://docs.rxresu.me/self-hosting/upgrading-to-v6)                                         | Migrations and integration changes                              |
+| [Development setup](https://docs.rxresu.me/contributing/development)                                             | Local development environment                                   |
+| [Project architecture](https://docs.rxresu.me/contributing/architecture)                                         | Codebase structure and package boundaries                       |
 
 ## Self-Hosting
 

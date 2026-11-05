@@ -1,9 +1,11 @@
 ---
 title: "Using agent skills"
-description: "Install Reactive Resume's eight agent skills in Claude, Codex, Cursor and other AI agents, and learn which skill to use at each step of a job search."
+description: "Install 32 resume and career skills in Claude, Codex, Cursor and other AI agents, including writing workflows and guides for fourteen professions."
 ---
 
-Reactive Resume publishes eight agent skills that teach an AI agent how to help with a job search: building a resume, deciding what belongs on it, writing bullets, tailoring it to a posting, tracking applications, preparing for and practicing interviews, and negotiating an offer. This guide explains what skills are, how to install them, what each one does and which one to use when.
+Reactive Resume publishes 32 agent skills for resume writing and the job search. They cover complete text drafts, importable resumes, evidence gathering, proofreading, career changes, academic CVs, fourteen role families, cover letters, LinkedIn profiles, portfolios, applications, interviews and offers. This guide explains how to install them and choose the right workflow.
+
+Start with [writing and career situations](#writing-and-career-situations), [resumes by role](#resumes-by-role), or [supporting application content](#supporting-application-content). The original building, tailoring and job-search workflows remain available below.
 
 <CardGroup cols={2}>
   <Card title="resume-builder" icon="file-plus" href="#resume-builder">
@@ -50,13 +52,13 @@ Skills work on their own: paste your resume or a job posting and you get text, a
 
 ## Install the skills
 
-The skills live in the [`plugins/reactive-resume/skills` folder](https://github.com/reactive-resume/reactive-resume/tree/main/plugins/reactive-resume/skills) of the Reactive Resume repository, one folder per skill. Install all eight if you can: each skill hands off to the others, and when one is missing it does a lighter version of that work itself and tells you so.
+The skills live in the [`plugins/reactive-resume/skills` folder](https://github.com/reactive-resume/reactive-resume/tree/main/plugins/reactive-resume/skills) of the Reactive Resume repository, one folder per skill. Install the collection or choose the skills you need. Each works independently; related skills can help with the next task when installed.
 
 <Note>Keep each skill's folder whole. The `references` folder inside it holds detail the skill reads on demand.</Note>
 
 ### As a plugin (Claude Code and Codex)
 
-The Reactive Resume plugin installs all eight skills and connects the [MCP server](/guides/using-the-mcp-server) in one step. Your agent asks you to sign in to Reactive Resume the first time a skill needs your data.
+The Reactive Resume plugin installs all 32 skills and connects the [MCP server](/guides/using-the-mcp-server) in one step. Your agent asks you to sign in to Reactive Resume the first time a skill needs your data.
 
 <Tabs>
   <Tab title="Claude Code">
@@ -95,7 +97,7 @@ npx skills add reactive-resume/reactive-resume
 # Install one skill
 npx skills add reactive-resume/reactive-resume --skill resume-tailor
 
-# Install all eight for one agent, for your user account, without prompts
+# Install the collection for one agent, for your user account, without prompts
 npx skills add reactive-resume/reactive-resume --skill '*' -a claude-code -g -y
 ```
 
@@ -197,6 +199,55 @@ npx add-mcp https://rxresu.me/mcp --name reactive-resume
 If you self-host, use your own instance's `/mcp` address. Then sign in from your agent; [Using the MCP server](/guides/using-the-mcp-server) has the steps for each client. Without the server, the skills work from what you paste into the chat.
 
 ## The skills
+
+### Writing and career situations
+
+These skills produce text you can review and paste into your resume. They ask for missing facts, keep estimates approximate and leave unresolved questions outside copy presented as ready to submit.
+
+| Skill                      | Use it for                                                                              | Try asking                                                                              |
+| -------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `resume-writer`            | A full resume draft, headline or summary without requiring JSON.                        | “Turn these work-history notes into a resume for operations roles.”                     |
+| `accomplishment-inventory` | Recovering achievements and building a reusable evidence bank.                          | “I know what I did, but I cannot think of accomplishments. Help me find them.”          |
+| `resume-proofreader`       | Grammar, clarity, consistency and a final check that wording preserves facts.           | “Proofread this resume without changing my experience or voice.”                        |
+| `entry-level-resume`       | First jobs, internships, apprenticeships and recent graduates.                          | “Write my first resume from my coursework, café job and volunteering.”                  |
+| `career-change-resume`     | Moving between professions, military-to-civilian transitions and return-to-work pivots. | “Help me move from teaching into workplace learning without overstating my experience.” |
+| `academic-cv`              | Research, postdoctoral, faculty and teaching appointments.                              | “Organize my publications, teaching and grants into an academic CV.”                    |
+
+Use resume-content-guide when deciding what belongs or asking about country conventions. Use resume-bullet-writer when individual bullets need stronger evidence. Resume-builder handles the Reactive Resume JSON structure after the content is ready.
+
+### Resumes by role
+
+Each role skill writes a complete resume or the sections you request. It uses questions and evidence checks suited to that work, while preserving official titles, dates, credentials and your actual contribution. These are writing defaults, not universal hiring requirements; employer instructions take precedence.
+
+| Skill                      | Focus                                                                                                                                    |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `software-engineer-resume` | Frontend, backend, mobile, platform, DevOps, SRE and security engineering; technical decisions, shipped systems and measurement context. |
+| `data-resume`              | Analytics, data engineering, data science and ML; decisions, methods, evaluation and production status.                                  |
+| `product-manager-resume`   | Product discovery, prioritization, tradeoffs and outcomes; individual decisions versus team results.                                     |
+| `designer-resume`          | Product, UX/UI, research, service and visual design; contribution, evidence and shareable portfolio work.                                |
+| `marketing-resume`         | Growth, performance, lifecycle, brand, content and communications; audience, channel and attribution.                                    |
+| `sales-resume`             | SDR/BDR, account executives, sales engineering and leadership; quota, period, pipeline and deal ownership.                               |
+| `customer-success-resume`  | Adoption, onboarding, implementation, retention and support; customer outcomes and service quality.                                      |
+| `project-manager-resume`   | Project, program, delivery and PMO work; scope, dependencies, risk and delivery against the applicable plan.                             |
+| `operations-resume`        | Supply chain, logistics, manufacturing, maintenance, retail and hospitality; process, quality, service and safety.                       |
+| `finance-resume`           | Accounting, audit, FP&A, treasury, banking and investments; financial basis, authority and credential status.                            |
+| `healthcare-resume`        | Nursing, allied health, clinical support and administration; scope, qualifications and patient privacy.                                  |
+| `educator-resume`          | Teaching, educational leadership, instructional design and workplace learning; curriculum, assessment and learner privacy.               |
+| `executive-resume`         | Director, VP, C-suite and board roles; mandate, reporting authority, financial scope and governance.                                     |
+| `technical-writer-resume`  | Technical writing, API documentation and knowledge management; audience, accuracy, validation and work samples.                          |
+
+For example: “Use data-resume to rewrite my resume for analytics engineering. This model was only an offline experiment, so do not describe it as deployed.” Once you have a specific posting, resume-tailor can adapt the draft using the same facts.
+
+### Supporting application content
+
+| Skill                     | What you receive                                                                                    | Try asking                                                                      |
+| ------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `cover-letter-writer`     | A standalone letter or application email grounded in your experience and real reasons for applying. | “Write a short letter for this role using the two examples in my resume.”       |
+| `application-answers`     | Form answers or selection-criteria statements, with counts against supplied limits.                 | “Draft a 150-word answer about handling competing priorities from these notes.” |
+| `linkedin-profile-writer` | Headline, About and experience text consistent with your resume and public-disclosure preferences.  | “Rewrite my LinkedIn About section without naming confidential clients.”        |
+| `portfolio-case-study`    | A project narrative showing the problem, decisions, contribution, results and limitations.          | “Turn this prototype project into a case study without implying it shipped.”    |
+
+These skills draft content; they do not submit forms, send messages or publish profiles. Application-answers respects restrictions on AI assistance and does not invent eligibility answers. A public profile or portfolio may need less detail than a private application when work is confidential.
 
 ### resume-builder
 
@@ -326,10 +377,11 @@ Your agent picks a skill from your words, so similar requests can go to differen
 
 | You say                                                               | Skill that runs         | Then                                                                                           |
 | --------------------------------------------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------- |
-| "Build me a resume from scratch."                                     | resume-builder          | resume-content-guide to check what belongs                                                     |
+| "Write a resume from these notes."                                    | resume-writer           | A role skill for professional emphasis; resume-proofreader for a final edit                    |
+| "Build an importable Reactive Resume JSON file."                      | resume-builder          | resume-content-guide to check what belongs                                                     |
 | "How do I add a custom section in Reactive Resume JSON?"              | resume-builder          |                                                                                                |
 | "Review my resume." / "Audit my resume." (no particular job)          | resume-content-guide    | resume-bullet-writer for the bullets it flags                                                  |
-| "Rewrite my summary." / "Fix my headline." (no particular job)        | resume-content-guide    | With a posting, resume-tailor rewrites both for that job                                       |
+| "Rewrite my summary." / "Fix my headline." (no particular job)        | resume-writer           | With a posting, resume-tailor rewrites both for that job                                       |
 | "Should I put my photo on my CV for a job in Germany?"                | resume-content-guide    |                                                                                                |
 | "How do I show a two-year gap on my resume?"                          | resume-content-guide    | interview-prep to rehearse saying it out loud                                                  |
 | "My resume sounds boring." / "Rewrite my bullets."                    | resume-bullet-writer    |                                                                                                |
@@ -337,7 +389,7 @@ Your agent picks a skill from your words, so similar requests can go to differen
 | "Fit my resume to this job." (with a posting)                         | resume-tailor           | job-application-manager to track the application                                               |
 | "What keywords am I missing for this posting?"                        | resume-tailor           |                                                                                                |
 | "Will my resume get past the ATS?"                                    | resume-tailor           | Without a posting it explains screening and checks parsing; paste one to tailor                |
-| "Write a cover letter for this job."                                  | resume-tailor           | Built from the same requirement table                                                          |
+| "Write a cover letter for this job."                                  | cover-letter-writer     | Reuses the resume and any existing requirement table                                           |
 | "Add this job to my tracker." (with a link)                           | job-application-manager | resume-tailor for that job                                                                     |
 | "I applied today." / "I got rejected." / "I was ghosted."             | job-application-manager |                                                                                                |
 | "What should I follow up on?" / "Do my weekly review."                | job-application-manager |                                                                                                |
@@ -362,7 +414,7 @@ Your agent picks a skill from your words, so similar requests can go to differen
 
 The pairs that cause most confusion:
 
-- **"Make my resume better" or "fit it to this job".** Without a posting, resume-content-guide reviews the whole resume and resume-bullet-writer improves the wording. With a posting, resume-tailor takes over and works on a copy.
+- **"Review," "rewrite" or "proofread."** resume-content-guide audits what belongs, resume-writer or a role skill writes a draft, and resume-proofreader edits existing wording. With a specific posting, resume-tailor works on a copy.
 - **"Prepare me" or "interview me".** interview-prep builds your material: stories, a company brief, answers and questions to ask. mock-interview tests that material by playing the interviewer and scoring you.
 - **"I got an offer".** job-application-manager records it: the stage, the deadline, notes to other employers, and closing the rest once you accept. offer-negotiation decides what to do with it: whether it's good, what to ask for, and how to accept or decline.
 - **"What salary should I give?"** offer-negotiation chooses the number and the words, before or after an offer. interview-prep keeps that line in your prep pack with your other answers. job-application-manager drafts the reply when it's part of a recruiter message.
@@ -378,8 +430,9 @@ Here is how the skills hand off across one search. Each skill suggests the next 
 
 <Steps>
   <Step title="Build">
-    "Build me a resume from my work history." resume-builder asks for each missing detail and returns JSON to import.
-    With MCP, it creates the resume in your account.
+    "Write a resume from my work history." resume-writer or a role skill drafts the content. If you need importable
+    JSON, resume-builder structures it for Reactive Resume. With MCP and your approval, it creates the resume in your
+    account.
   </Step>
   <Step title="Check the content">
     "Review my resume for data analyst roles in the UK." resume-content-guide audits it against UK norms and suggests

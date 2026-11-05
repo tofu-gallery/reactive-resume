@@ -1,7 +1,8 @@
 import type { CSSProperties, ReactNode } from "react";
+import { i18n } from "@lingui/core";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
-import { Link } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { cn } from "@reactive-resume/utils/style";
 
@@ -10,21 +11,39 @@ export const labelClass = "font-martian font-medium text-[13px] leading-[1.4]";
 
 type CtaLinkProps = { size: "header" | "hero" | "closing"; className?: string };
 
-/** "Build your resume": the page's one call to action, in the header, the hero and the closing section. */
+// Build-time prerender has no route matches; live routes carry the existing root session.
+const useSignedIn = () => useRouterState({ select: (state) => Boolean(state.matches.at(-1)?.context.session) });
+
+/** The main action in the header, hero and closing: start a resume or return to your dashboard. */
 export function CtaLink({ size, className }: CtaLinkProps) {
+	const signedIn = useSignedIn();
 	return (
 		<Link
-			to="/auth/register"
+			to={signedIn ? "/dashboard" : "/auth/register"}
 			className={cn(
 				"inline-flex shrink-0 items-center rounded-sm bg-accent font-ui font-semibold text-on-accent transition-[background-color,transform] duration-[160ms] ease-out-strong hover:bg-accent-hover motion-safe:active:[transform:scale(.97)]",
-				size === "header" && "h-[38px] px-4 text-sm",
+				size === "header" &&
+					"min-h-11 px-4 text-sm max-[479px]:max-w-28 max-[479px]:px-2 max-[479px]:text-center max-[479px]:text-xs max-[479px]:whitespace-normal",
 				size === "hero" && "h-[54px] gap-2.5 px-6 text-base shadow-e2",
 				size === "closing" && "h-14 gap-2.5 px-7 text-[17px] shadow-e2",
 				className,
 			)}
 		>
-			<Trans>Build your resume</Trans>
+			{signedIn ? <Trans>Go to dashboard</Trans> : <Trans>Build your resume</Trans>}
 			{size !== "header" && <Icon name="arrow-right" size={20} />}
+		</Link>
+	);
+}
+
+export function SignInLink() {
+	const signedIn = useSignedIn();
+	if (signedIn) return null;
+	return (
+		<Link
+			to="/auth/login"
+			className="touch-target relative inline-flex min-h-11 min-w-11 items-center justify-center rounded-sm px-2 font-ui text-sm font-medium text-ink-2 underline-offset-3 transition-colors hover:text-ink hover:underline max-[479px]:px-1 max-[479px]:text-xs"
+		>
+			<Trans>Sign in</Trans>
 		</Link>
 	);
 }
@@ -43,7 +62,7 @@ export function SceneCaption({ number, title, children, action, className }: Sce
 	return (
 		<div className={cn("flex flex-col gap-3", className)}>
 			<span className={cn(labelClass, "text-accent-text")}>
-				{number} / {title}
+				{i18n.number(Number(number), { minimumIntegerDigits: 2 })} / {title}
 			</span>
 			<p className="font-display text-base leading-[1.45] text-pretty text-ink min-[900px]:text-[clamp(17px,1.35vw,20px)]">
 				{children}
@@ -73,21 +92,32 @@ type DoodleProps = {
 	className?: string;
 	style?: CSSProperties;
 	eager?: boolean;
+	/** The width it's drawn at, for picking a file (`img` sizes). Below 900px most doodles hide; a hidden eager one says 1px. */
+	sizes?: string;
 };
 
 /** A watercolour doodle. Decorative, so it's hidden from assistive tech and never takes the pointer. */
-export function Doodle({ name, wipe, className, style, eager = false }: DoodleProps) {
+export function Doodle({
+	name,
+	wipe,
+	className,
+	style,
+	eager = false,
+	sizes = "(min-width: 900px) 10vw, 30vw",
+}: DoodleProps) {
 	const [width, height] = doodleSizes[name];
 	return (
 		<img
 			src={`/doodles/${name}.webp`}
-			srcSet={`/doodles/${name}-small.webp ${Math.round(width / 2)}w, /doodles/${name}.webp ${width}w`}
-			sizes="(min-width: 900px) 16vw, 30vw"
+			srcSet={`/doodles/${name}-tiny.webp ${Math.round(width / 4)}w, /doodles/${name}-small.webp ${Math.round(width / 2)}w, /doodles/${name}.webp ${width}w`}
+			sizes={sizes}
 			alt=""
 			aria-hidden="true"
 			width={width}
 			height={height}
 			loading={eager ? "eager" : "lazy"}
+			// Eager doodles sit on the first screen; the pencil is the largest paint on desktop.
+			fetchPriority={eager ? "high" : "auto"}
 			decoding="async"
 			draggable={false}
 			className={cn("doodle", className)}

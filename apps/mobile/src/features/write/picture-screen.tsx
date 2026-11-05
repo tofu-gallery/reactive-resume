@@ -11,11 +11,11 @@ import { EditorScreen } from "./entry-screen";
 import { useWriteData } from "./hooks";
 import { ColorPickerSheet, ColorRow, NumberField } from "./pickers";
 import { claimUpload, commitUpload } from "./upload";
-import { client, rest } from "@/api/client";
+import { rest } from "@/api/client";
 import { useSession } from "@/auth/session";
 import { useIsResumeLocked, useResumeStore } from "@/draft";
 import { nativeEnvironment } from "@/draft/native";
-import { Button, ConfirmDialog, Segmented, Switch, Text, TextField, showToast, useTheme } from "@/ui";
+import { Button, Segmented, Switch, Text, TextField, showToast, useTheme } from "@/ui";
 
 const MAX_UPLOAD = 10 * 1024 * 1024;
 
@@ -37,7 +37,7 @@ export function resolvePictureUrl(url: string, server: string): string {
 	}
 }
 
-/** Every photo option: upload with crop, address, show or hide, remove, fit, size, rotation, shape, border, shadow. */
+/** Every photo option: upload with crop, address, show or hide, remove, fit, size, shape, border, shadow. */
 export function PictureScreen() {
 	const { t } = useLingui();
 	const { colors, radius, space } = useTheme();
@@ -45,7 +45,6 @@ export function PictureScreen() {
 	const picture = useWriteData((data) => data.picture, null);
 	const locked = useIsResumeLocked();
 	const update = useResumeStore((state) => state.update);
-	const [confirmRemove, setConfirmRemove] = useState(false);
 	const [colorFor, setColorFor] = useState<"borderColor" | "shadowColor" | null>(null);
 
 	const set = <K extends keyof Picture>(key: K, value: Picture[K], newStep = false) =>
@@ -78,39 +77,66 @@ export function PictureScreen() {
 			const form = new FormData();
 			form.append("file", file);
 			const response = await rest("/files", { method: "POST", body: form });
-			if (!response.ok) throw new Error("Upload failed");
+			if (!response.ok)
+				throw new Error(
+					response.status === 413
+						? t`Choose a photo smaller than 10 MB.`
+						: response.status === 415
+							? t`Couldn't upload the photo. Choose a readable PNG, JPEG, WebP or GIF photo up to 10 MB, then try again.`
+							: "Upload failed",
+				);
 			const uploaded: unknown = await response.json();
 			if (!uploaded || typeof uploaded !== "object" || !("url" in uploaded) || typeof uploaded.url !== "string")
 				throw new Error("Upload failed");
 			if (!resolvePictureUrl(uploaded.url, server)) throw new Error("Upload failed");
 			// Leaving for another resume, or switching account, while it uploaded: the result is dropped.
 			const url = uploaded.url;
-			await commitUpload(owner, uploadContext, () => set("url", url, true));
+			await commitUpload(owner, uploadContext, () =>
+				update(
+					(draft) => {
+						// A URL edited or removed during upload is newer than this result.
+						if (draft.picture.url === picture.url) draft.picture.url = url;
+					},
+					{ newStep: true },
+				),
+			);
 		},
 		// The previous photo stays until an upload succeeds.
 		onError: (error) =>
 			showToast({
-				message:
-					error.message === t`Choose a photo smaller than 10 MB.`
-						? error.message
-						: t`Couldn't upload the photo. Try again.`,
+				message: [
+					t`Choose a photo smaller than 10 MB.`,
+					t`Couldn't upload the photo. Choose a readable PNG, JPEG, WebP or GIF photo up to 10 MB, then try again.`,
+				].includes(error.message)
+					? error.message
+					: t`Couldn't upload the photo. Try again.`,
 				action: { label: t`Retry`, onPress: () => upload.mutate() },
 			}),
 	});
 
 	const remove = () => {
-		setConfirmRemove(false);
-		if (!picture?.url) return;
-		try {
-			const url = new URL(picture.url, server);
-			const filename = url.pathname.split("/").pop();
-			// Only files on this server are ours to delete.
-			if (filename && url.origin === new URL(server).origin)
-				void client.storage.deleteFile({ filename }).catch(() => undefined);
-		} catch {
-			/* An unreadable address is just cleared. */
-		}
+		const state = useResumeStore.getState();
+		const resumeId = state.document?.id;
+		const removedUrl = state.data?.picture.url;
+		if (!resumeId || state.locked || !removedUrl) return;
+		// Copies and History share the upload; remove only this resume's reference.
 		set("url", "", true);
+		showToast({
+			message: t`Photo removed`,
+			action: {
+				label: t`Undo`,
+				onPress: () => {
+					const current = useResumeStore.getState();
+					if (current.document?.id !== resumeId || current.locked || current.data?.picture.url !== "") return;
+					current.update(
+						(draft) => {
+							draft.picture.url = removedUrl;
+						},
+						{ newStep: true },
+					);
+				},
+			},
+		});
 	};
 
 	if (!picture) return <EditorScreen title={t`Photo`}>{null}</EditorScreen>;
@@ -141,13 +167,7 @@ export function PictureScreen() {
 						onPress={() => upload.mutate()}
 					/>
 					{url ? (
-						<Button
-							variant="ghost"
-							icon="trash"
-							label={t`Remove photo`}
-							disabled={locked}
-							onPress={() => setConfirmRemove(true)}
-						/>
+						<Button variant="ghost" icon="trash" label={t`Remove photo`} disabled={locked} onPress={remove} />
 					) : null}
 				</View>
 			</View>
@@ -161,143 +181,128 @@ export function PictureScreen() {
 				autoCorrect={false}
 				onChangeText={(value) => set("url", value)}
 			/>
-			<View style={{ flexDirection: "row", alignItems: "center", gap: space.s2 }}>
-				<Switch
-					label={t`Show photo`}
-					value={!picture.hidden}
-					disabled={locked}
-					onValueChange={(shown) => set("hidden", !shown, true)}
-				/>
-				<Text>{t`Show photo`}</Text>
-			</View>
+			{picture.url && (
+				<>
+					<View style={{ flexDirection: "row", alignItems: "center", gap: space.s2 }}>
+						<Switch
+							label={t`Show photo`}
+							value={!picture.hidden}
+							disabled={locked}
+							onValueChange={(shown) => set("hidden", !shown, true)}
+						/>
+						<Text>{t`Show photo`}</Text>
+					</View>
 
-			<Segmented
-				label={t`Fit`}
-				value={picture.fit}
-				options={[
-					{ value: "cover", label: t`Cover` },
-					{ value: "contain", label: t`Contain` },
-				]}
-				onChange={(fit) => !locked && set("fit", fit, true)}
-			/>
+					<Segmented
+						label={t`Fit`}
+						value={picture.fit}
+						options={[
+							{ value: "cover", label: t`Cover` },
+							{ value: "contain", label: t`Contain` },
+						]}
+						onChange={(fit) => !locked && set("fit", fit, true)}
+					/>
 
-			<NumberField
-				label={t`Size`}
-				unit="pt"
-				value={picture.size}
-				min={32}
-				max={512}
-				step={1}
-				disabled={locked}
-				onChange={(value) => set("size", value)}
-			/>
-			<NumberField
-				label={t`Rotation`}
-				unit="°"
-				value={picture.rotation}
-				min={0}
-				max={360}
-				step={5}
-				disabled
-				helper={t`Rotation isn't supported by PDF rendering.`}
-				onChange={(value) => set("rotation", value)}
-			/>
-			<NumberField
-				label={t`Aspect ratio`}
-				value={picture.aspectRatio}
-				min={0.5}
-				max={2.5}
-				step={0.1}
-				disabled={locked}
-				onChange={(value) => set("aspectRatio", value)}
-			/>
-			<View style={{ flexDirection: "row", gap: space.s2 }}>
-				<Button
-					size="sm"
-					variant="secondary"
-					label={t`Square`}
-					disabled={locked}
-					onPress={() => set("aspectRatio", 1, true)}
-				/>
-				<Button
-					size="sm"
-					variant="secondary"
-					label={t`Landscape`}
-					disabled={locked}
-					onPress={() => set("aspectRatio", 1.5, true)}
-				/>
-				<Button
-					size="sm"
-					variant="secondary"
-					label={t`Portrait`}
-					disabled={locked}
-					onPress={() => set("aspectRatio", 0.5, true)}
-				/>
-			</View>
-			<NumberField
-				label={t`Border radius`}
-				unit="pt"
-				value={picture.borderRadius}
-				min={0}
-				max={100}
-				step={1}
-				disabled={locked}
-				onChange={(value) => set("borderRadius", value)}
-			/>
+					<NumberField
+						label={t`Size`}
+						unit="pt"
+						value={picture.size}
+						min={32}
+						max={512}
+						step={1}
+						disabled={locked}
+						onChange={(value) => set("size", value)}
+					/>
+					<NumberField
+						label={t`Aspect ratio`}
+						value={picture.aspectRatio}
+						min={0.5}
+						max={2.5}
+						step={0.1}
+						disabled={locked}
+						onChange={(value) => set("aspectRatio", value)}
+					/>
+					<View style={{ flexDirection: "row", gap: space.s2 }}>
+						<Button
+							size="sm"
+							variant="secondary"
+							label={t`Square`}
+							disabled={locked}
+							onPress={() => set("aspectRatio", 1, true)}
+						/>
+						<Button
+							size="sm"
+							variant="secondary"
+							label={t`Landscape`}
+							disabled={locked}
+							onPress={() => set("aspectRatio", 1.5, true)}
+						/>
+						<Button
+							size="sm"
+							variant="secondary"
+							label={t`Portrait`}
+							disabled={locked}
+							onPress={() => set("aspectRatio", 0.5, true)}
+						/>
+					</View>
+					<NumberField
+						label={t`Border radius`}
+						unit="pt"
+						value={picture.borderRadius}
+						min={0}
+						max={100}
+						step={1}
+						disabled={locked}
+						onChange={(value) => set("borderRadius", value)}
+					/>
 
-			<View>
-				<ColorRow
-					label={t`Border color`}
-					value={picture.borderColor}
-					disabled={locked}
-					onPress={() => setColorFor("borderColor")}
-				/>
-				<NumberField
-					label={t`Border width`}
-					unit="pt"
-					value={picture.borderWidth}
-					min={0}
-					step={1}
-					disabled={locked}
-					onChange={(value) => set("borderWidth", value)}
-				/>
-			</View>
-			<View>
-				<ColorRow
-					label={t`Shadow color`}
-					value={picture.shadowColor}
-					disabled={locked}
-					onPress={() => setColorFor("shadowColor")}
-				/>
-				<NumberField
-					label={t`Shadow width`}
-					unit="pt"
-					value={picture.shadowWidth}
-					min={0}
-					step={0.5}
-					disabled={locked}
-					onChange={(value) => set("shadowWidth", value)}
-				/>
-			</View>
+					<View>
+						<ColorRow
+							label={t`Border color`}
+							value={picture.borderColor}
+							disabled={locked}
+							onPress={() => setColorFor("borderColor")}
+						/>
+						<NumberField
+							label={t`Border width`}
+							unit="pt"
+							value={picture.borderWidth}
+							min={0}
+							step={1}
+							disabled={locked}
+							onChange={(value) => set("borderWidth", value)}
+						/>
+					</View>
+					<View>
+						<ColorRow
+							label={t`Shadow color`}
+							value={picture.shadowColor}
+							disabled={locked}
+							onPress={() => setColorFor("shadowColor")}
+						/>
+						<NumberField
+							label={t`Shadow width`}
+							unit="pt"
+							value={picture.shadowWidth}
+							min={0}
+							step={0.5}
+							disabled={locked}
+							onChange={(value) => set("shadowWidth", value)}
+						/>
+					</View>
 
-			<ColorPickerSheet
-				open={colorFor !== null}
-				title={colorFor === "shadowColor" ? t`Shadow color` : t`Border color`}
-				value={colorFor ? picture[colorFor] : ""}
-				onClose={() => setColorFor(null)}
-				onChange={(color) => {
-					if (colorFor) set(colorFor, color, true);
-					setColorFor(null);
-				}}
-			/>
-			<ConfirmDialog
-				open={confirmRemove}
-				title={t`Remove this photo?`}
-				confirmLabel={t`Remove photo`}
-				destructive
-				onConfirm={remove}
-				onCancel={() => setConfirmRemove(false)}
-			/>
+					<ColorPickerSheet
+						open={colorFor !== null}
+						title={colorFor === "shadowColor" ? t`Shadow color` : t`Border color`}
+						value={colorFor ? picture[colorFor] : ""}
+						onClose={() => setColorFor(null)}
+						onChange={(color) => {
+							if (colorFor) set(colorFor, color, true);
+							setColorFor(null);
+						}}
+					/>
+				</>
+			)}
 		</EditorScreen>
 	);
 }

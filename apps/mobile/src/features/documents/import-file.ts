@@ -1,9 +1,21 @@
+import type { ImportReview, PdfImportPreview } from "@reactive-resume/import/review";
+import type { ResumeData } from "@reactive-resume/schema/resume/data";
+import type { Locale } from "@reactive-resume/utils/locale";
 import type { DocumentPickerAsset } from "expo-document-picker";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { File } from "expo-file-system";
+import { extractDocxText } from "@reactive-resume/import/docx-text";
+import {
+	pdfImportPreviewSchema,
+	reviewImport,
+	withLeftoverSection,
+	withLinkTargets,
+} from "@reactive-resume/import/review";
 import { coverLetterDocumentSchema } from "@reactive-resume/schema/cover-letter/data";
-import { client, rest } from "@/api/client";
-import { getServer } from "@/auth/session";
+import { localeSchema } from "@reactive-resume/utils/locale";
+import { client, rest, SessionChangedError } from "@/api/client";
+import { getAccountScope } from "@/auth/session";
 
 export type ImportFormat =
 	| "REACTIVE_RESUME"
@@ -14,8 +26,74 @@ export type ImportFormat =
 	| "DOCX"
 	| "LETTER";
 export type ImportedDocument = { id: string; type: "resume" | "letter" };
+/** A file waiting for the user to check what came in before the resume is created. */
+export type ImportToReview = {
+	type: "review";
+	data: ResumeData;
+	aiOperationIds?: string[];
+	review: ImportReview;
+	/** The selecting account/server still owns this unsaved review when Create is pressed. */
+	scope: string;
+	/** A readable text layer was compared with what came in. */
+	compared: boolean;
+	partial: boolean;
+};
+
+/** The Word file's own lines, to list what the reader left out; null when they can't be read this way. */
+async function wordLines(file: File) {
+	try {
+		return extractDocxText(await file.bytes()).split("\n");
+	} catch {
+		return null;
+	}
+}
+
+/** Creates the reviewed resume, with what the reader couldn't place kept as a section when the user chose to. */
+export async function createReviewedResume(
+	pending: ImportToReview,
+	keepLeftovers: boolean,
+	signal: AbortSignal,
+	locale?: Locale,
+) {
+	const scope = getAccountScope();
+	if (!scope || scope !== pending.scope) throw new SessionChangedError();
+	signal.throwIfAborted();
+	const data =
+		keepLeftovers && pending.review.notImported.length > 0
+			? withLeftoverSection(pending.data, pending.review.notImported, t`More from your file`)
+			: pending.data;
+	const pageLocale = locale ?? localeSchema.parse(i18n.locale);
+	const chosen = { ...data, metadata: { ...data.metadata, page: { ...data.metadata.page, locale: pageLocale } } };
+	const id = await client.resume.import(
+		{ data: chosen, ...(pending.aiOperationIds ? { aiOperationIds: pending.aiOperationIds } : {}) },
+		{ signal, context: { scope } },
+	);
+	if (getAccountScope() !== scope) throw new SessionChangedError();
+	return { id, type: "resume" as const };
+}
 
 export class ImportError extends Error {}
+async function previewPdf(file: File, signal: AbortSignal, scope: string): Promise<PdfImportPreview> {
+	const body = new FormData();
+	body.append("file", file);
+	const response = await rest("/resumes/file-previews", { method: "POST", body, signal }, scope);
+	if (getAccountScope() !== scope) throw new SessionChangedError();
+	signal.throwIfAborted();
+	if (!response.ok) {
+		if (response.status === 404) throw new ImportError(t`Update your server before importing a PDF without AI.`);
+		if (response.status === 401) throw new ImportError(t`Your session expired. Sign in again.`);
+		if (response.status === 429) throw new ImportError(t`Too many requests. Try again later.`);
+		throw new ImportError(
+			t`Couldn't read the PDF. Check that it has a readable text layer and isn't password protected.`,
+		);
+	}
+	const parsed = pdfImportPreviewSchema.safeParse(await response.json());
+	if (getAccountScope() !== scope) throw new SessionChangedError();
+	signal.throwIfAborted();
+	if (!parsed.success)
+		throw new ImportError(t`The server returned an invalid import result. Refresh Documents before retrying.`);
+	return parsed.data;
+}
 
 /** JSON formats share an extension; account exports can wrap resume data. */
 export function jsonImportFormat(value: unknown): ImportFormat | null {
@@ -42,11 +120,14 @@ export async function importDocument(
 	aiAvailable: boolean,
 	aiPdf: boolean,
 	signal: AbortSignal,
-): Promise<ImportedDocument> {
-	const server = getServer();
+	locale?: Locale,
+): Promise<ImportedDocument | ImportToReview> {
+	const scope = getAccountScope();
+	if (!scope) throw new SessionChangedError();
+	const options = { signal, context: { scope } };
 	const assertCurrent = () => {
 		if (signal.aborted) throw new ImportError(t`Import canceled.`);
-		if (getServer() !== server) throw new ImportError(t`Server changed. Return to Documents and try again.`);
+		if (getAccountScope() !== scope) throw new SessionChangedError();
 	};
 	const file = new File(asset.uri);
 	if (file.size > 10 * 1024 * 1024 || (asset.size ?? 0) > 10 * 1024 * 1024)
@@ -78,31 +159,78 @@ export async function importDocument(
 		const value = json && typeof json === "object" && "data" in json ? json.data : json;
 		const parsed = coverLetterDocumentSchema.safeParse(value);
 		if (!parsed.success) throw new ImportError(t`This cover letter file isn't valid.`);
-		const letter = await client.coverLetters.import({ document: parsed.data }, { signal });
+		const letter = await client.coverLetters.import({ document: parsed.data }, options);
+		assertCurrent();
 		return { id: letter.id, type: "letter" };
 	}
 	if (format === "DOCX" || (format === "PDF" && aiPdf)) {
 		if (!aiAvailable)
 			throw new ImportError(t`Reading this file with AI needs a tested AI provider. Set one up, then retry.`);
-		const input = { file: { name: asset.name, data: await file.base64() } };
+		const input = { file: { name: asset.name, data: await file.base64() }, includeProvenance: true };
 		assertCurrent();
-		const data =
+		const { aiOperationIds, ...data } =
 			format === "DOCX"
 				? await client.ai.parseDocx(
 						{ ...input, mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
-						{ signal },
+						options,
 					)
-				: await client.ai.parsePdf(input, { signal });
+				: await client.ai.parsePdf(input, options);
 		assertCurrent();
-		const id = await client.resume.import({ data }, { signal });
-		return { id, type: "resume" };
+		let source: PdfImportPreview["source"] | null = null;
+		if (format === "DOCX") {
+			const lines = await wordLines(file);
+			if (lines) source = { lines, links: [], partial: false };
+		} else {
+			try {
+				source = (await previewPdf(file, signal, scope)).source;
+			} catch {
+				// AI can read scans or older servers' files; review must say when comparison was unavailable.
+				assertCurrent();
+			}
+		}
+		assertCurrent();
+		const reconciled = source?.links.length ? withLinkTargets(data, source.links) : data;
+		const compared = Boolean(source?.lines.length);
+		return {
+			type: "review",
+			scope,
+			aiOperationIds: aiOperationIds ?? [],
+			data: reconciled,
+			review: reviewImport(reconciled, compared ? source?.lines : undefined),
+			compared,
+			partial: source?.partial ?? false,
+		};
+	}
+	if (format === "PDF") {
+		const preview = await previewPdf(file, signal, scope);
+		assertCurrent();
+		if (preview.source.partial)
+			throw new ImportError(
+				t`Couldn't read the whole PDF. Check that all pages have readable text, or try a smaller file.`,
+			);
+		if (!preview.data)
+			throw new ImportError(
+				t`This PDF is a scanned image. There's no text to read. Try the Word version, or start blank and paste sections in.`,
+			);
+		const data = withLinkTargets(preview.data, preview.source.links);
+		return {
+			type: "review",
+			scope,
+			data,
+			review: reviewImport(data, preview.source.lines),
+			compared: true,
+			partial: false,
+		};
 	}
 	const body = new FormData();
 	if (json && typeof json === "object" && "data" in json && !("sections" in json) && !("metadata" in json)) {
 		body.append("file", new Blob([JSON.stringify(json.data)], { type: "application/json" }), asset.name);
 	} else body.append("file", file, asset.name);
 	body.append("format", format);
-	const response = await rest("/resumes/file-imports", { method: "POST", body, signal });
+	if (locale) body.append("locale", locale);
+	assertCurrent();
+	const response = await rest("/resumes/file-imports", { method: "POST", body, signal }, scope);
+	assertCurrent();
 	if (!response.ok) {
 		if (response.status === 401) throw new ImportError(t`Your session expired. Sign in again.`);
 		if (response.status === 413) throw new ImportError(t`File is too large. Choose a file up to 10 MB.`);
@@ -112,6 +240,7 @@ export async function importDocument(
 		);
 	}
 	const id: unknown = await response.json();
+	assertCurrent();
 	if (typeof id !== "string" || !id)
 		throw new ImportError(t`The server returned an invalid import result. Refresh Documents before retrying.`);
 	return { id, type: "resume" };

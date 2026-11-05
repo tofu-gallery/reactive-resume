@@ -2,15 +2,17 @@ import type { SavedData, SavedItem } from "../hooks";
 import type { WorkspaceTabProps } from "./shell";
 import type { Application } from "@/features/applications/types";
 import type { InterviewTimelineEntry } from "@reactive-resume/schema/applications/data";
-import type { ReactNode } from "react";
-import { plural, t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural, t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useRouteContext } from "@tanstack/react-router";
 import { useId, useRef, useState } from "react";
+import { firstFutureLead, PREPARE_LEADS } from "@reactive-resume/schema/career-schedule";
 import { Button, buttonVariants } from "@reactive-resume/ui/components/button";
 import { Checkbox } from "@reactive-resume/ui/components/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@reactive-resume/ui/components/dialog";
+import { EmptyState } from "@reactive-resume/ui/components/empty-state";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Skeleton } from "@reactive-resume/ui/components/skeleton";
 import { SwitchRow } from "@reactive-resume/ui/components/switch";
@@ -19,8 +21,10 @@ import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { formatList } from "@reactive-resume/utils/locale";
 import { cn } from "@reactive-resume/utils/style";
 import { latest, useDefaultProvider, useGenerate, useSavedItems, useTicks, useWorkspace } from "../hooks";
-import { Eyebrow, flash, minutesUntil, PrivacyLine, useCareerTime, Working, workingSteps } from "../shared";
+import { Eyebrow, flash, minutesUntil, useCareerTime, useNow, GenerateNotice, Working, workingSteps } from "../shared";
+import { AiNotice } from "./fit";
 import { interviewTypeLabel } from "@/features/applications/components/interview-dialog";
+import { SetUpAi } from "@/features/assistant/provider-setup";
 import { AiProviderLoadState } from "@/features/settings/integrations/ai-provider-load-state";
 import { toastError } from "@/libs/error-message";
 import { orpc } from "@/libs/orpc/client";
@@ -35,15 +39,20 @@ export function PrepareTab({ application, version, interview, now, go }: Workspa
 
 	if (!interview && !isBriefing(version))
 		return (
-			<Notice title={t`Add an interview to plan for it`}>
-				<p className="max-w-[340px] text-sm text-ink-2">
-					<Trans>Once a round is scheduled, Prepare builds a timed plan, your opening and the questions to ask.</Trans>
-				</p>
-				<Button variant="secondary" onClick={() => go("prepare", { edit: "interview" })}>
-					<Icon name="calendar-dot" size={18} />
-					<Trans>Add an interview</Trans>
-				</Button>
-			</Notice>
+			<EmptyState
+				title={t`Add an interview to plan for it`}
+				description={
+					<Trans>
+						Once a round is scheduled, Interview prep builds a timed plan, your opening and the questions to ask.
+					</Trans>
+				}
+				action={
+					<Button variant="secondary" onClick={() => go("prepare", { edit: "interview" })}>
+						<Icon name="calendar-dot" size={18} />
+						<Trans>Add an interview</Trans>
+					</Button>
+				}
+			/>
 		);
 
 	const briefing = isBriefing(version) ? version : latest(saved.data, "briefing", interview?.id ?? null);
@@ -53,16 +62,19 @@ export function PrepareTab({ application, version, interview, now, go }: Workspa
 		const end = start + interview.durationMinutes * 60_000;
 		if (now.getTime() > end)
 			return (
-				<Notice title={t`How did it go?`}>
-					<p className="max-w-[340px] text-sm text-ink-2">
+				<EmptyState
+					title={t`How did it go?`}
+					description={
 						<Trans>
 							Write down what they asked while it's fresh. The coach compares your answers with your stories.
 						</Trans>
-					</p>
-					<Button onClick={() => go("debrief")}>
-						<Trans>Start a debrief</Trans>
-					</Button>
-				</Notice>
+					}
+					action={
+						<Button onClick={() => go("debrief")}>
+							<Trans>Start a debrief</Trans>
+						</Button>
+					}
+				/>
 			);
 		if (now.getTime() >= start - 10 * 60_000)
 			return <Soon application={application} interview={interview} briefing={briefing} now={now} go={go} />;
@@ -76,53 +88,41 @@ export function PrepareTab({ application, version, interview, now, go }: Workspa
 	return <Plan application={application} interview={interview} briefing={briefing} readOnly={!!version} go={go} />;
 }
 
-function Notice({ title, children }: { title: string; children: ReactNode }) {
-	return (
-		<div className="grid justify-items-center gap-3 rounded-xl border border-dashed border-line-2 p-7 text-center">
-			<h2 className="font-display text-[22px] leading-7 font-medium">{title}</h2>
-			{children}
-		</div>
-	);
-}
-
 type PlanEmptyProps = { application: Application; interview: InterviewTimelineEntry };
 
 function PlanEmpty({ application, interview }: PlanEmptyProps) {
 	const connection = useDefaultProvider();
 	const { provider } = connection;
 	const generate = useGenerate(application.id);
-	const label = provider?.label ?? "";
+	const plan = () => void generate.run({ task: "briefing", interviewId: interview.id }).catch(() => undefined);
 	return (
-		<Notice title={t`A focused plan for this round`}>
-			<p className="max-w-[340px] text-sm text-ink-2">
+		<EmptyState
+			title={t`A focused plan for this round`}
+			description={
 				<Trans>
 					A timed plan, your opening, the stories to bring and questions to ask. It becomes your checklist 10 minutes
 					before the call.
 				</Trans>
-			</p>
+			}
+			action={
+				connection.isUnavailable ? undefined : provider ? (
+					<Button loading={generate.isPending} disabled={!provider} onClick={plan}>
+						{generate.isPending ? <Working steps={workingSteps("briefing")} /> : <Trans>Plan my preparation</Trans>}
+					</Button>
+				) : (
+					<SetUpAi />
+				)
+			}
+		>
 			{connection.isUnavailable ? (
 				<AiProviderLoadState state={connection} />
 			) : provider ? (
 				<>
-					<Button
-						loading={generate.isPending}
-						disabled={!provider}
-						onClick={() => void generate.run({ task: "briefing", interviewId: interview.id }).catch(() => {})}
-					>
-						{generate.isPending ? <Working steps={workingSteps("briefing")} /> : <Trans>Plan my preparation</Trans>}
-					</Button>
-					<PrivacyLine className="max-w-[360px] text-start">
-						<Trans>
-							Sends this application (posting, notes, interview details) and Knowledge that's switched on to {label}.
-						</Trans>
-					</PrivacyLine>
+					<AiNotice task="briefing" application={application} interview className="max-w-[360px] text-start" />
+					<GenerateNotice generate={generate} onRetry={plan} className="max-w-[360px]" />
 				</>
-			) : (
-				<Link to="/dashboard/settings/ai" className={cn(buttonVariants({ variant: "secondary" }))}>
-					<Trans>Connect an AI provider in Settings</Trans>
-				</Link>
-			)}
-		</Notice>
+			) : null}
+		</EmptyState>
 	);
 }
 
@@ -148,6 +148,8 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 	const questions = [...data.questions, ...workspace.data.questions];
 	const { provider } = useDefaultProvider();
 	const generate = useGenerate(application.id);
+	const planAgain = (interviewId: string) =>
+		void generate.run({ task: "briefing", interviewId }).catch(() => undefined);
 
 	const action = (row: SavedData<"briefing">["plan"][number]) => {
 		const className = cn(buttonVariants({ variant: "secondary", size: "sm" }));
@@ -167,7 +169,8 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 					<Link
 						to="/dashboard/career/knowledge/stories/{-$storyId}"
 						params={{ storyId: undefined }}
-						search={{ edit: true }}
+						// The new story starts from this step: its title, and its detail as a note above the parts.
+						search={{ edit: true, title: row.title, note: row.detail, plan: briefing.id, factIds: row.factIds }}
 						className={className}
 					>
 						<Trans>Draft story</Trans>
@@ -195,12 +198,12 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 			<div className="grid gap-3.5">
 				<div className="flex flex-wrap items-end gap-x-4 gap-y-2">
 					<div className="grid min-w-0 flex-1 basis-64 gap-1">
-						<h2 className="font-display text-[22px] leading-7 font-medium">{data.headline}</h2>
+						<h2 className="font-display text-[22px] leading-7">{data.headline}</h2>
 						<p className="text-sm text-ink-2">{data.summary}</p>
 					</div>
 					<span className="flex flex-wrap items-baseline gap-x-2 font-mono text-xs font-medium text-ink-3">
 						<Trans>
-							{doneMinutes} of {total} min
+							{ph({ doneMinutes: i18n.number(doneMinutes) })} of {ph({ total: i18n.number(total) })} min
 						</Trans>
 						{/* The interview, posting or Knowledge changed since it was planned: plan again on request. */}
 						{briefing.outdated && !readOnly && provider && interview && (
@@ -209,9 +212,7 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 								size="sm"
 								className="font-sans text-[13px] tracking-normal normal-case"
 								loading={generate.isPending}
-								onClick={() =>
-									void generate.run({ task: "briefing", interviewId: interview.id }).catch(() => undefined)
-								}
+								onClick={() => interview && planAgain(interview.id)}
 							>
 								{generate.isPending ? <Working steps={workingSteps("briefing")} /> : <Trans>Plan again</Trans>}
 							</Button>
@@ -245,7 +246,7 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 								onCheckedChange={(checked) => ticks.toggle(String(index), checked)}
 							/>
 							<span className="font-mono text-xs leading-5 font-medium text-ink-3">
-								<Trans>{row.minutes} min</Trans>
+								<Trans>{i18n.number(row.minutes)} min</Trans>
 							</span>
 							<div className="col-start-2 grid gap-0.5 sm:col-start-auto">
 								<p
@@ -272,7 +273,7 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 							{questions.map((question, index) => (
 								<li key={`${question.text}-${index}`} className="flex gap-2.5 text-sm leading-5">
 									<span className="w-4 shrink-0 font-mono text-xs leading-5 font-medium text-accent-text">
-										{index + 1}
+										{i18n.number(index + 1)}
 									</span>
 									<span className="min-w-0 flex-1">{question.text}</span>
 									<span className="shrink-0 text-xs leading-5 text-ink-3">{question.origin}</span>
@@ -312,8 +313,6 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 	);
 }
 
-const LEADS = ["24h", "2h", "morning"] as const;
-
 type RefreshSwitchProps = { application: Application; interview: InterviewTimelineEntry };
 
 /** The C5 prepare schedule for this interview: toggling here changes it in Today too. */
@@ -326,14 +325,17 @@ function RefreshSwitch({ application, interview }: RefreshSwitchProps) {
 	const { data: providers } = useQuery(orpc.aiProviders.list.queryOptions());
 	const { data: schedules } = useQuery(orpc.career.schedules.queryOptions({ input: {} }));
 	const schedule = schedules?.find((item) => item.kind === "prepare" && item.interviewId === interview.id);
-	const lead = LEADS.find((item) => item === schedule?.lead) ?? "24h";
+	// The first lead still ahead of now; if every one has passed, there is nothing honest to schedule.
+	const now = useNow();
+	const next = firstFutureLead(new Date(interview.at), timeZone, now);
+	const lead = schedule?.lead ?? next?.lead ?? PREPARE_LEADS[0];
 	// The schedule's own connection while it's switched on and tested; otherwise the default, as the run itself does.
 	const own = providers?.find(
 		(item) => item.id === schedule?.aiProviderId && item.enabled && item.testStatus === "success",
 	);
 	const providerId = own?.id ?? provider?.id ?? null;
 	const providerLabel = own?.label ?? provider?.label ?? "";
-	const runAt = schedule?.nextRunAt ?? new Date(new Date(interview.at).getTime() - 24 * 3_600_000);
+	const runAt = schedule?.nextRunAt ?? next?.runAt ?? null;
 
 	const save = useMutation({
 		...orpc.career.saveSchedule.mutationOptions(),
@@ -349,11 +351,13 @@ function RefreshSwitch({ application, interview }: RefreshSwitchProps) {
 
 	const enabled = save.isPending ? save.variables.enabled : (schedule?.enabled ?? false);
 	const available = !connection.isUnavailable && flags?.careerSchedulingEnabled !== false && !!providerId;
-	const label = {
-		"24h": t`Refresh the briefing 24 hours before`,
-		"2h": t`Refresh the briefing 2 hours before`,
-		morning: t`Refresh the briefing on the morning of`,
-	}[lead];
+	const label = next
+		? {
+				"24h": t`Refresh the briefing 24 hours before`,
+				"2h": t`Refresh the briefing 2 hours before`,
+				morning: t`Refresh the briefing on the morning of`,
+			}[next.lead]
+		: t`Refresh the briefing`;
 	const description =
 		flags?.careerSchedulingEnabled === false
 			? t`Scheduled work isn't available on this server.`
@@ -361,7 +365,9 @@ function RefreshSwitch({ application, interview }: RefreshSwitchProps) {
 				? t`AI connections are unavailable.`
 				: !providerId
 					? t`Connect an AI provider in Settings to refresh it automatically.`
-					: t`${when(runAt)} · ${providerLabel}. Sends this application and your Knowledge; your provider may charge.`;
+					: runAt
+						? t`${when(runAt)} · ${providerLabel}. Sends this application and your Knowledge; your provider may charge.`
+						: t`Too close to the interview to schedule a refresh.`;
 
 	return (
 		<div className="rounded-xl border border-line bg-surface px-4 py-2">
@@ -370,19 +376,19 @@ function RefreshSwitch({ application, interview }: RefreshSwitchProps) {
 				label={<span className="font-semibold">{label}</span>}
 				description={description}
 				checked={enabled}
-				disabled={save.isPending || (!available && !enabled)}
+				disabled={save.isPending || (!available && !enabled) || (!next && !enabled)}
 				onCheckedChange={(checked) =>
 					save.mutate({
 						...(schedule ? { id: schedule.id } : {}),
 						kind: "prepare",
 						applicationId: application.id,
 						interviewId: interview.id,
-						lead,
+						lead: (next?.lead ?? lead) as "24h" | "2h" | "morning",
 						enabled: checked,
 						email: schedule?.email ?? false,
 						timezone: timeZone,
 						locale,
-						nextRunAt: new Date(runAt),
+						nextRunAt: next?.runAt ?? runAt ?? new Date(interview.at),
 						aiProviderId: providerId,
 						query: "",
 						intervalDays: null,
@@ -430,7 +436,7 @@ function BriefingNotes({ briefing }: { briefing: Briefing }) {
 	const { data } = briefing;
 	const items = [
 		{ label: t`Your focus`, text: data.focus },
-		{ label: t`Your opening`, text: data.opening && `“${data.opening}”`, italic: true },
+		{ label: t`Your opening`, text: data.opening && `“${data.opening}”` },
 		{ label: data.stories.length === 2 ? t`Two stories` : t`Stories`, text: data.stories.join("\n") },
 		{ label: t`Keep it honest`, text: data.honesty },
 	];
@@ -441,7 +447,7 @@ function BriefingNotes({ briefing }: { briefing: Briefing }) {
 				.map((item) => (
 					<div key={item.label} className="grid gap-1">
 						<dt className="text-[13px] font-semibold text-ink-2">{item.label}</dt>
-						<dd className={cn("text-sm leading-[21px] whitespace-pre-line", item.italic && "italic")}>{item.text}</dd>
+						<dd className="text-sm leading-[21px] whitespace-pre-line">{item.text}</dd>
 					</div>
 				))}
 		</dl>
@@ -529,7 +535,7 @@ function Soon({ application, interview, briefing, now, go }: SoonProps) {
 				<div className="flex items-center gap-3 rounded-lg bg-warn-soft px-4 py-3.5">
 					<Icon name="timer" size={28} className="shrink-0 text-warn-text" />
 					<div className="grid min-w-0">
-						<p className="font-display text-[22px] leading-7 font-medium">{heading}</p>
+						<p className="font-display text-[22px] leading-7">{heading}</p>
 						<p className="text-[13px] text-ink-2">
 							{[
 								interviewTypeLabel(interview.kind),
@@ -594,7 +600,7 @@ function Soon({ application, interview, briefing, now, go }: SoonProps) {
 				<div className="flex items-center gap-3.5 rounded-xl border border-warn bg-warn-soft px-5 py-[18px]">
 					<Icon name="timer" size={28} className="shrink-0 text-warn-text" />
 					<div className="grid min-w-0 gap-0.5">
-						<p className="font-display text-[22px] leading-7 font-medium">{heading}</p>
+						<p className="font-display text-[22px] leading-7">{heading}</p>
 						<p className="text-[13px] text-ink-2">
 							{[
 								interviewTypeLabel(interview.kind),
@@ -643,7 +649,7 @@ function Soon({ application, interview, briefing, now, go }: SoonProps) {
 									<span className="text-[13px] leading-[19px] text-ink-2">{row.detail}</span>
 								</span>
 								<span className="ms-auto font-mono text-xs font-medium whitespace-nowrap text-ink-3">
-									<Trans>{row.minutes} min</Trans>
+									<Trans>{i18n.number(row.minutes)} min</Trans>
 								</span>
 							</label>
 						);

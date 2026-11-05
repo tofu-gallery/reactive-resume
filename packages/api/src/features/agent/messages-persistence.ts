@@ -1,7 +1,11 @@
+import type { ProposedEdit } from "@reactive-resume/ai/tools/agent-tool-contracts";
+import type { DbOrTx } from "@reactive-resume/db/client";
 import type { UIMessage } from "ai";
-import { and, eq, max, sql } from "drizzle-orm";
+import { and, asc, eq, max, sql } from "drizzle-orm";
 import { db } from "@reactive-resume/db/client";
 import * as schema from "@reactive-resume/db/schema";
+import { blockText, withEditedText } from "@reactive-resume/resume/proposals";
+import { aiOperationIds } from "@reactive-resume/schema/ai-usage";
 
 // Crash-safe incremental persistence for the assistant message of an agent run.
 // A draft row is inserted before the stream starts, folded step-by-step in onStepEnd,
@@ -18,10 +22,15 @@ type StepContentPart = Record<string, unknown> & { type: string };
 type AgentStepLike = { content: ReadonlyArray<unknown> };
 
 type EditStatus = "pending" | "accepted" | "rejected";
+/**
+ * What a client records about an edit: its status, the user's own wording (pending edits only), and the new text
+ * (`after`) the client reviewed, so a decision made on wording another tab or device has since changed is refused.
+ */
+export type EditUpdate = { status: EditStatus; text?: string | undefined; after?: string | undefined };
 type ProposeEditsPart = UiMessagePart & {
 	toolCallId?: string;
 	state?: string;
-	output?: { edits?: Array<{ id: string; status: EditStatus }> };
+	output?: { edits?: ProposedEdit[] };
 };
 
 const proposeEditsParts = (message: UIMessage) =>
@@ -34,6 +43,22 @@ const proposeEditsParts = (message: UIMessage) =>
 export const proposedEditsOf = (message: UIMessage) =>
 	proposeEditsParts(message).flatMap((part) => part.output?.edits ?? []);
 
+function mapEdits(
+	message: UIMessage,
+	toolCallId: string | null,
+	update: (edit: ProposedEdit) => ProposedEdit,
+): UIMessage {
+	return {
+		...message,
+		parts: message.parts.map((part) => {
+			const output = (part as ProposeEditsPart).output;
+			if (part.type !== "tool-propose_edits" || !output?.edits) return part;
+			if (toolCallId && (part as ProposeEditsPart).toolCallId !== toolCallId) return part;
+			return { ...part, output: { ...output, edits: output.edits.map(update) } } as UiMessagePart;
+		}),
+	};
+}
+
 /** The message with edit statuses set, in one propose_edits result (by tool call) or in all of them. */
 export function withEditStatuses(
 	message: UIMessage,
@@ -41,43 +66,76 @@ export function withEditStatuses(
 	statuses: ReadonlyMap<string, EditStatus>,
 ): UIMessage {
 	if (statuses.size === 0) return message;
-	return {
-		...message,
-		parts: message.parts.map((part) => {
-			const edits = (part as ProposeEditsPart).output?.edits;
-			if (part.type !== "tool-propose_edits" || !edits) return part;
-			if (toolCallId && (part as ProposeEditsPart).toolCallId !== toolCallId) return part;
-			const output = (part as ProposeEditsPart).output;
-			return {
-				...part,
-				output: { ...output, edits: edits.map((edit) => ({ ...edit, status: statuses.get(edit.id) ?? edit.status })) },
-			} as UiMessagePart;
-		}),
-	};
+	return mapEdits(message, toolCallId, (edit) => ({ ...edit, status: statuses.get(edit.id) ?? edit.status }));
 }
 
-// A run rewrites its message as it goes, always with edits pending; what the user already did with them (they can
-// accept while the reply is still streaming) is kept.
-async function withStoredEditStatuses(
-	input: { userId: string; threadId: string; rowId?: string; message: UIMessage },
-	database: AgentMessagesDb,
+const sameTarget = (a: ProposedEdit["target"], b: ProposedEdit["target"]) =>
+	a.sectionId === b.sectionId && a.itemId === b.itemId && a.roleId === b.roleId && a.field === b.field;
+
+/**
+ * Undecided passage edits in `message` that `newer` replaces: the same field and the same passage, as text (an
+ * addition's anchor carries its list item's end tag). Ones the document already holds are left out: their acceptance
+ * can be recorded after the save that applied them.
+ */
+export function supersededEdits(
+	message: UIMessage,
+	newer: readonly ProposedEdit[],
+	held: (edit: ProposedEdit) => boolean,
+): string[] {
+	return proposedEditsOf(message).flatMap((edit) => {
+		const passage = blockText(edit.before);
+		const replaced =
+			edit.status === "pending" &&
+			!edit.snapshot &&
+			!!passage &&
+			newer.some(
+				(next) =>
+					next.id !== edit.id &&
+					!next.snapshot &&
+					sameTarget(next.target, edit.target) &&
+					blockText(next.before) === passage,
+			) &&
+			!held(edit);
+		return replaced ? [edit.id] : [];
+	});
+}
+
+/**
+ * The user's own wording in place of an edit's new text. The server rebuilds the block from plain text, so a rewrite
+ * can't carry markup into the document; flags whose words the user removed go.
+ */
+export function withEditWording(message: UIMessage, toolCallId: string, id: string, text: string): UIMessage {
+	return mapEdits(message, toolCallId, (edit) => (edit.id === id ? withEditedText(edit, text) : edit));
+}
+
+/** A run's rewrite of its message keeps what the user already decided and wrote (they can act while it streams). */
+function withStoredDecisions(message: UIMessage, stored: UIMessage): UIMessage {
+	const kept = new Map(proposedEditsOf(stored).map((edit) => [edit.id, edit]));
+	return mapEdits(message, null, (edit) => {
+		const decided = kept.get(edit.id);
+		if (!decided) return edit;
+		const { after, unsupported, edited } = decided;
+		return { ...edit, status: decided.status, ...(edited ? { after, unsupported, edited } : {}) };
+	});
+}
+
+/** Every message writer locks messages in ID order, then their thread, before reading/merging decisions. */
+export async function lockThreadMessages(
+	database: Pick<DbOrTx, "select">,
+	input: { userId: string; threadId: string },
 ) {
-	if (proposeEditsParts(input.message).length === 0) return input.message;
 	const rows = await database
-		.select({ uiMessage: schema.agentMessage.uiMessage })
+		.select()
 		.from(schema.agentMessage)
-		.where(
-			and(
-				eq(schema.agentMessage.threadId, input.threadId),
-				eq(schema.agentMessage.userId, input.userId),
-				input.rowId
-					? eq(schema.agentMessage.id, input.rowId)
-					: sql`${schema.agentMessage.uiMessage}->>'id' = ${input.message.id}`,
-			),
-		);
-	const stored = rows[0]?.uiMessage as unknown as UIMessage | undefined;
-	if (!stored?.parts) return input.message;
-	return withEditStatuses(input.message, null, new Map(proposedEditsOf(stored).map((edit) => [edit.id, edit.status])));
+		.where(and(eq(schema.agentMessage.threadId, input.threadId), eq(schema.agentMessage.userId, input.userId)))
+		.orderBy(asc(schema.agentMessage.id))
+		.for("update");
+	await database
+		.select({ id: schema.agentThread.id })
+		.from(schema.agentThread)
+		.where(and(eq(schema.agentThread.id, input.threadId), eq(schema.agentThread.userId, input.userId)))
+		.for("update");
+	return rows;
 }
 
 function toolPartFromCall(part: StepContentPart): UiMessagePart {
@@ -198,7 +256,9 @@ function addDetails(a: UsageDetails | undefined, b: UsageDetails | undefined): U
 export function withAccumulatedUsageMetadata(previous: UIMessage, next: UIMessage): UIMessage {
 	const previousUsage = (previous as MessageWithUsage).metadata?.usage;
 	const nextMetadata = (next as MessageWithUsage).metadata;
-	if (!previousUsage || !nextMetadata?.usage) return next;
+	const operations = [...new Set([...aiOperationIds(previous.metadata), ...aiOperationIds(next.metadata)])];
+	const accumulated = operations.length ? { ...next, metadata: { ...nextMetadata, aiOperationIds: operations } } : next;
+	if (!previousUsage || !nextMetadata?.usage) return accumulated;
 
 	const usage: UsageLike = {
 		inputTokens: addCounts(previousUsage.inputTokens, nextMetadata.usage.inputTokens),
@@ -208,7 +268,10 @@ export function withAccumulatedUsageMetadata(previous: UIMessage, next: UIMessag
 		outputTokenDetails: addDetails(previousUsage.outputTokenDetails, nextMetadata.usage.outputTokenDetails),
 	};
 
-	return { ...next, metadata: { ...nextMetadata, usage } } as UIMessage;
+	return {
+		...next,
+		metadata: { ...nextMetadata, ...(operations.length ? { aiOperationIds: operations } : {}), usage },
+	} as UIMessage;
 }
 
 export async function nextMessageSequence(threadId: string, database: AgentMessagesDb) {
@@ -253,7 +316,7 @@ export async function insertDraftAssistantMessage(
 
 // Upsert by row id first, then by the uiMessage's embedded id (a question/approval continuation
 // streams into the SAME uiMessage id as the stored assistant row), then insert as a last resort.
-export async function upsertAssistantUiMessage(
+export function upsertAssistantUiMessage(
 	input: {
 		userId: string;
 		threadId: string;
@@ -261,72 +324,80 @@ export async function upsertAssistantUiMessage(
 		message: UIMessage;
 		status: "streaming" | "completed" | "canceled";
 	},
-	database: AgentMessagesDb = db,
+	database: Pick<typeof db, "transaction"> = db,
 ) {
-	const message = await withStoredEditStatuses(input, database);
-	const set = {
-		status: input.status,
-		uiMessage: message as unknown as Record<string, unknown>,
-	};
-	const isFinal = input.status !== "streaming";
+	return database.transaction(async (database) => {
+		const rows = await lockThreadMessages(database, input);
+		const stored =
+			rows.find((row) => row.id === input.rowId) ??
+			rows.find((row) => row.role === "assistant" && row.uiMessage.id === input.message.id);
+		const message = stored
+			? withStoredDecisions(input.message, stored.uiMessage as unknown as UIMessage)
+			: input.message;
+		const set = {
+			status: input.status,
+			uiMessage: message as unknown as Record<string, unknown>,
+		};
+		const isFinal = input.status !== "streaming";
 
-	if (input.rowId) {
-		const updated = await database
+		if (input.rowId) {
+			const updated = await database
+				.update(schema.agentMessage)
+				.set(set)
+				.where(
+					and(
+						eq(schema.agentMessage.id, input.rowId),
+						eq(schema.agentMessage.threadId, input.threadId),
+						eq(schema.agentMessage.userId, input.userId),
+					),
+				)
+				.returning({ id: schema.agentMessage.id });
+
+			if (updated.length === 1) {
+				if (isFinal) await touchThread(input, database);
+				// oxlint-disable-next-line typescript/no-non-null-assertion -- length checked above
+				return { rowId: updated[0]!.id };
+			}
+		}
+
+		const updatedById = await database
 			.update(schema.agentMessage)
 			.set(set)
 			.where(
 				and(
-					eq(schema.agentMessage.id, input.rowId),
 					eq(schema.agentMessage.threadId, input.threadId),
 					eq(schema.agentMessage.userId, input.userId),
+					eq(schema.agentMessage.role, "assistant"),
+					sql`${schema.agentMessage.uiMessage}->>'id' = ${input.message.id}`,
 				),
 			)
 			.returning({ id: schema.agentMessage.id });
 
-		if (updated.length === 1) {
+		if (updatedById.length >= 1) {
 			if (isFinal) await touchThread(input, database);
 			// oxlint-disable-next-line typescript/no-non-null-assertion -- length checked above
-			return { rowId: updated[0]!.id };
+			return { rowId: updatedById[0]!.id };
 		}
-	}
 
-	const updatedById = await database
-		.update(schema.agentMessage)
-		.set(set)
-		.where(
-			and(
-				eq(schema.agentMessage.threadId, input.threadId),
-				eq(schema.agentMessage.userId, input.userId),
-				eq(schema.agentMessage.role, "assistant"),
-				sql`${schema.agentMessage.uiMessage}->>'id' = ${input.message.id}`,
-			),
-		)
-		.returning({ id: schema.agentMessage.id });
+		const sequence = await nextMessageSequence(input.threadId, database);
+		const [inserted] = await database
+			.insert(schema.agentMessage)
+			.values({
+				userId: input.userId,
+				threadId: input.threadId,
+				role: message.role,
+				status: input.status,
+				sequence,
+				uiMessage: message as unknown as Record<string, unknown>,
+			})
+			.returning({ id: schema.agentMessage.id });
 
-	if (updatedById.length >= 1) {
-		if (isFinal) await touchThread(input, database);
-		// oxlint-disable-next-line typescript/no-non-null-assertion -- length checked above
-		return { rowId: updatedById[0]!.id };
-	}
+		if (!inserted) throw new Error("AGENT_MESSAGE_CREATE_FAILED");
 
-	const sequence = await nextMessageSequence(input.threadId, database);
-	const [inserted] = await database
-		.insert(schema.agentMessage)
-		.values({
-			userId: input.userId,
-			threadId: input.threadId,
-			role: message.role,
-			status: input.status,
-			sequence,
-			uiMessage: message as unknown as Record<string, unknown>,
-		})
-		.returning({ id: schema.agentMessage.id });
+		await touchThread(input, database);
 
-	if (!inserted) throw new Error("AGENT_MESSAGE_CREATE_FAILED");
-
-	await touchThread(input, database);
-
-	return { rowId: inserted.id };
+		return { rowId: inserted.id };
+	});
 }
 
 // Removes a draft that never received content (sync failure before the stream produced anything).

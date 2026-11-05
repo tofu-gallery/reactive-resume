@@ -7,14 +7,31 @@ import { Trans, useLingui } from "@lingui/react/macro";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, View } from "react-native";
+import { coachStarters } from "@reactive-resume/schema/career-starters";
 import { formatList } from "@reactive-resume/utils/locale";
 import { refreshThreads, useThreads } from "./chat";
-import { ChatView, ContextChip } from "./chat-view";
-import { ModelButton, ModelSheet, ProviderGate, useConversationProvider } from "./provider";
+import { ChatView, ContextChip, type ChatHistory } from "./chat-view";
+import { ChatWelcome } from "./chat-welcome";
+import {
+	ConnectionNotice,
+	ModelButton,
+	ModelSheet,
+	ProviderGate,
+	useConversationProvider,
+	useMemoryNote,
+	useWebSearch,
+	WebResearchChip,
+} from "./provider";
+import { usableStories } from "./sent";
 import { useDeleteThread, useThreadTime, useThreadTitle } from "./threads";
 import { client, orpc } from "@/api/client";
 import { useSession } from "@/auth/session";
 import { useHasAIProvider } from "@/features/ai/providers";
+import { useApplications } from "@/features/applications/queries";
+import { useNow, useOpportunities } from "@/features/career/hooks";
+import { PracticeHandoff } from "@/features/career/prepare-now";
+import { collectInterviews } from "@/features/career/scheduling";
+import { StoryEditor } from "@/features/career/stories";
 import { Button, Icon, IconButton, ListRow, Sheet, Text, TextField, showToast, useTheme } from "@/ui";
 
 type Chips = { application: boolean; memory: boolean; web: boolean; offers: boolean };
@@ -38,17 +55,10 @@ function useCoachKnowledge() {
 	const facts = useQuery({ ...factsOptions, queryKey: [...factsOptions.queryKey, session.server], enabled });
 	const stories = useQuery({ ...storiesOptions, queryKey: [...storiesOptions.queryKey, session.server], enabled });
 	const active = (facts.data ?? []).filter((fact) => fact.status === "active" && fact.applicationId === null);
-	const usable = (stories.data ?? []).filter(
-		(story) =>
-			story.data.factIds.length > 0 &&
-			story.data.factIds.every((id) =>
-				active.some(
-					(fact) =>
-						fact.id === id && (fact.revisions.length === 0 || new Date(fact.updatedAt) <= new Date(story.updatedAt)),
-				),
-			),
-	);
+	const usable = usableStories(active, stories.data ?? []);
 	return {
+		all: facts.data ?? [],
+		allStories: stories.data ?? [],
 		isPending: facts.isPending || stories.isPending,
 		isError: facts.isError || stories.isError,
 		retry: () => {
@@ -57,6 +67,8 @@ function useCoachKnowledge() {
 		},
 		facts: active.length,
 		stories: usable.length,
+		factIds: active.map((fact) => fact.id),
+		storyIds: usable.map((story) => story.id),
 	};
 }
 
@@ -76,12 +88,15 @@ export function CoachScreen({ offerIds }: CoachScreenProps) {
 	const [draftKey, setDraftKey] = useState(0);
 	const [chips, setChips] = useState<Chips>(DEFAULT_CHIPS);
 	const [listOpen, setListOpen] = useState(false);
+	const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
 	const [modelOpen, setModelOpen] = useState(false);
 
 	const conversations = (threads.data ?? []).filter((thread) => thread.scope === "career");
 	const summary = threads.data?.find((thread) => thread.id === threadId);
-	const { provider, label, choose } = useConversationProvider(providers, summary, threadId);
+	const { provider, stranded, label, choose } = useConversationProvider(providers, summary, threadId);
 	const title = useThreadTitle();
+	const web = useWebSearch(provider);
+	const memory = useMemoryNote(chips.memory);
 
 	const context: MessageContext = {
 		// A career conversation has no document or posting to leave out.
@@ -89,35 +104,45 @@ export function CoachScreen({ offerIds }: CoachScreenProps) {
 		posting: true,
 		application: chips.application,
 		memory: chips.memory,
-		web: chips.web,
+		// The message still requires Web research on and per-operation destination approval.
+		web: chips.web && web.canSearch,
 		...(offerIds.length > 0 && chips.offers ? { offerIds } : {}),
 	};
 	const knowledgeBlocks = chips.memory && (knowledge.isPending || knowledge.isError);
 
-	// The privacy line names exactly what goes. The chips choose what this message adds; earlier messages always go.
-	const parts = [
-		t`your message`,
-		t`earlier messages in this chat`,
-		...(chips.application ? [t`application summaries`] : []),
-		...(context.offerIds ? [plural(offerIds.length, { one: "# saved offer", other: "# saved offers" })] : []),
-		...(chips.memory
-			? [
-					t`your preferences`,
-					...(knowledge.facts > 0 ? [plural(knowledge.facts, { one: "# fact", other: "# facts" })] : []),
-					...(knowledge.stories > 0 ? [t`your stories`] : []),
-				]
-			: []),
-	];
-	const list = formatList(i18n.locale, parts);
+	// The privacy line names exactly what goes and what the coach may keep. The chips choose what this message adds;
+	// earlier messages go too, except those written before Knowledge last changed.
+	const privacyFor = ({ earlier, withheld }: ChatHistory) => {
+		const parts = [
+			t`your message`,
+			...(earlier > 0 ? [t`earlier messages in this chat`] : []),
+			...(chips.application ? [t`application summaries`] : []),
+			...(context.offerIds ? [plural(offerIds.length, { one: "# saved offer", other: "# saved offers" })] : []),
+			...(chips.memory
+				? [
+						t`your preferences`,
+						...(knowledge.facts > 0 ? [plural(knowledge.facts, { one: "# fact", other: "# facts" })] : []),
+						...(knowledge.stories > 0 ? [t`your stories`] : []),
+					]
+				: []),
+		];
+		const list = formatList(i18n.locale, parts);
+		return [
+			stranded
+				? t`Nothing is sent until you choose a connection for this conversation.`
+				: chips.memory && knowledge.isError
+					? t`Knowledge couldn't load. Try again or switch Knowledge off before sending.`
+					: chips.memory && knowledge.isPending
+						? t`Loading Knowledge before you send…`
+						: t`When you tap send, ${list} go to your ${connection}.`,
+			...(withheld > 0 ? [t`Messages from before Knowledge changed aren't sent.`] : []),
+			...(context.web ? [t`Search terms go to your web search service.`] : []),
+			memory.note,
+		]
+			.filter(Boolean)
+			.join(" ");
+	};
 	const connection = /connection$/i.test(label) ? label : t`${label} connection`;
-	const privacy = [
-		chips.memory && knowledge.isError
-			? t`Knowledge couldn't load. Try again or switch Knowledge off before sending.`
-			: chips.memory && knowledge.isPending
-				? t`Loading Knowledge before you send…`
-				: t`When you tap send, ${list} go to ${connection}.`,
-		...(chips.web ? [t`Search terms go to your web search service.`] : []),
-	].join(" ");
 
 	const newConversation = () => {
 		setThreadId(null);
@@ -128,12 +153,25 @@ export function CoachScreen({ offerIds }: CoachScreenProps) {
 	return (
 		<View style={{ flex: 1, backgroundColor: colors.surface }}>
 			<View style={{ paddingHorizontal: space.s4, flexDirection: "row", alignItems: "center" }}>
-				<Text variant="label" style={{ flex: 1 }}>
-					{summary ? title(summary) : t`Coach`}
-				</Text>
+				{summary ? (
+					<Pressable
+						accessibilityRole="button"
+						accessibilityLabel={t`Rename ${title(summary)}`}
+						onPress={() => {
+							setRenaming({ id: summary.id, title: title(summary) });
+							setListOpen(true);
+						}}
+						style={{ flex: 1, minHeight: 44, justifyContent: "center" }}
+					>
+						<Text variant="label">{title(summary)}</Text>
+					</Pressable>
+				) : (
+					<Text variant="label" style={{ flex: 1 }}>{t`Coach`}</Text>
+				)}
 				<IconButton icon="clock-counter-clockwise" label={t`Conversations`} onPress={() => setListOpen(true)} />
 				<IconButton icon="note-pencil" label={t`New conversation`} onPress={newConversation} />
 			</View>
+			<PracticeHandoff />
 			<ProviderGate
 				providers={providers}
 				readOnly={threadId !== null}
@@ -159,10 +197,7 @@ export function CoachScreen({ offerIds }: CoachScreenProps) {
 				>
 					<Icon name="sparkle" size={18} color={colors.accent} />
 					<View style={{ flex: 1 }}>
-						<ModelButton
-							label={provider ? `${provider.label} · ${provider.model}` : label}
-							onPress={() => setModelOpen(true)}
-						/>
+						<ModelButton current={provider} label={label} onPress={() => setModelOpen(true)} />
 					</View>
 					{chips.memory && knowledge.isError ? (
 						<Button variant="link" size="sm" label={t`Retry`} onPress={knowledge.retry} />
@@ -184,6 +219,15 @@ export function CoachScreen({ offerIds }: CoachScreenProps) {
 						void threads.refetch();
 					}}
 					context={context}
+					// Recorded on each question as web does (coach-thread.tsx usedFor), for the Sent line on both.
+					sent={() => ({
+						facts: chips.memory ? knowledge.factIds.slice(0, 30) : [],
+						stories: chips.memory ? knowledge.storyIds.slice(0, 8) : [],
+						preferences: chips.memory,
+						applications: chips.application,
+						offers: context.offerIds ?? [],
+						web: context.web === true,
+					})}
 					document={null}
 					onRefresh={() =>
 						Promise.allSettled([
@@ -195,10 +239,38 @@ export function CoachScreen({ offerIds }: CoachScreenProps) {
 						])
 					}
 					connection={connection}
-					privacy={privacy}
+					privacy={privacyFor}
+					remember={{ applicationId: null }}
+					facts={knowledge.all}
+					stories={knowledge.allStories}
+					storyEditor={({ story, onChange, onSaved, onClose }) => (
+						<StoryEditor
+							story={null}
+							facts={knowledge.all}
+							proposal={{
+								story,
+								onChange,
+								onSaved: () => {
+									onSaved();
+									showToast({ message: t`Your edited story is saved to Knowledge.` });
+								},
+							}}
+							onClose={onClose}
+						/>
+					)}
+					notice={
+						stranded ? (
+							<ConnectionNotice
+								label={summary?.providerLabel ?? null}
+								fallback={providers.usableProviders[0]}
+								onUse={(id) => void choose(id)}
+								onChoose={() => setModelOpen(true)}
+							/>
+						) : null
+					}
 					placeholder={t`Ask about your next career step…`}
 					assistantName={t`Coach`}
-					disabled={knowledgeBlocks || !providers.hasAIProvider}
+					disabled={knowledgeBlocks || !provider}
 					onSwitchModel={() => setModelOpen(true)}
 					onFinish={() => {
 						// The coach may have remembered a fact or saved a story.
@@ -219,12 +291,8 @@ export function CoachScreen({ offerIds }: CoachScreenProps) {
 								pressed={chips.memory}
 								onPress={() => setChips({ ...chips, memory: !chips.memory })}
 							/>
-							<ContextChip
-								icon="globe-hemisphere-west"
-								label={t`Web research`}
-								pressed={chips.web}
-								onPress={() => setChips({ ...chips, web: !chips.web })}
-							/>
+							<WebResearchChip web={web} pressed={chips.web} onPress={() => setChips({ ...chips, web: !chips.web })} />
+							{memory.chip}
 							{offerIds.length > 0 ? (
 								<ContextChip
 									icon="hand-heart"
@@ -235,7 +303,9 @@ export function CoachScreen({ offerIds }: CoachScreenProps) {
 							) : null}
 						</>
 					}
-					empty={(send) => <Starters disabled={knowledgeBlocks || !providers.hasAIProvider} onPick={send} />}
+					empty={(send) => (
+						<Starters disabled={knowledgeBlocks || !provider} offers={context.offerIds?.length ?? 0} onPick={send} />
+					)}
 				/>
 			</ProviderGate>
 
@@ -244,6 +314,8 @@ export function CoachScreen({ offerIds }: CoachScreenProps) {
 				onClose={() => setListOpen(false)}
 				threads={conversations}
 				currentId={threadId}
+				renaming={renaming}
+				onRenamingChange={setRenaming}
 				onNew={newConversation}
 				onOpen={(id) => {
 					setThreadId(id);
@@ -265,54 +337,71 @@ export function CoachScreen({ offerIds }: CoachScreenProps) {
 	);
 }
 
-function Starters({ disabled, onPick }: { disabled: boolean; onPick: (text: string) => void }) {
+/** `offers`: saved offers sent with this conversation (Offers → Plan what to ask), which get their own starters. */
+type StartersProps = { disabled: boolean; offers: number; onPick: (text: string) => void };
+
+function Starters({ disabled, offers, onPick }: StartersProps) {
 	const { t } = useLingui();
-	const { colors, radius, space } = useTheme();
-	const starters: Array<{ icon: IconName; text: string }> = [
-		{ icon: "list-magnifying-glass", text: t`Which opportunities best match my priorities?` },
-		{
-			icon: "list-numbers",
-			text: t`Help me turn an accomplishment into a Situation, Task, Action, Result and Reflection story.`,
-		},
-		{ icon: "user-sound", text: t`What interview answers should I practice?` },
-	];
+	const applications = useApplications();
+	const opportunities = useOpportunities();
+	const now = useNow();
+	const open = (applications.data ?? []).filter((application) => application.status !== "closed");
+	// Starters that fit the account: an upcoming interview, an offer or found roles come first when there are some.
+	const accountStarters = coachStarters({
+		nextInterviewCompany: collectInterviews(open, now)[0]?.application.company,
+		offers: open.filter((application) => application.status === "offer").length,
+		opportunities: (opportunities.data ?? []).filter((row) => !row.trackedApplicationId).length,
+	}).map((starter): { icon: IconName; text: string } => {
+		switch (starter.kind) {
+			case "interview":
+				return { icon: "microphone", text: t`Help me prepare for my ${starter.company} interview.` };
+			case "offers":
+				return { icon: "scales", text: t`Help me weigh the offer I have against what I want.` };
+			case "opportunities":
+				return { icon: "list-magnifying-glass", text: t`Which opportunities best match my priorities?` };
+			case "story":
+				return {
+					icon: "list-numbers",
+					text: t`Help me turn an accomplishment into a Situation, Task, Action, Result and Reflection story.`,
+				};
+			case "practice":
+				return { icon: "user-sound", text: t`What interview answers should I practice?` };
+			default:
+				return { icon: "compass", text: t`What kinds of roles fit what I've done so far?` };
+		}
+	});
+	// Opened from Offers → Plan what to ask: starters about the offers being decided.
+	const starters: { icon: IconName; text: string }[] =
+		offers > 1
+			? [
+					{ icon: "question", text: t`What should I ask before deciding?` },
+					{ icon: "scales", text: t`Which offer fits my requirements better?` },
+					{ icon: "list-checks", text: t`What's missing from these offers that I should get in writing?` },
+				]
+			: offers === 1
+				? [
+						{ icon: "question", text: t`What should I ask before deciding on this offer?` },
+						{ icon: "scales", text: t`Does this offer meet what I want?` },
+						{ icon: "list-checks", text: t`What's missing from this offer that I should get in writing?` },
+					]
+				: accountStarters;
 	return (
-		<View style={{ gap: space.s4, paddingTop: space.s4 }}>
-			<View style={{ gap: space.s2 }}>
-				<Text variant="heading" accessibilityRole="header">
-					<Trans>What are you working on?</Trans>
-				</Text>
-				<Text color="ink2">
+		<ChatWelcome
+			description={
+				<>
 					<Trans>
 						Ask about your search, or bring an accomplishment you want to explain better. Answers use what's switched on
-						below and say what they relied on.
+						below, and each shows what was sent with it.
 					</Trans>
-				</Text>
-			</View>
-			{starters.map((starter) => (
-				<Pressable
-					key={starter.icon}
-					accessibilityRole="button"
-					disabled={disabled}
-					onPress={() => onPick(starter.text)}
-					style={({ pressed }) => ({
-						flexDirection: "row",
-						alignItems: "center",
-						gap: space.s3,
-						minHeight: 52,
-						padding: space.s3,
-						borderWidth: 1,
-						borderColor: colors.line,
-						borderRadius: radius.rLg,
-						backgroundColor: pressed ? colors.press : colors.raised,
-						opacity: disabled ? 0.6 : 1,
-					})}
-				>
-					<Icon name={starter.icon} size={22} color={colors.accentText} />
-					<Text style={{ flex: 1 }}>{starter.text}</Text>
-				</Pressable>
-			))}
-		</View>
+				</>
+			}
+			starters={starters.map((starter) => ({
+				icon: starter.icon,
+				label: starter.text,
+				disabled,
+				onPick: () => onPick(starter.text),
+			}))}
+		/>
 	);
 }
 
@@ -321,6 +410,8 @@ type ConversationsSheetProps = {
 	onClose: () => void;
 	threads: readonly ThreadSummary[];
 	currentId: string | null;
+	renaming: { id: string; title: string } | null;
+	onRenamingChange: (target: { id: string; title: string } | null) => void;
 	onNew: () => void;
 	onOpen: (id: string) => void;
 	onDeleted: (id: string) => void;
@@ -334,7 +425,7 @@ function ConversationsSheet(props: ConversationsSheetProps) {
 	const title = useThreadTitle();
 	const time = useThreadTime();
 	const remove = useDeleteThread(props.onDeleted);
-	const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
+	const { renaming, onRenamingChange: setRenaming } = props;
 
 	const saveName = async () => {
 		const target = renaming;

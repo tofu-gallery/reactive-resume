@@ -7,19 +7,38 @@ import { i18n } from "@lingui/core";
 import { I18nProvider } from "@lingui/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
+vi.mock("@tanstack/react-router", () => ({
+	useRouteContext: () => ({ session: { user: { timezone: mocks.timeZone } } }),
+}));
+
 const mocks = vi.hoisted(() => ({
+	timeZone: "UTC",
 	upload: vi.fn(),
 	removeFile: vi.fn(),
 	create: vi.fn(),
 	update: vi.fn(),
 	autofill: vi.fn(),
+	documents: [] as Array<{
+		id: string;
+		name: string;
+		type: "letter";
+		isLocked: boolean;
+		application: { id: string } | null;
+	}>,
 }));
 
 vi.mock("@/libs/orpc/client", () => ({
 	orpc: {
 		resume: { list: { queryOptions: () => ({ queryKey: ["resume", "list"], queryFn: async () => [] }) } },
 		applications: {
-			list: { queryKey: () => ["applications", "list"] },
+			lanes: {
+				get: {
+					queryOptions: () => ({ queryKey: ["lanes"], queryFn: () => new Promise(() => {}) }),
+					queryKey: () => ["lanes"],
+				},
+			},
+			priorNoResponse: { queryOptions: () => ({ queryKey: ["prior"], queryFn: async () => [] }) },
+			listSummary: { queryKey: () => ["applications", "summary"] },
 			tags: {
 				queryOptions: () => ({ queryKey: ["applications", "tags"], queryFn: async () => [] }),
 				queryKey: () => ["applications", "tags"],
@@ -29,6 +48,9 @@ vi.mock("@/libs/orpc/client", () => ({
 			create: { mutationOptions: (options: object) => ({ ...options, mutationFn: mocks.create }) },
 			update: { mutationOptions: (options: object) => ({ ...options, mutationFn: mocks.update }) },
 			ai: { autofill: { mutationOptions: (options: object) => ({ ...options, mutationFn: mocks.autofill }) } },
+		},
+		documents: {
+			list: { queryOptions: () => ({ queryKey: ["documents", "list"], queryFn: async () => mocks.documents }) },
 		},
 		aiProviders: { list: { queryOptions: () => ({ queryKey: ["aiProviders"], queryFn: async () => [] }) } },
 		storage: {
@@ -84,6 +106,8 @@ const application: Application = {
 beforeAll(() => i18n.loadAndActivate({ locale: "en", messages: {} }));
 beforeEach(() => {
 	vi.resetAllMocks();
+	mocks.timeZone = "UTC";
+	mocks.documents = [];
 	mocks.upload.mockResolvedValue({
 		url: "https://example.com/api/uploads/user-1/pictures/new.pdf",
 		path: NEW_KEY,
@@ -104,6 +128,18 @@ function renderSheet(app: Application | null = application, onOpenChange = vi.fn
 	);
 	return { onOpenChange };
 }
+
+it("shows the recorded letter even when locked, without offering other locked letters", async () => {
+	mocks.documents = [
+		{ id: "letter-1", name: "Recorded letter", type: "letter", isLocked: true, application: { id: application.id } },
+		{ id: "letter-2", name: "Other locked letter", type: "letter", isLocked: true, application: null },
+	];
+	renderSheet({ ...application, coverLetterId: "letter-1", sentCoverLetterVersionId: "sent-1" });
+	const select = screen.getByRole("combobox", { name: "Link an existing letter" });
+	await waitFor(() => expect(select).toHaveValue("letter-1"));
+	expect(select).toBeDisabled();
+	expect(screen.queryByRole("option", { name: "Other locked letter" })).toBeNull();
+});
 
 async function pickResumeFile(file: File) {
 	const input = document.querySelector<HTMLInputElement>('input[type="file"]');
@@ -168,4 +204,19 @@ it("keeps a failed save editable and cancellation performs no client storage cle
 	expect(onOpenChange).toHaveBeenCalledWith(false);
 	expect(mocks.upload).not.toHaveBeenCalled();
 	expect(mocks.removeFile).not.toHaveBeenCalled();
+});
+
+it("lets a changed follow-up day correct an inherited time skipped by daylight saving", async () => {
+	mocks.timeZone = "Europe/Berlin";
+	renderSheet({ ...application, followUpAt: new Date("2027-03-27T01:30:00Z"), followUpDateOnly: false });
+	expect(screen.getByLabelText("Time")).toHaveValue("02:30");
+	fireEvent.change(screen.getByLabelText("Follow-up date"), { target: { value: "2027-03-28" } });
+	fireEvent.change(screen.getByLabelText("Time"), { target: { value: "03:30" } });
+	fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+	await waitFor(() =>
+		expect(mocks.update).toHaveBeenCalledWith(
+			expect.objectContaining({ followUpAt: new Date("2027-03-28T01:30:00Z"), followUpDateOnly: false }),
+			expect.anything(),
+		),
+	);
 });

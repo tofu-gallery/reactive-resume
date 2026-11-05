@@ -1,3 +1,4 @@
+import type { RequestAuthentication } from "./context";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { createProcedureClient } from "@orpc/server";
 import { env } from "@reactive-resume/env/server";
@@ -21,8 +22,12 @@ vi.mock("@reactive-resume/auth/config", () => ({
 vi.mock("@reactive-resume/db/client", () => ({ db: dbMock }));
 vi.mock("@reactive-resume/db/schema", () => ({ user: { __table: "user" } }));
 vi.mock("drizzle-orm", () => ({ eq: () => "EQ" }));
+vi.mock("@reactive-resume/env/server", async (importOriginal) => {
+	const { env } = await importOriginal<typeof import("@reactive-resume/env/server")>();
+	return { env: { ...env, APP_ALIAS_URL: "https://rx.cv" } };
+});
 
-const { resolveUserFromRequestHeaders, resolveAuthenticationFromRequestHeaders, protectedProcedure } =
+const { resolveUserFromRequestHeaders, resolveAuthenticationFromRequestHeaders, publicProcedure, protectedProcedure } =
 	await import("./context");
 
 const setupDbResolves = (userResult: unknown) => {
@@ -80,16 +85,40 @@ describe("resolveUserFromRequestHeaders", () => {
 });
 
 describe("cookie request origins", () => {
-	it.each([{ origin: "https://attacker.example" }, { origin: "null" }, { "sec-fetch-site": "cross-site" }])(
-		"rejects ambient credentials from another origin: %j",
-		async (originHeaders) => {
-			reset();
-			authMock.api.getSession.mockResolvedValue({ user: { id: "owner" } });
-			const headers = new Headers({ cookie: "session=valid", ...originHeaders });
-			await expect(resolveUserFromRequestHeaders(headers)).rejects.toMatchObject({ code: "FORBIDDEN" });
-			expect(authMock.api.getSession).not.toHaveBeenCalled();
-		},
-	);
+	it.each([
+		{ origin: "https://attacker.example" },
+		{ origin: "null" },
+		{ "sec-fetch-site": "cross-site" },
+		{ origin: "https://rx.cv", "sec-fetch-site": "cross-site" },
+		{ origin: "https://rx.cv.attacker.example", "sec-fetch-site": "same-origin" },
+		{ origin: "http://rx.cv", "sec-fetch-site": "same-origin" },
+		{ origin: "https://rx.cv:8443", "sec-fetch-site": "same-origin" },
+	])("rejects ambient credentials from another origin: %j", async (originHeaders) => {
+		reset();
+		authMock.api.getSession.mockResolvedValue({ user: { id: "owner" } });
+		const headers = new Headers({ cookie: "session=valid", ...originHeaders });
+		await expect(resolveUserFromRequestHeaders(headers)).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(authMock.api.getSession).not.toHaveBeenCalled();
+	});
+
+	it("serves anonymous public procedures on the alias when incidental cookies are present", async () => {
+		reset();
+		authMock.api.getSession.mockResolvedValue(null);
+		const context = {
+			locale: "en-US" as const,
+			reqHeaders: new Headers({ cookie: "theme=dark", origin: "https://rx.cv", "sec-fetch-site": "same-origin" }),
+		};
+		const publicOperation = createProcedureClient(
+			publicProcedure.handler(({ context }) => context.user),
+			{ context },
+		);
+		await expect(publicOperation(undefined)).resolves.toBeNull();
+		const protectedOperation = createProcedureClient(
+			protectedProcedure.handler(() => "private"),
+			{ context },
+		);
+		await expect(protectedOperation(undefined)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+	});
 
 	it("accepts same-origin cookies and explicit bearer credentials from other origins", async () => {
 		reset();
@@ -142,6 +171,11 @@ describe("credential authorization", () => {
 		{ permissions: { api: ["write"] }, method: "POST" as const, operationId: "trashDocument", allowed: false },
 		{ permissions: { api: ["write"] }, method: "PUT" as const, operationId: "putDocumentTrash", allowed: false },
 		{ permissions: { api: ["delete"] }, method: "POST" as const, operationId: "trashDocument", allowed: true },
+		{ permissions: { api: ["write"] }, method: "POST" as const, operationId: "restoreDocuments", allowed: true },
+		{ permissions: { api: ["write"] }, method: "POST" as const, operationId: "purgeDocuments", allowed: false },
+		{ permissions: { api: ["delete"] }, method: "POST" as const, operationId: "purgeDocuments", allowed: true },
+		{ permissions: { api: ["write"] }, method: "DELETE" as const, operationId: "emptyDocumentTrash", allowed: false },
+		{ permissions: { api: ["delete"] }, method: "DELETE" as const, operationId: "emptyDocumentTrash", allowed: true },
 	])("enforces API-key permissions at procedure execution: %j", async ({ permissions, method, allowed, ...route }) => {
 		reset();
 		authMock.api.verifyApiKey.mockResolvedValue({ valid: true, key: { referenceId: "owner", permissions } });
@@ -171,5 +205,98 @@ describe("credential authorization", () => {
 		);
 		await expect(operation(undefined)).rejects.toMatchObject({ code: "FORBIDDEN" });
 		expect(authMock.api.getSession).not.toHaveBeenCalled();
+	});
+});
+
+describe("account scope binding", () => {
+	const authentication = {
+		user: { id: "bob" },
+		method: "session" as const,
+		permissions: ["read", "write", "delete"] as const,
+	} as unknown as RequestAuthentication;
+	const operation = (
+		headers: Record<string, string>,
+		method: "GET" | "POST" | "DELETE",
+		handler = vi.fn(() => "executed"),
+	) =>
+		createProcedureClient(protectedProcedure.route({ method }).handler(handler), {
+			context: { locale: "en-US" as const, reqHeaders: new Headers(headers), authentication },
+		});
+
+	it.each(["POST", "DELETE"] as const)(
+		"refuses a %s rendered for another account before the handler runs",
+		async (method) => {
+			reset();
+			const handler = vi.fn(() => "executed");
+			await expect(operation({ "x-account-id": "alice" }, method, handler)(undefined)).rejects.toMatchObject({
+				code: "CONFLICT",
+			});
+			expect(handler).not.toHaveBeenCalled();
+		},
+	);
+
+	it("accepts a write when the page's account matches the signed-in session", async () => {
+		reset();
+		await expect(operation({ "x-account-id": "bob" }, "POST")(undefined)).resolves.toBe("executed");
+	});
+
+	it("keeps clients that send no account scope working", async () => {
+		reset();
+		await expect(operation({}, "POST")(undefined)).resolves.toBe("executed");
+	});
+
+	it("still allows reads from a page that has not caught up with the new session", async () => {
+		reset();
+		await expect(operation({ "x-account-id": "alice" }, "GET")(undefined)).resolves.toBe("executed");
+	});
+});
+
+describe("per-item account binding", () => {
+	const authentication = {
+		user: { id: "bob" },
+		method: "session" as const,
+		permissions: ["read", "write", "delete"] as const,
+	} as unknown as RequestAuthentication;
+	const itemOperation = (
+		envelope: string | undefined,
+		item: string | undefined,
+		method: "GET" | "POST" = "POST",
+		handler = vi.fn(() => "executed"),
+	) =>
+		createProcedureClient(protectedProcedure.route({ method }).handler(handler), {
+			context: {
+				locale: "en-US" as const,
+				reqHeaders: new Headers(envelope ? { "x-account-id": envelope } : {}),
+				...(item ? { rpcItemAccountId: item } : {}),
+				authentication,
+			},
+		});
+
+	it.each([
+		{ envelope: "bob", item: "alice", why: "a mixed batch item keeps its own old account" },
+		{ envelope: "alice", item: "bob", why: "the envelope and the item disagree" },
+		{ envelope: undefined, item: "alice", why: "only the item is bound and it is stale" },
+	])("refuses a write when $why", async ({ envelope, item }) => {
+		reset();
+		const handler = vi.fn(() => "executed");
+		await expect(itemOperation(envelope, item, "POST", handler)(undefined)).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+		expect(handler).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		{ envelope: "bob", item: "bob" },
+		{ envelope: "bob", item: undefined },
+		{ envelope: undefined, item: "bob" },
+		{ envelope: undefined, item: undefined },
+	])("allows a write whose known bindings all match ($envelope / $item)", async ({ envelope, item }) => {
+		reset();
+		await expect(itemOperation(envelope, item)(undefined)).resolves.toBe("executed");
+	});
+
+	it("does not block a read item carrying another page's account", async () => {
+		reset();
+		await expect(itemOperation("bob", "alice", "GET")(undefined)).resolves.toBe("executed");
 	});
 });

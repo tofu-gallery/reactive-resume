@@ -4,18 +4,22 @@ import type { IconName } from "@/ui";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { useRouter } from "expo-router";
 import { useState } from "react";
-import { ActivityIndicator, Pressable, View } from "react-native";
+import { ActivityIndicator, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useThreads } from "./chat";
 import { ChatView, ContextChip } from "./chat-view";
+import { ChatWelcome } from "./chat-welcome";
 import { useLetterAssistantDocument, useResumeAssistantDocument } from "./document";
+import { takeAssistantHandoff } from "./handoff";
 import { publishProposals } from "./proposals";
-import { ModelButton, ModelSheet, ProviderGate, useConversationProvider } from "./provider";
+import { ConnectionNotice, ModelButton, ModelSheet, ProviderGate, useConversationProvider } from "./provider";
 import { PastConversations } from "./threads";
+import { TranslateResume } from "./translate-resume";
 import { client } from "@/api/client";
 import { getAccountScope, useSession } from "@/auth/session";
 import { useLetterStore, useResumeStore } from "@/draft";
 import { useHasAIProvider } from "@/features/ai/providers";
+import { useUnlockResume } from "@/features/write/unlock";
 import { routes } from "@/routes";
 import { Banner, Button, Icon, IconButton, Text, useTheme } from "@/ui";
 
@@ -25,6 +29,8 @@ export type AssistantScreenProps = {
 	threadId?: string | undefined;
 	/** A question to send in a new conversation as soon as the assistant can. */
 	ask?: string | undefined;
+	/** A question to review in the composer before sending. */
+	draft?: string | undefined;
 	/** Prepare for next step: the application's suggestions (fit, follow-up, interview). */
 	prepare?: boolean | undefined;
 	/** The application this resume was opened for. */
@@ -58,7 +64,7 @@ export function AssistantScreen(props: AssistantScreenProps) {
 	return (
 		<DocumentAssistantScreen
 			{...props}
-			key={`${getAccountScope()}:${props.resumeId}:${props.threadId}:${props.ask}:${props.prepare}`}
+			key={`${getAccountScope()}:${props.resumeId}:${props.threadId}:${props.ask}:${props.draft}:${props.prepare}`}
 			kind="resume"
 			documentId={props.resumeId}
 			document={document}
@@ -76,7 +82,7 @@ export function LetterAssistantScreen(props: LetterAssistantScreenProps) {
 	return (
 		<DocumentAssistantScreen
 			{...props}
-			key={`${getAccountScope()}:${props.letterId}:${props.threadId}:${props.ask}`}
+			key={`${getAccountScope()}:${props.letterId}:${props.threadId}:${props.ask}:${props.draft}`}
 			kind="letter"
 			documentId={props.letterId}
 			document={document}
@@ -97,25 +103,37 @@ function DocumentAssistantScreen(props: DocumentAssistantScreenProps) {
 	const { t } = useLingui();
 	const { colors, space } = useTheme();
 	const session = useSession();
-	const { document, loadFailed } = props;
+	const { loadFailed } = props;
+	const [savedPosting, setSavedPosting] = useState<AssistantDocument["posting"]>(null);
+	const document =
+		props.document && savedPosting
+			? { ...props.document, posting: savedPosting, madeFor: savedPosting.id, jobCopy: true }
+			: props.document;
+	if (savedPosting && props.document?.posting?.id === savedPosting.id) setSavedPosting(null);
 	const store = props.kind === "letter" ? useLetterStore : useResumeStore;
 	const providers = useHasAIProvider();
 	const threads = useThreads();
+	// Text the coach handed over for this resume and account: it waits in a new conversation's box, unsent.
+	const [handed] = useState(() =>
+		props.kind === "resume" ? takeAssistantHandoff(getAccountScope(), props.documentId) : null,
+	);
 	// null: the document's latest conversation; "new": a new one.
 	const [selected, setSelected] = useState<string | null>(
-		props.ask || props.prepare ? "new" : (props.threadId ?? null),
+		props.ask || props.draft || props.prepare || handed ? "new" : (props.threadId ?? null),
 	);
 	const [ask, setAsk] = useState(props.ask ?? null);
 	const [prepare, setPrepare] = useState(props.prepare ?? false);
 	const [view, setView] = useState<"thread" | "history">("thread");
 	const [modelOpen, setModelOpen] = useState(false);
+	const [translating, setTranslating] = useState(false);
 	const [context, setContext] = useState<MessageContext>({ document: true, posting: true });
 	const [draftKey, setDraftKey] = useState(0);
 
 	const mine = document ? (threads.data ?? []).filter((thread) => belongsTo(thread, document)) : [];
 	const threadId = selected === "new" ? null : (selected ?? mine[0]?.id ?? null);
+	const draft = draftKey === 0 ? (props.draft ?? handed) : null;
 	const summary = mine.find((thread) => thread.id === threadId);
-	const { provider, label, choose } = useConversationProvider(providers, summary, threadId);
+	const { provider, stranded, label, choose } = useConversationProvider(providers, summary, threadId);
 
 	const newConversation = () => {
 		if (props.kind === "resume") publishProposals(props.documentId, []);
@@ -214,17 +232,42 @@ function DocumentAssistantScreen(props: DocumentAssistantScreenProps) {
 					void threads.refetch();
 				}}
 				context={{ ...context, ...(document.posting ? { applicationId: document.posting.id } : {}) }}
+				onPostingSaved={(posting) => {
+					setSavedPosting(posting);
+					setContext((previous) => ({ ...previous, posting: true, applicationId: posting.id }));
+					router.setParams({ applicationId: posting.id });
+				}}
 				document={document}
 				connection={label}
-				privacy={disclosure(t, document, context, label)}
+				privacy={(history) => disclosure(t, document, context, label, history.earlier > 0)}
 				placeholder={t`Ask, or describe a change…`}
 				assistantName={t`Assistant`}
-				disabled={document.locked || !providers.hasAIProvider}
+				disabled={!provider}
+				{...(draft && threadId === null ? { draft } : {})}
+				notice={
+					stranded ? (
+						<ConnectionNotice
+							label={summary?.providerLabel ?? null}
+							fallback={providers.usableProviders[0]}
+							onUse={(id) => void choose(id)}
+							onChoose={() => setModelOpen(true)}
+						/>
+					) : document.locked ? (
+						// A locked document still takes questions; edits wait for Unlock (web assistant-panel).
+						<LockedNotice document={document} />
+					) : null
+				}
 				prompt={ask}
 				onPromptSent={() => setAsk(null)}
 				onSwitchModel={() => setModelOpen(true)}
 				chips={
 					<>
+						<ContextChip
+							icon="brain"
+							label={t`Knowledge`}
+							pressed={context.memory === true}
+							onPress={() => setContext({ ...context, memory: !context.memory })}
+						/>
 						{context.document ? (
 							<ContextChip
 								icon="file-text"
@@ -232,13 +275,43 @@ function DocumentAssistantScreen(props: DocumentAssistantScreenProps) {
 								removeLabel={t`Don't send ${document.name}`}
 								onRemove={() => setContext({ ...context, document: false })}
 							/>
-						) : null}
-						{context.posting && document.posting ? (
+						) : (
+							// A chip that's off stays, so it can be sent again (web conversation.tsx).
 							<ContextChip
-								icon="briefcase"
-								label={t`${document.posting.company} posting`}
-								removeLabel={t`Don't send ${document.posting.company} posting`}
-								onRemove={() => setContext({ ...context, posting: false })}
+								icon="plus"
+								label={document.name}
+								pressed={false}
+								onPress={() => setContext({ ...context, document: true })}
+							/>
+						)}
+						{document.posting ? (
+							context.posting ? (
+								<ContextChip
+									icon="briefcase"
+									label={t`${document.posting.company} posting`}
+									removeLabel={t`Don't send ${document.posting.company} posting`}
+									onRemove={() => setContext({ ...context, posting: false })}
+								/>
+							) : (
+								<ContextChip
+									icon="plus"
+									label={t`${document.posting.company} posting`}
+									pressed={false}
+									onPress={() => setContext({ ...context, posting: true })}
+								/>
+							)
+						) : null}
+						{needsJobCopy(document, context) && document.posting ? (
+							<Button
+								size="sm"
+								variant="secondary"
+								label={t`Copy for this job`}
+								onPress={() =>
+									router.push({
+										pathname: routes.new(),
+										params: { step: "copy", applicationId: document.posting?.id, sourceResumeId: document.id },
+									})
+								}
 							/>
 						) : null}
 					</>
@@ -283,7 +356,7 @@ function DocumentAssistantScreen(props: DocumentAssistantScreenProps) {
 							<Trans>Assistant</Trans>
 						</Text>
 						{providers.hasAIProvider ? (
-							<ModelButton label={provider?.model ?? label} onPress={() => setModelOpen(true)} />
+							<ModelButton current={provider} label={label} onPress={() => setModelOpen(true)} />
 						) : null}
 					</View>
 					<IconButton icon="note-pencil" label={t`New conversation`} onPress={newConversation} />
@@ -296,6 +369,27 @@ function DocumentAssistantScreen(props: DocumentAssistantScreenProps) {
 					<IconButton icon="x" label={t`Close the assistant`} onPress={() => router.back()} />
 				</View>
 
+				{props.kind === "resume" ? (
+					<View style={{ gap: space.s2, padding: space.s3, borderBottomWidth: 1, borderColor: colors.line }}>
+						<Text variant="caption" color="ink2">
+							<Trans>Review each set before accepting it together. Some fields still need Write.</Trans>
+						</Text>
+						<Button
+							variant="link"
+							label={t`Open Write`}
+							onPress={() =>
+								router.replace({
+									pathname: routes.builder(props.documentId, "write"),
+									params: props.applicationId ? { applicationId: props.applicationId } : {},
+								})
+							}
+						/>
+						<Button variant="link" label={t`Translate into…`} onPress={() => setTranslating(true)} />
+					</View>
+				) : null}
+				{translating && props.kind === "resume" && (
+					<TranslateResume resumeId={props.documentId} onClose={() => setTranslating(false)} />
+				)}
 				{gate}
 
 				<ModelSheet
@@ -313,7 +407,13 @@ function DocumentAssistantScreen(props: DocumentAssistantScreenProps) {
 type Translate = ReturnType<typeof useLingui>["t"];
 
 /** What a send shares, and with whom (web's disclosure line). */
-function disclosure(t: Translate, document: AssistantDocument, context: MessageContext, provider: string) {
+function disclosure(
+	t: Translate,
+	document: AssistantDocument,
+	context: MessageContext,
+	provider: string,
+	hasHistory: boolean,
+) {
 	const posting = context.posting && document.posting;
 	const sends = context.document
 		? document.kind === "letter"
@@ -326,21 +426,56 @@ function disclosure(t: Translate, document: AssistantDocument, context: MessageC
 		: posting
 			? t`Sends your message and the posting to ${provider} with your key, only when you tap send.`
 			: t`Sends your message to ${provider} with your key, only when you tap send.`;
-	const history =
-		!context.document || !context.posting
-			? t`Each send starts fresh with this message and selected files. Previous conversation history stays here.`
-			: t`Previous messages, including document details, are also sent.`;
-	return `${sends} ${history}`;
+	// Said only once there is history to send or to leave out.
+	const history = !hasHistory
+		? ""
+		: !context.document || !context.posting
+			? ` ${t`Each send starts fresh with this message and selected files. Previous conversation history stays here.`}`
+			: ` ${t`Previous messages, including document details, are also sent.`}`;
+	const knowledge =
+		context.memory === true ? ` ${t`Knowledge facts and stories the assistant looks up are sent too.`}` : "";
+	const copy =
+		needsJobCopy(document, context) && document.posting
+			? ` ${t`Edits that use the ${document.posting.company} posting go to a copy made for that job, so this resume stays unchanged.`}`
+			: "";
+	return `${sends}${knowledge}${history}${copy}`;
 }
 
-type Suggestion = { icon: IconName; label: string; hint: string };
+/** Tailoring needs the job's own copy: the server refuses edits that use the posting on a resume other jobs share. */
+const needsJobCopy = (document: AssistantDocument, context: MessageContext) =>
+	document.kind === "resume" && Boolean(context.posting && document.posting) && !document.jobCopy;
+
+/** `edits: false` for tasks that answer or draft rather than edit, which a locked document still takes. */
+type Suggestion = { icon: IconName; label: string; hint: string; edits?: false };
+
+/** Above the composer on a locked document: questions still work, edits wait for Unlock. */
+function LockedNotice({ document }: { document: AssistantDocument }) {
+	const { t } = useLingui();
+	return document.kind === "resume" ? (
+		<UnlockBanner resumeId={document.id} />
+	) : (
+		<Banner tone="info" icon="lock" message={t`Locked. I can answer questions; unlock to get edits.`} />
+	);
+}
+
+function UnlockBanner({ resumeId }: { resumeId: string }) {
+	const { t } = useLingui();
+	const unlock = useUnlockResume(resumeId);
+	return (
+		<Banner
+			tone="info"
+			icon="lock"
+			message={t`Locked. I can answer questions; unlock to get edits.`}
+			action={{ label: unlock.isPending ? t`Unlocking…` : t`Unlock`, onPress: () => unlock.mutate() }}
+		/>
+	);
+}
 
 type SuggestionsProps = { document: AssistantDocument; prepare: boolean; onPick: (text: string) => void };
 
 /** "What should we work on?" with starters that send at once. */
 function Suggestions({ document, prepare, onPick }: SuggestionsProps) {
 	const { t } = useLingui();
-	const { colors, radius, space } = useTheme();
 	const company = document.posting?.company;
 	const tailor: Suggestion[] = company
 		? [{ icon: "briefcase", label: t`Tailor to the ${company} posting`, hint: t`Uses the linked application` }]
@@ -348,18 +483,34 @@ function Suggestions({ document, prepare, onPick }: SuggestionsProps) {
 	let suggestions: Suggestion[] =
 		prepare && company
 			? [
-					{ icon: "briefcase", label: t`How well do I fit this role?`, hint: t`Compares your resume with the posting` },
-					{ icon: "envelope-simple", label: t`Draft a follow-up email`, hint: t`Short and polite, for the recruiter` },
+					{
+						icon: "briefcase",
+						label: t`How well do I fit this role?`,
+						hint: t`Compares your resume with the posting`,
+						edits: false,
+					},
+					{
+						icon: "envelope-simple",
+						label: t`Draft a follow-up email`,
+						hint: t`Short and polite, for the recruiter`,
+						edits: false,
+					},
 					{
 						icon: "chat-text",
 						label: t`Prepare me for the interview`,
 						hint: t`Likely questions, from the posting and your resume`,
+						edits: false,
 					},
 					...tailor,
 				]
 			: [
 					...tailor,
-					{ icon: "scissors", label: t`Find weak bullets`, hint: t`Checks every bullet for action and result` },
+					{
+						icon: "scissors",
+						label: t`Find weak bullets`,
+						hint: t`Checks every bullet for action and result`,
+						edits: false,
+					},
 					{
 						icon: "arrows-in-line-vertical",
 						label: t`Tighten to one page`,
@@ -370,18 +521,25 @@ function Suggestions({ document, prepare, onPick }: SuggestionsProps) {
 	if (document.kind === "letter")
 		suggestions = [
 			...tailor,
+			// After a draft was accepted, the one way back to a fresh draft: proposals for the whole letter.
+			...(company
+				? [
+						{
+							icon: "sparkle" as const,
+							label: t`Redraft from the posting`,
+							hint: t`A new version of the whole letter, as edits to accept`,
+						},
+					]
+				: []),
 			{ icon: "lightning", label: t`Make the opening stronger`, hint: t`Leads with why you fit` },
 			{ icon: "arrows-in-line-vertical", label: t`Make it shorter`, hint: t`Keeps the most specific parts` },
 			{ icon: "text-align-left", label: t`Make it more specific`, hint: t`Uses facts from your resume` },
 		];
 
 	return (
-		<View style={{ gap: space.s4, paddingTop: space.s4 }}>
-			<View style={{ gap: space.s2 }}>
-				<Text variant="heading" accessibilityRole="header">
-					<Trans>What should we work on?</Trans>
-				</Text>
-				<Text color="ink2">
+		<ChatWelcome
+			description={
+				<>
 					{document.kind === "letter" ? (
 						company ? (
 							<Trans>
@@ -389,56 +547,29 @@ function Suggestions({ document, prepare, onPick }: SuggestionsProps) {
 								one.
 							</Trans>
 						) : (
-							<Trans>I can see this letter. Suggestions come back as edits you can accept one by one.</Trans>
+							<Trans>I can see this letter. Suggestions come back as edits you can review before accepting.</Trans>
 						)
+					) : company && prepare ? (
+						// These tasks answer and draft; none of them edits the resume (web assistant-panel).
+						<Trans>
+							I can see this resume and the {company} posting. Ask how you fit, or get a follow-up email or interview
+							prep.
+						</Trans>
 					) : company ? (
 						<Trans>
-							I can see this resume and the {company} posting. Suggestions come back as edits you can accept one by one.
+							I can see this resume and the {company} posting. Suggestions come back as edits you can review before
+							accepting.
 						</Trans>
 					) : (
-						<Trans>I can see this resume. Suggestions come back as edits you can accept one by one.</Trans>
+						<Trans>I can see this resume. Suggestions come back as edits you can review before accepting.</Trans>
 					)}
-				</Text>
-				{document.locked ? (
-					<Text variant="callout" color="warnText">
-						<Trans>This document is locked. Unlock it to get suggestions.</Trans>
-					</Text>
-				) : null}
-			</View>
-			<View style={{ gap: space.s2 }}>
-				{suggestions.map((suggestion) => (
-					<Pressable
-						key={suggestion.label}
-						accessibilityRole="button"
-						accessibilityHint={suggestion.hint}
-						disabled={document.locked}
-						onPress={() => onPick(suggestion.label)}
-						style={({ pressed }) => ({
-							flexDirection: "row",
-							alignItems: "center",
-							gap: space.s3,
-							minHeight: 52,
-							paddingHorizontal: space.s3,
-							paddingVertical: space.s2,
-							borderWidth: 1,
-							borderColor: colors.line,
-							borderRadius: radius.rLg,
-							backgroundColor: pressed ? colors.press : "transparent",
-							opacity: document.locked ? 0.45 : 1,
-						})}
-					>
-						<Icon name={suggestion.icon} size={20} color={colors.ink2} />
-						<View style={{ flex: 1 }}>
-							<Text variant="label" numberOfLines={1}>
-								{suggestion.label}
-							</Text>
-							<Text variant="caption" color="ink3" numberOfLines={1}>
-								{suggestion.hint}
-							</Text>
-						</View>
-					</Pressable>
-				))}
-			</View>
-		</View>
+				</>
+			}
+			starters={suggestions.map((suggestion) => ({
+				...suggestion,
+				disabled: document.locked && suggestion.edits !== false,
+				onPick: () => onPick(suggestion.label),
+			}))}
+		/>
 	);
 }

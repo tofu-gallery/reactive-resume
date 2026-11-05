@@ -1,4 +1,5 @@
 import z from "zod";
+import { applicationClosedReasonSchema } from "@reactive-resume/schema/applications/data";
 import { protectedProcedure } from "../../context";
 import { applicationDto } from "../../dto/application";
 import { resumeMutationRateLimit } from "../../middleware/rate-limit";
@@ -6,6 +7,127 @@ import { paginate, paginationShape } from "../../pagination";
 import { applicationService } from "./service";
 
 export const crudRouter = {
+	listTrash: protectedProcedure
+		.route({
+			method: "GET",
+			path: "/applications/trash",
+			tags: ["Applications"],
+			operationId: "listTrashedApplications",
+			summary: "List applications in Trash",
+		})
+		.input(z.object(paginationShape).default({}))
+		.output(
+			z.object({
+				items: z.array(z.object({ id: z.string(), company: z.string(), role: z.string(), trashedAt: z.date() })),
+				total: z.number().int(),
+			}),
+		)
+		.handler(({ input, context }) =>
+			applicationService.listTrash({ userId: context.user.id, limit: input.limit ?? 100, offset: input.offset ?? 0 }),
+		),
+	restore: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/applications/{id}/restore",
+			tags: ["Applications"],
+			operationId: "restoreApplication",
+			summary: "Restore an application from Trash",
+			description:
+				"Restores the retained application, timeline and relationships. Requires the timestamp returned by listTrashedApplications; a stale Trash action is refused.",
+		})
+		.input(z.object({ id: z.string(), trashedAt: z.date() }))
+		.use(resumeMutationRateLimit)
+		.output(z.void())
+		.handler(({ input, context }) => applicationService.restore({ ...input, userId: context.user.id })),
+	purge: protectedProcedure
+		.route({
+			method: "DELETE",
+			path: "/applications/{id}/trash",
+			tags: ["Applications"],
+			operationId: "purgeApplication",
+			summary: "Permanently delete an application from Trash",
+			description:
+				"Permanently removes only the listed Trash generation. Refuses a restored or re-trashed application. Linked resumes and letters are kept.",
+		})
+		.input(z.object({ id: z.string(), trashedAt: z.date() }))
+		.use(resumeMutationRateLimit)
+		.output(z.void())
+		.handler(({ input, context }) => applicationService.purge({ ...input, userId: context.user.id })),
+	trash: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/applications/{id}/trash",
+			tags: ["Applications"],
+			operationId: "trashApplication",
+			summary: "Move an application to Trash",
+			description:
+				"Retains the timeline, relationships and files until explicitly permanently deleted. Restore from Trash after reload.",
+		})
+		.input(applicationDto.delete.input)
+		.use(resumeMutationRateLimit)
+		.output(applicationDto.delete.output)
+		.handler(({ input, context }) => applicationService.delete({ id: input.id, userId: context.user.id })),
+	bulkTrash: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/applications/trash",
+			tags: ["Applications"],
+			operationId: "trashApplications",
+			summary: "Move applications to Trash",
+		})
+		.input(applicationDto.bulkDelete.input)
+		.use(resumeMutationRateLimit)
+		.output(applicationDto.bulkDelete.output)
+		.handler(({ input, context }) => applicationService.bulkDelete({ ...input, userId: context.user.id })),
+	findPosting: protectedProcedure
+		.route({
+			method: "GET",
+			path: "/applications/by-posting",
+			tags: ["Applications"],
+			operationId: "findTrackedPosting",
+			summary: "Find an owned application by canonical posting URL",
+		})
+		.input(z.object({ sourceUrl: z.string().max(2048) }))
+		.output(
+			z.object({
+				application: z
+					.object({ id: z.string(), role: z.string(), company: z.string(), sourceUrl: z.string().nullable() })
+					.nullable(),
+			}),
+		)
+		.handler(async ({ input, context }) => ({
+			application: await applicationService.findPosting({ ...input, userId: context.user.id }),
+		})),
+
+	priorNoResponse: protectedProcedure
+		.route({
+			method: "GET",
+			path: "/applications/prior-no-response",
+			tags: ["Applications"],
+			operationId: "getPriorNoResponseApplications",
+			summary: "Find prior no-response applications at a company",
+			description:
+				"Up to the ten most recent earlier applications at the same company that ended without a response. With `anyOutcome`, up to the ten most recent earlier closed applications, with their outcome (`closedReason`). Requires authentication.",
+		})
+		.input(
+			z.object({
+				company: z.string().trim().min(1).max(500),
+				excludeId: z.string().optional(),
+				anyOutcome: z.boolean().optional(),
+			}),
+		)
+		.output(
+			z.array(
+				z.object({
+					id: z.string(),
+					company: z.string(),
+					role: z.string(),
+					at: z.date(),
+					closedReason: applicationClosedReasonSchema.nullable().optional(),
+				}),
+			),
+		)
+		.handler(({ input, context }) => applicationService.priorNoResponse({ ...input, userId: context.user.id })),
 	list: protectedProcedure
 		.route({
 			method: "GET",
@@ -19,17 +141,53 @@ export const crudRouter = {
 		})
 		.input(applicationDto.list.input)
 		.output(applicationDto.list.output)
-		.handler(async ({ input, context }) =>
-			paginate(
-				await applicationService.list({
-					userId: context.user.id,
-					...(input.status ? { status: input.status } : {}),
-					...(input.tags ? { tags: input.tags } : {}),
-				}),
-				input,
-				context.resHeaders,
-			),
-		),
+		.handler(async ({ input, context }) => {
+			const { items, total } = await applicationService.list({
+				userId: context.user.id,
+				...(input.status ? { status: input.status } : {}),
+				...(input.laneId ? { laneId: input.laneId } : {}),
+				...(input.tags ? { tags: input.tags } : {}),
+				...(input.limit !== undefined ? { limit: input.limit } : {}),
+				...(input.offset !== undefined ? { offset: input.offset } : {}),
+			});
+			context.resHeaders?.set("X-Total-Count", String(total));
+			if (input.limit !== undefined || input.offset !== undefined) {
+				context.resHeaders?.set("X-Limit", String(input.limit ?? 20));
+				context.resHeaders?.set("X-Offset", String(input.offset ?? 0));
+			}
+			return items;
+		}),
+
+	listSummary: protectedProcedure
+		.route({
+			method: "GET",
+			path: "/applications/summary",
+			tags: ["Applications"],
+			operationId: "listApplicationSummaries",
+			summary: "List application summaries",
+			description:
+				"Returns lightweight application summaries for list views. Full descriptions, notes, documents and timeline note text are omitted; structured followed-up events keep their contact timestamp and stage identity. Use the application endpoint for full detail. When includeInitialDetails is N, up to 2N full details may be attached as initialDetail: the union of the first N candidates under web and mobile ordering, with closed applications excluded unless status is provided.",
+			successDescription: "A list of lightweight application summaries.",
+		})
+		.input(applicationDto.listSummary.input)
+		.output(applicationDto.listSummary.output)
+		.handler(async ({ input, context }) => {
+			const { items, total } = await applicationService.listSummary({
+				userId: context.user.id,
+				...(input.status ? { status: input.status } : {}),
+				...(input.laneId ? { laneId: input.laneId } : {}),
+				...(input.tags ? { tags: input.tags } : {}),
+				...(input.limit !== undefined ? { limit: input.limit } : {}),
+				...(input.offset !== undefined ? { offset: input.offset } : {}),
+				...(input.includeInitialDetails !== undefined ? { includeInitialDetails: input.includeInitialDetails } : {}),
+			});
+			context.resHeaders?.set("X-Total-Count", String(total));
+			if (input.limit !== undefined || input.offset !== undefined) {
+				context.resHeaders?.set("X-Limit", String(input.limit ?? 20));
+				context.resHeaders?.set("X-Offset", String(input.offset ?? 0));
+			}
+			return items;
+		}),
 
 	getById: protectedProcedure
 		.route({
@@ -92,7 +250,28 @@ export const crudRouter = {
 		.input(applicationDto.update.input)
 		.use(resumeMutationRateLimit)
 		.output(applicationDto.update.output)
-		.handler(({ input, context }) => applicationService.update({ userId: context.user.id, ...input })),
+		.handler(({ input, context }) =>
+			applicationService.update({
+				userId: context.user.id,
+				...input,
+				canDeleteAttachments: context.authentication?.permissions.includes("delete") ?? false,
+			}),
+		),
+
+	deleteContact: protectedProcedure
+		.route({
+			method: "DELETE",
+			path: "/applications/{id}/contacts/{index}",
+			tags: ["Applications"],
+			operationId: "deleteApplicationContact",
+			summary: "Remove an application contact",
+			description:
+				"Read the full application and retain its contactsVersion as expectedVersion. Removes only the contact at the reviewed index. On CONFLICT (409), reload and review again; never retry automatically with a new version. Requires authentication and delete permission.",
+		})
+		.input(applicationDto.deleteContact.input)
+		.use(resumeMutationRateLimit)
+		.output(applicationDto.deleteContact.output)
+		.handler(({ input, context }) => applicationService.deleteContact({ ...input, userId: context.user.id })),
 
 	attachDocument: protectedProcedure
 		.route({
@@ -123,7 +302,13 @@ export const crudRouter = {
 		.input(applicationDto.attachDocument.input)
 		.use(resumeMutationRateLimit)
 		.output(applicationDto.attachDocument.output)
-		.handler(({ input, context }) => applicationService.attachDocument({ userId: context.user.id, ...input })),
+		.handler(({ input, context }) =>
+			applicationService.attachDocument({
+				userId: context.user.id,
+				...input,
+				canDeleteAttachments: context.authentication?.permissions.includes("delete") ?? false,
+			}),
+		),
 
 	removeDocument: protectedProcedure
 		.route({
@@ -162,6 +347,44 @@ export const crudRouter = {
 				userId: context.user.id,
 				text: input.text,
 				date: input.date,
+			}),
+		),
+
+	logFollowUp: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/applications/{id}/follow-ups",
+			tags: ["Applications"],
+			operationId: "logApplicationFollowUp",
+			summary: "Log a completed follow-up",
+			description:
+				"Records contact now and restarts the no-reply clock for the current stage visit. Keeps stage dates and scheduled reminders. Requires authentication.",
+			successDescription: "The updated application.",
+		})
+		.input(applicationDto.logFollowUp.input)
+		.use(resumeMutationRateLimit)
+		.output(applicationDto.logFollowUp.output)
+		.handler(({ input, context }) => applicationService.logFollowUp({ id: input.id, userId: context.user.id })),
+
+	logReply: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/applications/{id}/replies",
+			tags: ["Applications"],
+			operationId: "logApplicationReply",
+			summary: "Log an explicitly confirmed reply",
+			description:
+				"First GET /applications/{id}, review the full application and retain its opaque replyVersion. POST that value as expectedVersion. On CONFLICT (409), reload and review again before retrying. Records the user's confirmation of replying now, restarts the current stage's no-reply clock and clears the application's follow-up and its delivery schedule only at the reviewed revision. Sends no message. Keeps stage dates and interview reminders. Requires authentication.",
+			successDescription: "The updated application.",
+		})
+		.input(applicationDto.logReply.input)
+		.use(resumeMutationRateLimit)
+		.output(applicationDto.logReply.output)
+		.handler(({ input, context }) =>
+			applicationService.logFollowUp({
+				id: input.id,
+				userId: context.user.id,
+				reply: { expectedVersion: input.expectedVersion },
 			}),
 		),
 
@@ -236,7 +459,8 @@ export const crudRouter = {
 			tags: ["Applications"],
 			operationId: "deleteApplication",
 			summary: "Delete a job application",
-			description: "Permanently deletes a job application. Requires authentication.",
+			description:
+				"Moves a job application to Trash, retaining its timeline, relationships and files. Restore from Trash after reload. Requires authentication.",
 			successDescription: "The application was deleted successfully.",
 		})
 		.input(applicationDto.delete.input)
@@ -252,7 +476,7 @@ export const crudRouter = {
 			operationId: "bulkUpdateApplications",
 			summary: "Bulk update applications",
 			description:
-				"Applies the same change (move stage, archive/unarchive, add tags) to multiple applications at once. Requires authentication.",
+				"Applies the same change (move stage, archive/unarchive, add tags) to multiple applications at once. A closedReason requires every selected application to be Closed already, or status/laneId to move them to Closed. Contradictory selections fail atomically. Requires authentication.",
 			successDescription: "The number of applications updated.",
 		})
 		.input(applicationDto.bulkUpdate.input)
@@ -267,7 +491,8 @@ export const crudRouter = {
 			tags: ["Applications"],
 			operationId: "bulkDeleteApplications",
 			summary: "Bulk delete applications",
-			description: "Permanently deletes multiple applications at once. Requires authentication.",
+			description:
+				"Moves multiple applications to Trash, retaining their timelines, relationships and files. Requires authentication.",
 			successDescription: "The number of applications deleted.",
 		})
 		.input(applicationDto.bulkDelete.input)

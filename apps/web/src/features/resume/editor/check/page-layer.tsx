@@ -2,11 +2,13 @@ import type { CheckIssue } from "./issues";
 import type { PageMap, PageMapNode, PageMapTarget } from "@reactive-resume/pdf/page-map";
 import type { ResumeData } from "@reactive-resume/schema/resume/data";
 import type { CSSProperties } from "react";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { getProposalState } from "@reactive-resume/resume/proposals";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Icon } from "@reactive-resume/ui/components/icon";
+import { SegmentedControl, SegmentedControlItem } from "@reactive-resume/ui/components/segmented-control";
 import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { cn } from "@reactive-resume/utils/style";
 import { isSameSelection, useEditorStore } from "../store";
@@ -14,6 +16,7 @@ import { findEntry } from "../write/model";
 import { scrollToIssue, useCheckActions } from "./actions";
 import { useCheck } from "./use-check";
 import { getPdfFindingMessage } from "@/features/ats-checker/messages";
+import { useResumeStore } from "@/features/resume/builder/draft";
 
 const toTarget = (node: PageMapNode): PageMapTarget => {
 	if (node.kind === "item") return { kind: "item", sectionId: node.sectionId, itemId: node.itemId };
@@ -26,13 +29,14 @@ const findNode = (pageMap: PageMap, target: PageMapTarget) =>
 	pageMap.nodes.find((node) => isSameSelection(toTarget(node), target));
 
 /**
- * A marker in the page margin, level with the top of a block: 30px left of it, but never off the page, whose
- * margins can be narrower than the marker. `stack` moves further markers on the same block down.
+ * A marker in the page margin, level with the top of a block: 30px left of it. A margin narrower than the marker
+ * (a scaled-down page) lets it hang past the page edge into the canvas gutter instead of covering the text; phones,
+ * whose gutter is narrow, keep it on the page. `stack` moves further markers on the same block down.
  */
 type Box = Pick<PageMapNode, "x" | "y" | "width" | "height">;
 
-const marginStyle = (node: Box, page: { width: number; height: number }, stack = 0): CSSProperties => ({
-	left: `max(4px, calc(${(node.x / page.width) * 100}% - 30px))`,
+const marginStyle = (node: Box, page: { width: number; height: number }, stack = 0, onPage = false): CSSProperties => ({
+	left: `max(${onPage ? "4px" : "-26px"}, calc(${(node.x / page.width) * 100}% - 30px))`,
 	top: `calc(${(node.y / page.height) * 100}% - 3px + ${stack * 26}px)`,
 });
 
@@ -85,12 +89,14 @@ type CheckPageLayerProps = { pageIndex: number; pageMap: PageMap | undefined };
  */
 export function CheckPageLayer({ pageIndex, pageMap }: CheckPageLayerProps) {
 	const check = useCheck();
+	const applications = useResumeStore((state) => state.proposalApplications);
 	const tab = useEditorStore((state) => state.checkTab);
 	const selected = useEditorStore((state) => state.checkIssue);
 	const highlightTerm = useEditorStore((state) => state.highlightTerm);
 	const proposals = useEditorStore((state) => state.proposals);
 	const exportCheck = useEditorStore((state) => state.exportCheck);
 	const breakpoint = useBreakpoint();
+	const onPage = breakpoint === "mobile";
 	const page = pageMap?.pages[pageIndex];
 
 	const highlighted = check && highlightTerm && tab === "match" ? targetsMentioning(check.data, highlightTerm) : [];
@@ -119,7 +125,7 @@ export function CheckPageLayer({ pageIndex, pageMap }: CheckPageLayerProps) {
 	const markers =
 		tab === "writing"
 			? proposals.flatMap((proposal, index) => {
-					if (getProposalState(check.data, proposal) !== "pending") return [];
+					if (getProposalState(check.data, proposal, applications) !== "pending") return [];
 					const target: PageMapTarget = proposal.target.itemId
 						? { kind: "item", sectionId: proposal.target.sectionId, itemId: proposal.target.itemId }
 						: { kind: "section", sectionId: proposal.target.sectionId };
@@ -169,16 +175,16 @@ export function CheckPageLayer({ pageIndex, pageMap }: CheckPageLayerProps) {
 						<button
 							type="button"
 							data-issue-pin={issue.key}
-							aria-label={t`Issue ${issue.number}: ${issue.title}`}
+							aria-label={t`Issue ${i18n.number(issue.number)}: ${issue.title}`}
 							aria-pressed={isSelected}
 							onClick={() => pickIssue(issue)}
-							style={marginStyle(node, page, stack)}
+							style={marginStyle(node, page, stack, onPage)}
 							className={cn(
-								"pointer-events-auto absolute grid size-[22px] place-items-center rounded-sm border-2 border-white bg-warn text-[11px] font-bold text-[oklch(0.22_0.03_80)] shadow-[0_1px_3px_oklch(0_0_0/0.25)]",
+								"pointer-events-auto absolute grid size-[22px] place-items-center rounded-sm border-2 border-paper bg-warn text-xs font-semibold text-warn-ink shadow-[0_1px_3px_oklch(0_0_0/0.25)]",
 								isSelected && "outline-2 outline-offset-1 outline-warn",
 							)}
 						>
-							{issue.number}
+							{i18n.number(issue.number)}
 						</button>
 					</div>
 				);
@@ -197,8 +203,8 @@ export function CheckPageLayer({ pageIndex, pageMap }: CheckPageLayerProps) {
 						aria-label={t`Exported PDF: ${getPdfFindingMessage(finding.code).title}`}
 						title={getPdfFindingMessage(finding.code).title}
 						onClick={() => useEditorStore.setState({ exportReportOpen: true })}
-						style={marginStyle(box, page)}
-						className="pointer-events-auto absolute grid size-[22px] place-items-center rounded-sm border-2 border-white bg-info-text text-bg shadow-[0_1px_3px_oklch(0_0_0/0.25)]"
+						style={marginStyle(box, page, 0, onPage)}
+						className="pointer-events-auto absolute grid size-[22px] place-items-center rounded-sm border-2 border-paper bg-info-text text-bg shadow-[0_1px_3px_oklch(0_0_0/0.25)]"
 					>
 						<Icon name="file-pdf" size={13} />
 					</button>
@@ -209,10 +215,10 @@ export function CheckPageLayer({ pageIndex, pageMap }: CheckPageLayerProps) {
 				<span
 					key={`marker:${number}`}
 					aria-hidden="true"
-					className="absolute grid size-5 place-items-center rounded-sm bg-accent text-[11px] font-bold text-on-accent"
-					style={marginStyle(node, page)}
+					className="absolute grid size-5 place-items-center rounded-sm bg-accent text-xs font-semibold text-on-accent"
+					style={marginStyle(node, page, 0, onPage)}
 				>
-					{number}
+					{i18n.number(number)}
 				</span>
 			))}
 		</div>
@@ -227,27 +233,21 @@ export function PageViewToggle() {
 		{ value: "parser", label: t`What a parser reads`, icon: "brackets-curly" },
 	] as const;
 
+	// The product's one in-canvas switcher (Share's Computer / Phone uses it too), floating over the page.
 	return (
-		<fieldset className="absolute top-3.5 left-1/2 z-10 flex -translate-x-1/2 gap-0.5 rounded-lg border border-line bg-raised p-[3px] shadow-e1">
-			<legend className="sr-only">
-				<Trans>Page view</Trans>
-			</legend>
+		<SegmentedControl
+			aria-label={t`Page view`}
+			value={view}
+			onValueChange={(value) => useEditorStore.setState({ pageView: value as typeof view })}
+			className="absolute top-3.5 left-1/2 z-10 -translate-x-1/2 border border-line shadow-e1"
+		>
 			{options.map((option) => (
-				<button
-					key={option.value}
-					type="button"
-					aria-pressed={view === option.value}
-					onClick={() => useEditorStore.setState({ pageView: option.value })}
-					className={cn(
-						"flex h-[30px] items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium whitespace-nowrap max-sm:px-2",
-						view === option.value ? "bg-ink text-bg" : "text-ink-2 hover:bg-hover",
-					)}
-				>
+				<SegmentedControlItem key={option.value} value={option.value}>
 					<Icon name={option.icon} size={18} />
 					<span className="max-sm:sr-only">{option.label}</span>
-				</button>
+				</SegmentedControlItem>
 			))}
-		</fieldset>
+		</SegmentedControl>
 	);
 }
 
@@ -285,7 +285,7 @@ export function IssueStepper() {
 				</button>
 				<span className="flex-1 text-center text-sm font-semibold">
 					<Trans>
-						Issue {issue.number} of {issues.length}
+						Issue {i18n.number(issue.number)} of {i18n.number(issues.length)}
 					</Trans>
 				</span>
 				<button
@@ -307,7 +307,7 @@ export function IssueStepper() {
 			</div>
 
 			<section
-				aria-label={t`Issue ${issue.number}`}
+				aria-label={t`Issue ${i18n.number(issue.number)}`}
 				className="absolute inset-x-3 bottom-3 z-10 grid gap-2 rounded-xl border border-line bg-surface p-3.5 shadow-e3"
 			>
 				<strong className="text-[15px] font-semibold">{issue.title}</strong>

@@ -1,39 +1,45 @@
 import type { DocumentSummary } from "./filter";
+import type { useDocumentOperations } from "./queries";
 import { useLingui } from "@lingui/react/macro";
 import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { View } from "react-native";
 import { changedTags, documentRef, sharedTags } from "./filter";
 import { useNewDocuments } from "./new-documents";
-import { useDocumentOperations } from "./queries";
+import { useExistingTags } from "./tag-suggestions";
 import { client, orpc } from "@/api/client";
-import { useSession } from "@/auth/session";
+import { getAccountScope, useSession } from "@/auth/session";
+import { AddApplicationSheet } from "@/features/applications/add-sheet";
+import { shareDocumentPdf } from "@/features/share/files";
 import { routes } from "@/routes";
-import { Banner, Button, ChipInput, ListRow, Sheet, Skeleton, Text, TextField, useTheme } from "@/ui";
+import { Banner, Button, ChipInput, ListRow, Sheet, Skeleton, Text, TextField, showToast, useTheme } from "@/ui";
 
 export type DocumentSheet =
 	| { kind: "menu" | "rename" | "link"; documents: [DocumentSummary] }
+	| { kind: "duplicate"; documents: [DocumentSummary]; name: string }
 	| { kind: "tags" | "sharing" | "lock"; documents: DocumentSummary[] };
 
 type DocumentSheetsProps = {
+	operations: ReturnType<typeof useDocumentOperations>;
 	value: DocumentSheet;
 	onClose: () => void;
 	onChange: (value: DocumentSheet) => void;
 	onSelect: (document: DocumentSummary) => void;
 };
 
-export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentSheetsProps) {
+export function DocumentSheets({ value, onClose, onChange, onSelect, operations }: DocumentSheetsProps) {
 	const router = useRouter();
 	const { t } = useLingui();
 	const { space } = useTheme();
 	const session = useSession();
-	const operations = useDocumentOperations();
 	const first = value.documents[0];
-	const [name, setName] = useState(first?.name ?? "");
+	const [name, setName] = useState(value.kind === "duplicate" ? value.name : (first?.name ?? ""));
 	const shared = sharedTags(value.documents);
 	const [tags, setTags] = useState(shared);
-	const options = orpc.applications.list.queryOptions({ input: {} });
+	const commitTags = useRef<(() => string[]) | null>(null);
+	const [addingJob, setAddingJob] = useState(false);
+	const options = orpc.applications.listSummary.queryOptions({ input: {} });
 	const applications = useQuery({
 		...options,
 		queryKey: [...options.queryKey, session.server],
@@ -42,15 +48,49 @@ export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentS
 	const execute = async (task: () => Promise<unknown>) => {
 		if (await operations.run(task)) onClose();
 	};
+	const duplicate = async () => {
+		if (!first) return;
+		const scope = getAccountScope();
+		const copyName = name.trim();
+		let copy: DocumentSummary | undefined;
+		const success = await operations.run(async () => {
+			const id =
+				first.type === "resume"
+					? await client.resume.duplicate({ id: first.id, name: copyName, tags: first.tags })
+					: (await client.coverLetters.duplicate({ id: first.id, name: copyName })).id;
+			useNewDocuments.getState().markNew({ id, type: first.type });
+			copy = { ...first, id, name: copyName, isLocked: false, isPublic: false, hasPassword: false, application: null };
+		});
+		if (!success || !copy || getAccountScope() !== scope) return;
+		const created = copy;
+		onClose();
+		showToast({
+			message: t`Copy created`,
+			action: {
+				label: t`Rename`,
+				onPress: () => {
+					if (getAccountScope() === scope) onChange({ kind: "rename", documents: [created] });
+				},
+			},
+		});
+	};
 	const targets = value.documents.filter((document) => !document.isLocked);
+	const tagSuggestions = useExistingTags(
+		value.documents.map((document) => document.type),
+		value.kind === "tags",
+	);
 	const titles = {
 		menu: t`Document options`,
 		rename: t`Rename`,
+		duplicate: t`Duplicate`,
 		tags: t`Tags`,
 		link: t`Link to application`,
 		sharing: t`Sharing`,
 		lock: t`Lock editing`,
 	};
+	const submitted =
+		first?.type === "letter" &&
+		applications.data?.some((item) => item.coverLetterId === first.id && item.sentCoverLetterVersionId);
 	const link = (applicationId: string | null) =>
 		first && void execute(() => client.documents.linkApplication({ ...documentRef(first), applicationId }));
 	const move = (kind: "rename" | "tags" | "link") => first && onChange({ kind, documents: [first] });
@@ -65,9 +105,12 @@ export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentS
 		>
 			<View style={{ paddingHorizontal: space.s4, gap: space.s3 }}>
 				{operations.error && <Banner tone="danger" message={operations.error} />}
-				{value.documents.some((document) => document.isLocked) && value.kind !== "menu" && value.kind !== "lock" && (
-					<Banner tone="warn" message={t`Locked documents were skipped. Unlock them first.`} />
-				)}
+				{value.documents.some((document) => document.isLocked) &&
+					value.kind !== "menu" &&
+					value.kind !== "lock" &&
+					value.kind !== "duplicate" && (
+						<Banner tone="warn" message={t`Locked documents were skipped. Unlock them first.`} />
+					)}
 				{value.kind === "menu" && first && (
 					<>
 						<Text variant="title">{first.name}</Text>
@@ -80,6 +123,12 @@ export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentS
 								useNewDocuments.getState().markOpened(first);
 								router.push(first.type === "resume" ? routes.builder(first.id) : routes.letter(first.id));
 							}}
+						/>
+						<ListRow
+							title={t`Download PDF`}
+							leading="file-pdf"
+							disabled={operations.busy}
+							onPress={() => void execute(() => shareDocumentPdf(first.type, first.id, first.name))}
 						/>
 						<ListRow
 							title={t`Select`}
@@ -101,19 +150,23 @@ export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentS
 							leading="copy"
 							disabled={operations.busy}
 							onPress={() =>
-								void execute(async () => {
-									const id =
-										first.type === "resume"
-											? await client.resume.duplicate({
-													id: first.id,
-													name: t`${first.name} (copy)`.slice(0, 100),
-													tags: first.tags,
-												})
-											: (await client.coverLetters.duplicate({ id: first.id })).id;
-									useNewDocuments.getState().markNew({ id, type: first.type });
+								void operations.run(async () => {
+									const suggested = await client.documents.suggestDuplicateName(documentRef(first));
+									onChange({ kind: "duplicate", documents: [first], name: suggested });
 								})
 							}
 						/>
+						{first.type === "resume" && (
+							<ListRow
+								title={t`Write a letter…`}
+								leading="envelope-simple"
+								disabled={operations.busy}
+								onPress={() => {
+									onClose();
+									router.push({ pathname: "/new", params: { sourceResumeId: first.id } });
+								}}
+							/>
+						)}
 						{first.type === "resume" && (
 							<ListRow
 								title={t`Copy for a job…`}
@@ -144,12 +197,12 @@ export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentS
 								disabled={operations.busy}
 								onPress={() => {
 									onClose();
-									router.push(routes.share(first.id));
+									router.push(routes.builder(first.id, "share"));
 								}}
 							/>
 						)}
 						<ListRow
-							title={first.isLocked ? t`Unlock` : t`Lock editing`}
+							title={first.isLocked ? t`Unlock editing` : t`Lock editing`}
 							leading={first.isLocked ? "lock-open" : "lock"}
 							disabled={operations.busy}
 							onPress={() =>
@@ -166,6 +219,24 @@ export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentS
 									if (success) onClose();
 								})
 							}
+						/>
+					</>
+				)}
+				{value.kind === "duplicate" && first && (
+					<>
+						<TextField
+							label={t`Name`}
+							value={name}
+							onChangeText={setName}
+							maxLength={100}
+							editable={!operations.busy}
+							autoFocus
+						/>
+						<Button
+							label={t`Duplicate`}
+							loading={operations.busy}
+							disabled={!name.trim()}
+							onPress={() => void duplicate()}
 						/>
 					</>
 				)}
@@ -191,7 +262,14 @@ export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentS
 					<>
 						<Text color="ink2">{t`Shows shared tags. Add or remove tags without changing each document's other tags.`}</Text>
 						<View pointerEvents={operations.busy ? "none" : "auto"}>
-							<ChipInput label={t`Tags`} values={tags} onChange={setTags} />
+							<ChipInput
+								commitRef={commitTags}
+								label={t`Tags`}
+								values={tags}
+								onChange={setTags}
+								suggestions={tagSuggestions}
+								suggestionsLabel={t`Your tags`}
+							/>
 						</View>
 						<Button
 							label={t`Save`}
@@ -202,22 +280,33 @@ export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentS
 								tags.some((tag) => tag.length > 40) ||
 								targets.some((document) => changedTags(document, shared, tags).length > 20)
 							}
-							onPress={() =>
+							onPress={() => {
+								if (operations.busy || !targets.length) return;
+								const next = commitTags.current?.() ?? tags;
+								if (
+									next.length > 20 ||
+									next.some((tag) => tag.length > 40) ||
+									targets.some((document) => changedTags(document, shared, next).length > 20)
+								)
+									return;
 								void execute(() =>
 									operations.batch(
 										value.documents,
 										(document) =>
-											client.documents.setTags({ ...documentRef(document), tags: changedTags(document, shared, tags) }),
+											client.documents.setTags({ ...documentRef(document), tags: changedTags(document, shared, next) }),
 										{ applies: (document) => !document.isLocked },
 									),
-								)
-							}
+								);
+							}}
 						/>
 						<Text variant="caption" color="ink3">{t`Up to 20 tags per document, 40 characters per tag.`}</Text>
 					</>
 				)}
 				{value.kind === "link" && (
 					<>
+						{submitted && (
+							<Text color="ink2">{t`This letter is recorded as sent. Its application link stays with that submission.`}</Text>
+						)}
 						{applications.isPending && <Skeleton height={space.s12} />}
 						{applications.isError && (
 							<Banner
@@ -232,15 +321,38 @@ export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentS
 								<ListRow
 									key={application.id}
 									title={application.role}
-									subtitle={application.company}
+									subtitle={
+										first?.type === "letter" &&
+										application.sentCoverLetterVersionId &&
+										application.coverLetterId !== first.id
+											? `${application.company} · ${t`Letter already sent`}`
+											: application.company
+									}
 									selected={first?.application?.id === application.id}
-									disabled={operations.busy || first?.isLocked}
+									disabled={
+										operations.busy ||
+										Boolean(submitted) ||
+										first?.isLocked ||
+										Boolean(
+											first?.type === "letter" &&
+											application.sentCoverLetterVersionId &&
+											application.coverLetterId !== first.id,
+										)
+									}
 									onPress={() => link(application.id)}
 								/>
 							))}
 						{applications.isSuccess && !applications.data.some((application) => application.status !== "closed") && (
-							<Text color="ink2">{t`No applications yet. Add one in Applications first.`}</Text>
+							<Text color="ink2">{t`No applications yet.`}</Text>
 						)}
+						<Button
+							label={t`Add a job…`}
+							icon="plus"
+							variant="secondary"
+							disabled={operations.busy || first?.isLocked}
+							onPress={() => setAddingJob(true)}
+						/>
+						{addingJob && <AddApplicationSheet onClose={() => setAddingJob(false)} onAdded={(id) => link(id)} />}
 						{first?.application && (
 							<Button
 								label={t`Unlink`}
@@ -280,7 +392,7 @@ export function DocumentSheets({ value, onClose, onChange, onSelect }: DocumentS
 					[true, false].map((isLocked) => (
 						<Button
 							key={String(isLocked)}
-							label={isLocked ? t`Lock editing` : t`Unlock`}
+							label={isLocked ? t`Lock editing` : t`Unlock editing`}
 							variant="secondary"
 							loading={operations.busy}
 							onPress={() =>

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.10
 
 # Base image only; pnpm self-manages to the `packageManager` version in package.json.
 ARG PNPM_VERSION=12.14.0
@@ -30,7 +30,17 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store,sharing=locked \
 COPY --from=pruner /app/out/full/ ./
 # The server build bundles the published agent skills, which live outside any workspace package and so outside the prune.
 COPY --from=pruner /app/plugins/reactive-resume/skills ./plugins/reactive-resume/skills
-RUN rm -rf apps/web/dist apps/web/dist-prerender apps/server/dist && pnpm turbo run build --filter=web --filter=server --force
+# Turbo hashes these root files as a checkout has them; prune rewrites package.json and leaves the rest out.
+# .gitignore keeps node_modules out of the hashes, as git does.
+COPY --from=pruner /app/package.json /app/.gitignore /app/vite.config.ts /app/vitest.setup.ts /app/vitest.shared.mts ./
+# With TURBO_TEAM and a TURBO_TOKEN secret, builds reuse and share Turbo's remote cache; without them, they build.
+# The token is a secret mount: build args are recorded in the published provenance.
+ARG TURBO_TEAM
+RUN --mount=type=secret,id=TURBO_TOKEN,env=TURBO_TOKEN \
+    TURBO_TEAM=${TURBO_TEAM} pnpm turbo run build --filter=web --filter=server
+# Brotli copies of the web app's text files and WASM, which the server sends to browsers that accept brotli.
+COPY --from=pruner /app/tooling/docker/precompress.mjs ./tooling/docker/precompress.mjs
+RUN node tooling/docker/precompress.mjs apps/web/dist
 
 FROM base AS runtime-pruner
 COPY . .

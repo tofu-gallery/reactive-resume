@@ -1,10 +1,13 @@
 import type { GenerateTask, WorkspaceTab } from "@reactive-resume/schema/career";
 import type { IconName } from "@reactive-resume/ui/components/icon";
+import type { PreparedRequest } from "@reactive-resume/utils/deferred-request";
+import type { QueryClient, QueryKey } from "@tanstack/react-query";
 import type { ComponentProps, ReactNode } from "react";
-import { t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
-import { useRouteContext } from "@tanstack/react-router";
+import { Link, useRouteContext } from "@tanstack/react-router";
 import { AnimatePresence, m } from "motion/react";
 import { useEffect, useState } from "react";
 import { Button } from "@reactive-resume/ui/components/button";
@@ -13,7 +16,12 @@ import { Icon } from "@reactive-resume/ui/components/icon";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@reactive-resume/ui/components/tooltip";
 import { cn } from "@reactive-resume/utils/style";
+import { pendingCommits } from "./pending-commits";
+import { deviceTimeZone } from "@/features/settings/use-save-timezone";
+import { getAccountGeneration } from "@/libs/auth/account-scope";
+import { getOrpcErrorMessage } from "@/libs/error-message";
 import { D2, EASE, EXIT } from "@/libs/motion";
+import { invalidateMutationQueries } from "@/libs/query/client";
 
 // ---- Time: always in the user's timezone, "Thu 8 Oct, 17:58". Relative time is secondary text. ----
 
@@ -35,21 +43,34 @@ export function useCareerTime() {
 	const { session } = useRouteContext({ strict: false });
 	const timeZone = session?.user.timezone ?? "UTC";
 	const locale = i18n.locale;
+	const device = deviceTimeZone();
+	// When the account's timezone isn't this device's, clock times say which zone they're in ("16:56 UTC").
+	const labelled = !!device && device !== timeZone;
 	const format = (value: Date | string, options: Intl.DateTimeFormatOptions) =>
 		new Intl.DateTimeFormat(locale, { timeZone, ...options }).format(new Date(value));
+	// The locale decides 12- or 24-hour, as the interview dialog's own time field does.
+	const plain = (value: Date | string) => format(value, { hour: "2-digit", minute: "2-digit" });
+	const clock = (value: Date | string) =>
+		labelled ? format(value, { hour: "2-digit", minute: "2-digit", timeZoneName: "short" }) : plain(value);
 
 	return {
 		timeZone,
+		/** This device's timezone, when it differs from the account's: times then carry their zone. */
+		deviceTimeZone: labelled ? device : undefined,
 		locale,
-		/** "Thu 8 Oct, 17:58" */
+		/** "Thu 8 Oct, 17:58" ("Thu 8 Oct, 17:58 UTC" when the account's timezone isn't this device's) */
 		when: (value: Date | string) =>
-			`${format(value, { weekday: "short", day: "numeric", month: "short" })}, ${format(value, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`,
+			`${format(value, { weekday: "short", day: "numeric", month: "short" })}, ${clock(value)}`,
 		/** "Thu 8 Oct" */
 		day: (value: Date | string) => format(value, { weekday: "short", day: "numeric", month: "short" }),
 		/** "25 Sep" */
 		date: (value: Date | string) => format(value, { day: "numeric", month: "short" }),
-		/** "17:58" */
-		time: (value: Date | string) => format(value, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }),
+		/** "17:58" ("17:58 UTC" when the account's timezone isn't this device's) */
+		time: clock,
+		/** "17:58" with no zone, where space is short and the zone is said once nearby. */
+		plainTime: plain,
+		/** "17:58 – 18:58", with the zone once at the end when the account's timezone isn't this device's. */
+		timeRange: (start: Date | string, end: Date | string) => `${plain(start)} – ${clock(end)}`,
 		format,
 		/** "In 23 hours", "Yesterday": the largest whole unit. */
 		relative: (value: Date | string, now = new Date()) => {
@@ -69,27 +90,64 @@ export function useCareerTime() {
 
 // ---- Undo over confirm: hide now, commit when the toast closes unless Undo was pressed. ----
 
-type UndoInput = {
+type LocalUndo = {
 	description: string;
-	/** Runs when the toast closes (after 6 seconds, or when another toast replaces it). */
 	commit: () => unknown;
-	/** Restores what was hidden. */
-	onUndo: () => void;
+	onUndo: () => unknown;
 };
 
-/** Commits waiting on an open undo toast; leaving the page runs them rather than dropping them. */
-const pendingCommits = new Set<() => void>();
-if (typeof document !== "undefined")
-	document.addEventListener("visibilitychange", () => {
-		if (document.visibilityState === "hidden") for (const flush of pendingCommits) flush();
-	});
+type UndoInput<T> = { description: string; onUndo: () => unknown } & (
+	| { commit: () => unknown }
+	| {
+			prepare: () => Promise<PreparedRequest<T>>;
+			onReady: () => void;
+			commit: (result: Promise<T>) => unknown;
+			onPrepareError: (error: unknown) => unknown;
+	  }
+);
 
-/**
- * Forget, delete, dismiss, apply: the caller hides or shows the change at once and this commits it when the toast
- * closes (after 6 seconds, when another toast replaces it, or when the page is hidden). Undo restores it instead.
- * ponytail: closing the tab outright can still beat the commit; the change then simply didn't happen.
- */
-export function withUndo({ description, commit, onUndo }: UndoInput) {
+/** Network actions finish preparing before their Undo notice; erasure still waits until its window closes. */
+export function withUndo<T>(input: UndoInput<T>) {
+	if (!("prepare" in input)) {
+		showUndo(input);
+		return;
+	}
+	const generation = getAccountGeneration();
+	const current = () => generation === getAccountGeneration();
+	let preparing: Promise<PreparedRequest<T>>;
+	try {
+		preparing = input.prepare();
+	} catch (error) {
+		if (current()) void input.onPrepareError(error);
+		return;
+	}
+	void preparing.then(
+		(request) => {
+			if (!current()) {
+				request.cancel();
+				return;
+			}
+			input.onReady();
+			const operation = showUndo({
+				description: input.description,
+				onUndo: () => {
+					request.cancel();
+					if (current()) void input.onUndo();
+				},
+				commit: () => {
+					if (current()) void input.commit(request.send());
+					else request.cancel();
+				},
+			});
+			if (document.visibilityState === "hidden") operation.flush();
+		},
+		(error) => {
+			if (current()) void input.onPrepareError(error);
+		},
+	);
+}
+
+function showUndo({ description, commit, onUndo }: LocalUndo) {
 	let settled = false;
 	const settle = (run: boolean) => {
 		if (settled) return false;
@@ -114,6 +172,68 @@ export function withUndo({ description, commit, onUndo }: UndoInput) {
 		onClose: () => settle(true),
 	});
 	pendingCommits.add(flush);
+	return { flush };
+}
+
+type QueryUndoOptions<T> = {
+	queryClient: QueryClient;
+	queryKey: QueryKey;
+	description: string;
+	errorMessage: string;
+	prepare: () => Promise<PreparedRequest<T>>;
+	hide: () => void;
+	restore: () => void;
+};
+
+/** Only canonical readback may reveal a hidden row; retry never writes erased text back. */
+export function withQueryUndo<T>({
+	queryClient,
+	queryKey,
+	description,
+	errorMessage,
+	prepare,
+	hide,
+	restore,
+}: QueryUndoOptions<T>) {
+	const generation = getAccountGeneration();
+	const current = () => generation === getAccountGeneration();
+	const reconcile = async () => {
+		if (!current()) return;
+		await queryClient.cancelQueries({ queryKey });
+		if (!current()) return;
+		try {
+			await queryClient.invalidateQueries({ queryKey, refetchType: "all" }, { throwOnError: true });
+			if (current()) restore();
+		} finally {
+			// A refreshed list can hydrate detail and cancel its read, so settle the canonical target first.
+			if (current()) void invalidateMutationQueries(queryClient, queryKey);
+		}
+	};
+	const report = (error: unknown, fallback = t`Couldn't load. Try again.`) => {
+		if (!current()) return;
+		toast.add({
+			type: "error",
+			description: getOrpcErrorMessage(error, { fallback }),
+			actionProps: {
+				children: t`Retry`,
+				onClick: () => {
+					void reconcile().catch(report);
+				},
+			},
+		});
+	};
+	const failed = (error: unknown) => {
+		report(error, errorMessage);
+		void reconcile().catch(report);
+	};
+	withUndo({
+		description,
+		prepare,
+		onReady: hide,
+		onPrepareError: failed,
+		onUndo: () => reconcile().catch(report),
+		commit: (result) => result.then(() => reconcile().catch(report), failed),
+	});
 }
 
 /** Tints a row accent-soft and fades it over 1.2s after navigating to it ("View", "Review"). */
@@ -171,11 +291,11 @@ export const tabLabel = (tab: WorkspaceTab) =>
 	({
 		fit: t({ message: "Fit", context: "Application workspace tab: how well a job fits your experience" }),
 		apply: t`Apply`,
-		prepare: t`Prepare`,
+		prepare: t({ message: "Interview prep", context: "Application workspace tab: plan for an interview" }),
 		practise: t({ message: "Practice", context: "Application workspace tab: rehearse interview answers" }),
 		debrief: t`Debrief`,
 		messages: t`Messages`,
-		saved: t({ message: "Saved", context: "Application workspace tab: earlier results kept for this job" }),
+		saved: t({ message: "Library", context: "Application workspace tab: earlier results kept for this job" }),
 	})[tab];
 
 // ---- Long AI work: what the coach is doing, one phrase at a time ----
@@ -196,19 +316,18 @@ export const workingSteps = (task: GenerateTask["task"] | "tighten" | "chat") =>
 type WorkingProps = { steps: string[] };
 
 /**
- * A 10–30 second wait reads as progress: the label moves through the work's steps every 2.2 seconds, then loops
- * through general phrases. Each phrase rises in from below out of a 2px blur as the last one leaves upward; all of
- * them share one grid cell, so a button keeps the width of the longest.
+ * A 10–30 second wait reads as progress: the label moves through the work's steps every 2.2 seconds, then stays on
+ * "Still working". Each phrase rises in from below out of a 2px blur as the last one leaves upward; all of them share
+ * one grid cell, so a button keeps the width of the longest.
  */
 export function Working({ steps }: WorkingProps) {
-	const general = [t`Thinking`, t`Double-checking`, t`Polishing`];
-	const phrases = [...steps, ...general];
+	const phrases = [...steps, t`Still working`];
 	const [tick, setTick] = useState(0);
 	useEffect(() => {
 		const id = window.setInterval(() => setTick((current) => current + 1), 2200);
 		return () => window.clearInterval(id);
 	}, []);
-	const at = (n: number) => (n < phrases.length ? n : steps.length + ((n - steps.length) % general.length));
+	const at = (n: number) => Math.min(n, phrases.length - 1);
 	const shown = at(tick);
 	const left = tick > 0 ? at(tick - 1) : -1;
 
@@ -232,6 +351,46 @@ export function Working({ steps }: WorkingProps) {
 				</span>
 			))}
 		</span>
+	);
+}
+
+type GenerateNoticeProps = {
+	generate: { isPending: boolean; failure: string | null; stop: () => void; reset: () => void };
+	onRetry: () => void;
+	className?: string;
+};
+
+/** Beside a workspace AI action: Stop while it runs; when it failed, the reason inline with Try again. */
+export function GenerateNotice({ generate, onRetry, className }: GenerateNoticeProps) {
+	if (generate.isPending)
+		return (
+			<Button size="sm" variant="ghost" className={className} onClick={generate.stop}>
+				<Icon name="stop" size={16} />
+				<Trans>Stop</Trans>
+			</Button>
+		);
+	if (!generate.failure) return null;
+	return (
+		<div
+			role="alert"
+			className={cn("grid gap-2.5 rounded-xl bg-danger-soft p-3 text-start text-[13px] text-danger-text", className)}
+		>
+			<span className="flex gap-2">
+				<Icon name="warning-circle" size={18} className="shrink-0" />
+				{generate.failure}
+			</span>
+			<div className="flex flex-wrap gap-1.5">
+				<Button size="sm" variant="secondary" onClick={onRetry}>
+					<Trans>Try again</Trans>
+				</Button>
+				<Button size="sm" variant="ghost" nativeButton={false} render={<Link to="/dashboard/settings/ai" />}>
+					<Trans>AI settings</Trans>
+				</Button>
+				<Button size="sm" variant="ghost" onClick={generate.reset}>
+					<Trans>Dismiss</Trans>
+				</Button>
+			</div>
+		</div>
 	);
 }
 
@@ -293,7 +452,8 @@ export function FilterChip({ pressed, onClick, children, className }: FilterChip
 			onClick={onClick}
 			className={cn(
 				"touch-target inline-flex h-[30px] items-center rounded-sm border px-2.5 text-xs font-medium transition-[background-color,border-color,color,scale] duration-quick ease-enter active:scale-[0.97]",
-				pressed ? "border-ink bg-ink text-bg" : "border-line-2 text-ink hover:bg-hover",
+				// Accent marks a selection, as in the template filter (DESIGN.md).
+				pressed ? "border-accent bg-accent-soft text-accent-text" : "border-line-2 text-ink hover:bg-hover",
 				className,
 			)}
 		>
@@ -376,7 +536,12 @@ export function CountdownChip({ at, now, className }: CountdownChipProps) {
 	const { relative } = useCareerTime();
 	const minutes = minutesUntil(at, now);
 	const soon = minutes <= 60;
-	const label = minutes <= 0 ? t`Started` : soon ? t`Starts in ${minutes} minutes` : relative(at, now);
+	const label =
+		minutes <= 0
+			? t`Started`
+			: soon
+				? t`Starts in ${ph({ minutes: i18n.number(minutes) })} minutes`
+				: relative(at, now);
 	return (
 		<span
 			className={cn(

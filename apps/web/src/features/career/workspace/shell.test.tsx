@@ -3,7 +3,7 @@ import type { SavedItem } from "../hooks";
 import type { Application } from "@/features/applications/types";
 import type { CareerWorkspace } from "@reactive-resume/schema/career";
 import type { ReactNode } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { i18n } from "@lingui/core";
 import { I18nProvider } from "@lingui/react";
@@ -17,19 +17,37 @@ const api = vi.hoisted(() => ({
 	documents: vi.fn(),
 	save: vi.fn(),
 	navigate: vi.fn(),
+	timeZone: "UTC",
 }));
 vi.mock("@/libs/orpc/client", () => {
 	const endpoint = (name: string, queryFn = async (): Promise<unknown> => [], mutationFn = vi.fn()) => ({
 		key: () => [name],
 		queryKey: () => [name],
 		queryOptions: () => ({ queryKey: [name], queryFn, staleTime: Infinity }),
+		mutationKey: () => [name],
 		mutationOptions: () => ({ mutationFn }),
 	});
 	return {
 		orpc: {
-			applications: { getById: endpoint("application") },
-			documents: { list: endpoint("documents", api.documents) },
+			applications: {
+				update: endpoint("updateApplication"),
+				getById: endpoint("application"),
+				lanes: { get: endpoint("lanes", () => new Promise(() => {})) },
+			},
+			documents: {
+				...endpoint("documents", api.documents),
+				list: endpoint("documents", api.documents),
+				linkApplication: endpoint("linkApplication"),
+			},
+			coverLetters: { create: endpoint("createLetter") },
 			career: {
+				answers: {
+					list: endpoint("reviewedAnswers"),
+					save: endpoint("saveAnswer"),
+					reuse: endpoint("reuseAnswer"),
+					delete: endpoint("deleteAnswer"),
+				},
+				stories: endpoint("stories"),
 				workspace: endpoint("workspace", api.workspace),
 				savedItems: endpoint("saved", api.saved),
 				facts: endpoint("facts"),
@@ -38,11 +56,12 @@ vi.mock("@/libs/orpc/client", () => {
 				generate: endpoint("generate"),
 			},
 		},
+		client: { career: { generate: vi.fn() } },
 	};
 });
 vi.mock("@tanstack/react-router", () => ({
 	useNavigate: () => api.navigate,
-	useRouteContext: () => ({ session: { user: { id: "shell-user", timezone: "UTC" } } }),
+	useRouteContext: () => ({ session: { user: { id: "shell-user", timezone: api.timeZone } } }),
 	useRouter: () => ({ state: { location: { state: { __TSR_index: 0 } } } }),
 	Link: ({ children }: { children: ReactNode }) => <a href="#test-link">{children}</a>,
 }));
@@ -119,10 +138,13 @@ const archive = (data: SavedItem["data"]): SavedItem =>
 	}) as SavedItem;
 const answers = () => archive({ kind: "answers", answers: [{ question: "Why this role?", answer: "Sent answer" }] });
 const clients: QueryClient[] = [];
-function mount(version?: string, options: { workspace?: boolean; resumeId?: string } = {}) {
+function mount(
+	version?: string,
+	options: { workspace?: boolean; resumeId?: string; application?: Partial<Application> } = {},
+) {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
 	clients.push(client);
-	client.setQueryData(["application"], { ...application, resumeId: options.resumeId ?? null });
+	client.setQueryData(["application"], { ...application, resumeId: options.resumeId ?? null, ...options.application });
 	if (options.workspace !== false) client.setQueryData(["workspace"], structuredClone(current));
 	const view = render(
 		<QueryClientProvider client={client}>
@@ -135,6 +157,7 @@ function mount(version?: string, options: { workspace?: boolean; resumeId?: stri
 }
 beforeEach(() => {
 	vi.resetAllMocks();
+	api.timeZone = "UTC";
 	api.saved.mockResolvedValue([]);
 	api.workspace.mockResolvedValue(current);
 	api.documents.mockResolvedValue([]);
@@ -214,7 +237,13 @@ it("requires initial workspace data before exposing edits, with recovery after a
 	expect(screen.queryByRole("button", { name: "Add a question from the form" })).toBeNull();
 	fireEvent.click(screen.getByRole("button", { name: "Try again" }));
 	expect(await screen.findByRole("textbox", { name: "Why this role?" })).toHaveValue("Current answer");
-	expect(screen.getByRole("progressbar", { name: "Checklist progress" })).toHaveAttribute("aria-valuenow", "1");
+	expect(screen.getByText("0 of 3", { exact: true })).toBeTruthy();
+	expect(
+		screen.queryByRole("checkbox", { name: "Review the selected resume and cover letter in their editors." }),
+	).toBeNull();
+	expect(
+		screen.getByRole("checkbox", { name: "Check every claim, date and result against your experience." }),
+	).not.toBeChecked();
 	expect(api.save).not.toHaveBeenCalled();
 });
 
@@ -225,6 +254,8 @@ it("retains a typed answer if a background workspace refresh fails", async () =>
 	api.workspace.mockRejectedValue(new Error("Offline"));
 	await act(async () => {
 		await view.client.refetchQueries({ queryKey: ["workspace"] });
+		// Query observers hear about the failure on a later macrotask; let it reach the page before checking.
+		await new Promise((resolve) => setTimeout(resolve, 0));
 	});
 	expect(screen.getByRole("textbox", { name: "Why this role?" })).toBe(field);
 	expect(field).toHaveValue("My unsaved draft");
@@ -237,11 +268,72 @@ it("explains a missing linked document during loading and offers retry after fai
 			reject = fail;
 		}),
 	);
+	api.documents.mockRejectedValue(new Error("Offline"));
 	mount(undefined, { resumeId: "linked-resume" });
 	expect(screen.getByText("Loading linked documents…")).toHaveAttribute("role", "status");
 	await act(async () => reject(new Error("Offline")));
-	expect(await screen.findByRole("alert")).toHaveTextContent("Linked documents couldn't be loaded");
+	const details = within(screen.getByRole("complementary", { name: "Application details" }));
+	expect(await details.findByRole("alert")).toHaveTextContent("Linked documents couldn't be loaded");
+	const retry = await details.findByRole("button", { name: "Try again" });
 	api.documents.mockResolvedValue([{ id: "linked-resume", type: "resume", name: "Harbor resume" }]);
-	fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+	fireEvent.click(retry);
 	await waitFor(() => expect(screen.getByRole("link", { name: /Harbor resume/ })).toBeTruthy());
+});
+
+it("keeps an unsaved posting scoped to its application", async () => {
+	const { client } = mount();
+	await screen.findByRole("textbox", { name: "Job description" });
+	fireEvent.change(screen.getByRole("textbox", { name: "Job description" }), {
+		target: { value: "Only for Harbor" },
+	});
+	act(() => {
+		client.setQueryData(["application"], { ...application, id: "other-application", company: "Tidewater" });
+	});
+	// Query observers render the new application on a later macrotask; wait for it instead of racing it.
+	await screen.findAllByText(/Tidewater/);
+	expect(screen.getByRole("textbox", { name: "Job description" })).toHaveValue("");
+	expect(screen.getByRole("button", { name: "Save posting" })).toBeDisabled();
+});
+
+it("keeps unavailable document edits out of the preparation panel and retries its document load", async () => {
+	api.documents.mockRejectedValue(new Error("Offline"));
+	mount(undefined, { resumeId: "linked-resume" });
+	const preparation = within(await screen.findByRole("region", { name: "Application preparation" }));
+	await preparation.findByRole("alert");
+	api.documents.mockResolvedValue([]);
+	fireEvent.click(preparation.getByRole("button", { name: "Try again" }));
+	await preparation.findByText("Linked document unavailable. Choose another document or restore it from Trash.");
+	expect(preparation.queryByRole("link", { name: "Edit resume" })).toBeNull();
+});
+
+it("gates contextual Compare offers during cold or failed saved-item reads and retries the same application", async () => {
+	let fail = (_error: Error) => {};
+	api.saved.mockReturnValueOnce(
+		new Promise((_resolve, reject) => {
+			fail = reject;
+		}),
+	);
+	mount(undefined, { application: { status: "offer" } });
+	expect(screen.queryByRole("link", { name: "Compare offers" })).toBeNull();
+	expect((screen.getByRole("button", { name: "Compare offers" }) as HTMLButtonElement).disabled).toBe(true);
+	await act(async () => fail(new Error("Synthetic saved-items failure")));
+	await screen.findAllByText(/Your saved data hasn't changed/);
+	expect((screen.getByRole("button", { name: "Compare offers" }) as HTMLButtonElement).disabled).toBe(true);
+	expect(screen.queryByRole("link", { name: "Compare offers" })).toBeNull();
+	const alert = screen
+		.getAllByRole("alert")
+		.find((node) => node.textContent?.includes("Your saved data hasn't changed"));
+	expect(alert).toBeDefined();
+	if (!alert) throw new Error("Missing saved-items error");
+	api.saved.mockResolvedValue([]);
+	fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+	expect(await screen.findByRole("link", { name: "Compare offers" })).toBeTruthy();
+});
+it("workspace projects the logical follow-up day on the account clock", async () => {
+	api.timeZone = "Pacific/Honolulu";
+	mount(undefined, {
+		application: { followUpAt: new Date("2030-01-03T00:00:00Z"), followUpDateOnly: true, followUpNote: "Logical date" },
+	});
+	const section = screen.getByRole("heading", { name: "Next step" }).closest("section");
+	expect(section?.textContent).toContain("Jan 3");
 });

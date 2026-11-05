@@ -5,7 +5,7 @@ type AtsRuleReference = {
 	category: AtsCategory;
 };
 
-export const ATS_RULE_CATALOG_V1 = {
+const ATS_RULE_CATALOG_V1 = {
 	MISSING_NAME: {
 		severity: "error",
 		category: "contact",
@@ -65,6 +65,10 @@ export const ATS_RULE_CATALOG_V1 = {
 		category: "headings",
 	},
 	MISSING_EXPERIENCE_DESCRIPTION: {
+		severity: "warning",
+		category: "writing",
+	},
+	FRAGMENTED_ENTRY: {
 		severity: "warning",
 		category: "writing",
 	},

@@ -4,10 +4,11 @@ import { strFromU8, unzipSync } from "fflate";
 import { copyCoverLetterStyle } from "@reactive-resume/resume/cover-letter";
 import { coverLetterDocumentSchema } from "@reactive-resume/schema/cover-letter/data";
 import { defaultResumeData } from "@reactive-resume/schema/resume/default";
-import { buildAccountZip } from "./export";
+import { buildAccountZip } from "@reactive-resume/utils/account-zip";
 import { detectImportKind, detectJsonImportKind, parseResumeJson } from "@/features/resume/import/read-file";
+import { getLocaleMessages } from "@/libs/locale";
 
-beforeAll(() => i18n.loadAndActivate({ locale: "en-US", messages: {} }));
+beforeAll(async () => i18n.loadAndActivate(await getLocaleMessages("en-US")));
 
 const emptyCareer = {
 	profile: { targetRoles: [], locations: [], priorities: "", constraints: "", automaticMemory: true },
@@ -25,6 +26,42 @@ const emptyCareer = {
 };
 
 describe("buildAccountZip", () => {
+	it("includes application stage definitions so lane references in applications resolve", () => {
+		const pipeline = {
+			revision: 2,
+			lanes: [{ id: "ghosted", category: "closed", label: "Ghosted", closedReason: "no-response", retiredAt: null }],
+		};
+		const base = {
+			user: {},
+			resumes: [],
+			coverLetters: [],
+			applications: [],
+			career: emptyCareer,
+			aiContentReports: [],
+		};
+		const files = unzipSync(buildAccountZip({ ...base, applicationPipeline: pipeline } as never));
+		expect(JSON.parse(strFromU8(files["application-stages.json"] ?? new Uint8Array()))).toEqual(pipeline);
+		expect(unzipSync(buildAccountZip(base as never))).not.toHaveProperty("application-stages.json");
+	});
+	it("retains approved document versions in the account archive with older-server compatibility", () => {
+		const base = {
+			user: {},
+			resumes: [],
+			coverLetters: [],
+			applications: [],
+			career: emptyCareer,
+			aiContentReports: [],
+		};
+		const versions = {
+			resumes: [{ id: "resume-v3", resumeId: "r1", data: { basics: { name: "Reviewed Maya" } } }],
+			letters: [{ id: "letter-v2", coverLetterId: "l1", data: { content: "Reviewed letter" } }],
+		};
+		const files = unzipSync(buildAccountZip({ ...base, documentVersions: versions } as never));
+		expect(files).toHaveProperty("document-versions.json");
+		expect(JSON.parse(strFromU8(files["document-versions.json"] ?? new Uint8Array()))).toEqual(versions);
+		expect(unzipSync(buildAccountZip(base as never))).not.toHaveProperty("document-versions.json");
+	});
+
 	it("explains how to restore documents instead of treating an account zip as LinkedIn", async () => {
 		const archive = buildAccountZip({
 			user: {},
@@ -39,8 +76,14 @@ describe("buildAccountZip", () => {
 		);
 	});
 	it("exports individual documents that the importer accepts", () => {
+		const profile = {
+			data: { email: "private-application@example.test" },
+			revision: "r",
+			reviewedAt: "2030-01-01T00:00:00Z",
+		};
 		const files = unzipSync(
 			buildAccountZip({
+				applicationProfile: profile,
 				exportedAt: "2026-09-30T00:00:00.000Z",
 				user: {},
 				applications: [],
@@ -60,6 +103,8 @@ describe("buildAccountZip", () => {
 		);
 		const resumeText = strFromU8(files["resumes/resume-r1.json"] as Uint8Array);
 		expect(detectJsonImportKind(JSON.parse(resumeText))).toBe("reactive-resume-json");
+		expect(resumeText).not.toContain("private-application@example.test");
+		expect(JSON.parse(strFromU8(files["application-profile.json"] as Uint8Array))).toEqual(profile);
 		expect(parseResumeJson(resumeText, "reactive-resume-json").basics).toEqual(defaultResumeData.basics);
 		const letter = JSON.parse(strFromU8(files["letters/letter-l1.json"] as Uint8Array));
 		expect(detectJsonImportKind(letter)).toBe("cover-letter-json");

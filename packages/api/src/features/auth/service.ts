@@ -6,10 +6,15 @@ import { auth, isCustomOAuthProviderEnabled } from "@reactive-resume/auth/config
 import { db } from "@reactive-resume/db/client";
 import * as schema from "@reactive-resume/db/schema";
 import { env } from "@reactive-resume/env/server";
+import { isLocale } from "@reactive-resume/utils/locale";
+import { applicationProfileService } from "../application-profile/service";
+import { applicationLaneService } from "../applications/lanes";
 import { careerService } from "../career/service";
 import { coverLetterService } from "../cover-letters/service";
-import { getStorageService } from "../storage/service";
+import { feedbackService } from "../feedback/service";
+import { reportStorageCleanupSummary, runStorageCleanup } from "../storage/cleanup";
 import { revokeAppleAuthorization } from "./apple-revocation";
+import { exportAccountUploads } from "./export-uploads";
 
 type ProviderList = Partial<Record<AuthProvider, string>>;
 
@@ -40,16 +45,23 @@ export const authService = {
 				email: schema.user.email,
 				emailVerified: schema.user.emailVerified,
 				timezone: schema.user.timezone,
+				locale: schema.user.locale,
 			})
 			.from(schema.user)
 			.where(eq(schema.user.id, userId));
 		if (!user) throw new ORPCError("NOT_FOUND");
-		return user;
+		// A value outside the supported list (none is written, but the column is free text) reads as unknown.
+		return { ...user, locale: isLocale(user.locale) ? user.locale : null };
 	},
 
 	// GDPR-style export of everything the user owns. Selects explicit columns so
 	// secrets (password hashes, tokens, api keys) never leak into the export.
-	exportData: async (input: { userId: string }) => {
+	exportData: async (input: {
+		userId: string;
+		includeUploads?: boolean | undefined;
+		signal?: AbortSignal | undefined;
+	}) => {
+		input.signal?.throwIfAborted();
 		const [userRecord] = await db
 			.select({
 				id: schema.user.id,
@@ -59,6 +71,7 @@ export const authService = {
 				displayUsername: schema.user.displayUsername,
 				image: schema.user.image,
 				timezone: schema.user.timezone,
+				locale: schema.user.locale,
 				emailVerified: schema.user.emailVerified,
 				createdAt: schema.user.createdAt,
 				updatedAt: schema.user.updatedAt,
@@ -75,8 +88,13 @@ export const authService = {
 				slug: schema.resume.slug,
 				tags: schema.resume.tags,
 				data: schema.resume.data,
+				aiOperationIds: schema.resume.aiOperationIds,
 				isPublic: schema.resume.isPublic,
 				showDownloadButtons: schema.resume.showDownloadButtons,
+				allowWordDownload: schema.resume.allowWordDownload,
+				showInSearchEngines: schema.resume.showInSearchEngines,
+				hideContactDetails: schema.resume.hideContactDetails,
+				isPrimary: schema.resume.isPrimary,
 				isLocked: schema.resume.isLocked,
 				createdAt: schema.resume.createdAt,
 				updatedAt: schema.resume.updatedAt,
@@ -86,24 +104,70 @@ export const authService = {
 
 		const coverLetters = await db.select().from(schema.coverLetter).where(eq(schema.coverLetter.userId, input.userId));
 		const applications = await db.select().from(schema.application).where(eq(schema.application.userId, input.userId));
-		return {
+		const resumeVersions = await db
+			.select()
+			.from(schema.resumeVersion)
+			.where(eq(schema.resumeVersion.userId, input.userId));
+		const letterVersions = await db
+			.select()
+			.from(schema.coverLetterVersion)
+			.where(eq(schema.coverLetterVersion.userId, input.userId));
+		const result = {
 			exportedAt: new Date().toISOString(),
 			user: userRecord,
 			resumes,
 			coverLetters: await Promise.all(
 				coverLetters.map(({ id }) => coverLetterService.getById({ id, userId: input.userId })),
 			),
+			applicationPipeline: await applicationLaneService.get(input.userId),
 			applications: applications.map(({ userId: _userId, ...application }) => application),
+			documentVersions: {
+				resumes: resumeVersions.map(({ userId: _owner, ...version }) => version),
+				letters: letterVersions.map(({ userId: _owner, ...version }) => version),
+			},
 			aiContentReports: await db
 				.select()
 				.from(schema.aiContentReport)
 				.where(eq(schema.aiContentReport.userId, input.userId)),
-			career: await careerService.exportData(input.userId),
+			// This existing backup section carries AI conversations; older archive clients preserve new fields here.
+			career: {
+				...(await careerService.exportData(input.userId)),
+				aiRequests: await db
+					.select({
+						id: schema.aiRequest.id,
+						operationId: schema.aiRequest.operationId,
+						action: schema.aiRequest.action,
+						providerId: schema.aiRequest.providerId,
+						label: schema.aiRequest.label,
+						provider: schema.aiRequest.provider,
+						model: schema.aiRequest.model,
+						createdAt: schema.aiRequest.createdAt,
+					})
+					.from(schema.aiRequest)
+					.where(eq(schema.aiRequest.userId, input.userId)),
+				writingReviews: await db
+					.select({
+						resumeId: schema.resumeWritingReview.resumeId,
+						inputText: schema.resumeWritingReview.inputText,
+						passages: schema.resumeWritingReview.passages,
+						review: schema.resumeWritingReview.review,
+						requestedAt: schema.resumeWritingReview.requestedAt,
+						reviewedAt: schema.resumeWritingReview.reviewedAt,
+						aiOperationId: schema.resumeWritingReview.aiOperationId,
+					})
+					.from(schema.resumeWritingReview)
+					.where(eq(schema.resumeWritingReview.userId, input.userId)),
+			},
+			applicationProfile: await applicationProfileService.get(input.userId),
+			feedback: await feedbackService.exportData(input.userId),
+		};
+		return {
+			...result,
+			...(input.includeUploads ? { uploads: await exportAccountUploads(input.userId, result, input.signal) } : {}),
 		};
 	},
 
 	deleteAccount: async (input: { userId: string }): Promise<void> => {
-		const storageService = getStorageService();
 		const appleAccounts = await db
 			.select({ refreshToken: schema.account.refreshToken, accessToken: schema.account.accessToken })
 			.from(schema.account)
@@ -124,21 +188,18 @@ export const authService = {
 			}
 		}
 
-		// Delete all user files in one call (pictures, screenshots, pdfs)
-		// The storage service delete method supports recursive deletion via prefix
 		try {
-			await storageService.delete(`uploads/${input.userId}`);
-		} catch (err) {
-			// Log orphaned-file failures (GDPR erasure signal) but proceed with deleting the user.
-			console.error("Failed to delete storage for user %s:", input.userId, err);
-		}
-
-		try {
+			// A database trigger enqueues one account-prefix cleanup row in this same delete transaction, so storage
+			// failures cannot leave files without a durable retry target. The row has no user FK and survives deletion.
 			await db.delete(schema.user).where(eq(schema.user.id, input.userId));
 		} catch (err) {
 			console.error("Failed to delete user record:", err);
 
 			throw new ORPCError("INTERNAL_SERVER_ERROR");
 		}
+
+		await runStorageCleanup({ ownerId: input.userId, limit: 1 })
+			.then(reportStorageCleanupSummary)
+			.catch((error: unknown) => console.warn("Account storage cleanup will retry from its durable job.", error));
 	},
 };

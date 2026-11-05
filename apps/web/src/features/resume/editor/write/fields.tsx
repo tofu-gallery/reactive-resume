@@ -1,4 +1,5 @@
 import type { Entry } from "./model";
+import type { UpdateResumeDataOptions } from "@/features/resume/builder/draft";
 import type { Website } from "@reactive-resume/schema/resume/data";
 import type { ComponentProps, ReactNode } from "react";
 import { t } from "@lingui/core/macro";
@@ -11,13 +12,17 @@ import { Input } from "@reactive-resume/ui/components/input";
 import { cn } from "@reactive-resume/utils/style";
 import { findEntry } from "./model";
 import { URLInput } from "@/components/input/url-input";
-import { useCurrentBuilderResumeSelector, useUpdateResumeData } from "@/features/resume/builder/draft";
+import { useCurrentBuilderResumeSelector, useResumeStore, useUpdateResumeData } from "@/features/resume/builder/draft";
 
 /** One entry of a section, re-rendering only when that entry changes; null once it's deleted. */
 export const useEntry = (sectionId: string, entryId: string) =>
 	useCurrentBuilderResumeSelector((resume) => findEntry(resume.data, sectionId, entryId) ?? null);
 
-export type EntryWriter = (key: string, mutate: (entry: Record<string, unknown>) => void) => void;
+export type EntryWriter = (
+	key: string,
+	mutate: (entry: Record<string, unknown>) => void,
+	options?: Pick<UpdateResumeDataOptions, "newStep" | "aiOperationIds" | "removedAiOperationIds">,
+) => void;
 
 /**
  * Writes one field of an entry. The key names the field, so typing in one field folds into one undo step
@@ -27,13 +32,15 @@ export function useEntryWriter(sectionId: string, entryId: string): EntryWriter 
 	const updateResumeData = useUpdateResumeData();
 
 	return useCallback(
-		(key, mutate) => {
+		(key, mutate, options) => {
+			const current = useResumeStore.getState().resume;
+			if (!current || !findEntry(current.data, sectionId, entryId)) return;
 			updateResumeData(
 				(draft) => {
 					const entry = findEntry(draft, sectionId, entryId);
 					if (entry) mutate(entry as Entry & Record<string, unknown>);
 				},
-				{ coalesceKey: `${entryId}:${key}` },
+				{ coalesceKey: `${entryId}:${key}`, ...options },
 			);
 		},
 		[updateResumeData, sectionId, entryId],
@@ -77,7 +84,13 @@ type TextFieldProps = Omit<ComponentProps<typeof Input>, "value" | "onChange"> &
 	wide?: boolean | undefined;
 };
 
-/** A labelled text field. Errors appear after the first blur and say how to fix them. */
+// Addresses and numbers read left to right in every language; free text follows its own first letters.
+const LTR_TYPES = new Set(["email", "tel", "url"]);
+
+/**
+ * A labelled text field. Errors appear after the first blur and say how to fix them. Emails, phones and links keep a
+ * left-to-right direction in right-to-left languages; other text takes the direction of what's typed.
+ */
 export function TextField({
 	label,
 	value,
@@ -105,6 +118,7 @@ export function TextField({
 							onBlur?.(event);
 						}}
 						className={className}
+						dir={LTR_TYPES.has(props.type ?? "") ? "ltr" : "auto"}
 						{...props}
 					/>
 				}
@@ -151,12 +165,16 @@ export function WebsiteField({ label, value, onChange, allowInlineLink = true }:
 	);
 }
 
-type MoreOptionsProps = { children: ReactNode };
+type MoreOptionsProps = {
+	children: ReactNode;
+	open?: boolean;
+	onOpenChange?: (open: boolean) => void;
+};
 
 /** Secondary fields (level, icon, colour) stay out of the way until asked for. */
-export function MoreOptions({ children }: MoreOptionsProps) {
+export function MoreOptions({ children, open, onOpenChange }: MoreOptionsProps) {
 	return (
-		<Collapsible className="col-span-full">
+		<Collapsible open={open} onOpenChange={onOpenChange} className="col-span-full">
 			<CollapsibleTrigger className="group/more flex w-fit cursor-pointer items-center gap-1 rounded-sm text-[13px] font-medium text-ink-2 transition-colors duration-quick hover:text-ink">
 				<span
 					aria-hidden="true"

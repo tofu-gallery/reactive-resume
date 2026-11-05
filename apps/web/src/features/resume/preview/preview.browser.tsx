@@ -16,8 +16,8 @@ import { isEditableElementFocused, usePreviewPausedStore, useResumeData } from "
 import { PdfCanvasDocument, PdfCanvasPage } from "./pdf-canvas";
 import { ResumePreviewLoader } from "./preview.shared";
 import { getResumePreviewGapValue, getResumePreviewPageCount } from "./preview.shared.utils";
+import { ResumeReflow } from "./resume-reflow";
 import { createResumePdfBlob } from "@/features/resume/export/pdf-document";
-import { ResumeReflow } from "@/features/resume/public/resume-reflow";
 import { getLostCharactersMessage, getReadableErrorMessage } from "@/libs/error-message";
 import { EASE } from "@/libs/motion";
 
@@ -30,6 +30,28 @@ type PreviewPdf = {
 	phase: "active" | "exiting" | "staged";
 	renderedPages: number[];
 	template: Template;
+	/** Set when this layer replaced another, or was replaced: whether the two had the same layout. */
+	swap?: "fade" | "instant";
+};
+
+/**
+ * Whether two renders lay the page out the same: the same pages, and every block at the same place and size. Only
+ * then is a cross-fade between them a change of wording; otherwise it would show two layouts at once for a moment
+ * (DESIGN.md: document reflow is never animated).
+ */
+const layoutKey = (pageMap: PageMap | undefined) =>
+	pageMap
+		? [
+				pageMap.pages.length,
+				...pageMap.nodes.map(
+					(node) =>
+						`${node.key}:${node.page}:${Math.round(node.x)}:${Math.round(node.y)}:${Math.round(node.width)}:${Math.round(node.height)}`,
+				),
+			].join("|")
+		: null;
+const sameLayout = (a: PageMap | undefined, b: PageMap | undefined) => {
+	const key = layoutKey(a);
+	return key !== null && key === layoutKey(b);
 };
 
 const UPDATE_DEBOUNCE_MS = 100;
@@ -98,9 +120,14 @@ const markPreviewPageRendered = (layers: PreviewPdf[], layerId: number, pageNumb
 
 	if (!shouldPromoteLayer) return nextLayers;
 
+	const incoming = nextLayers.find((layer) => layer.id === layerId);
+	const outgoing = nextLayers.find((layer) => layer.id !== layerId && layer.phase === "active");
+	// The first render has nothing to cross-fade from; it fades in as before.
+	const swap: PreviewPdf["swap"] = !outgoing || sameLayout(outgoing.pageMap, incoming?.pageMap) ? "fade" : "instant";
+
 	return nextLayers.map((layer) => {
-		if (layer.id === layerId) return layer;
-		if (layer.phase === "active") return { ...layer, phase: "exiting" as const };
+		if (layer.id === layerId) return { ...layer, swap };
+		if (layer.phase === "active") return { ...layer, phase: "exiting" as const, swap };
 
 		return layer;
 	});
@@ -120,6 +147,7 @@ export function ResumePreviewClient({
 	renderPageOverlay,
 	onRender,
 	includeCoverLetterHeader = false,
+	contentLabel,
 }: ResumePreviewProps) {
 	const builderResumeData = useResumeData();
 	const resumeData = data ?? builderResumeData;
@@ -217,7 +245,7 @@ export function ResumePreviewClient({
 	return (
 		<div className={cn("grid", className)}>
 			{/* The pages are canvases, opaque to assistive tech; this is the same content as text, in print order. */}
-			<section className="sr-only" aria-label={t`Resume content`}>
+			<section className="sr-only" aria-label={contentLabel ?? t`Resume content`}>
 				<ResumeReflow data={resumeData} />
 			</section>
 			{lostCharacters && (
@@ -239,6 +267,7 @@ export function ResumePreviewClient({
 						transition={reducedMotion ? INSTANT_TRANSITION : EXITING_TRANSITION}
 					>
 						<ResumePreviewLoader
+							data={resumeData}
 							pageCount={getResumePreviewPageCount(resumeData)}
 							pageClassName={pageClassName}
 							pageGap={pageGap}
@@ -276,7 +305,8 @@ export function ResumePreviewClient({
 						animate={{ opacity: visiblePdf.phase === "active" ? 1 : 0 }}
 						exit={{ opacity: 0 }}
 						transition={
-							reducedMotion
+							// A change of layout swaps at once; only the same layout cross-fades.
+							reducedMotion || visiblePdf.swap === "instant"
 								? INSTANT_TRANSITION
 								: visiblePdf.phase === "exiting"
 									? EXITING_TRANSITION

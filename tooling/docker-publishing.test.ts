@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { expect, it } from "vite-plus/test";
 
 it("keeps smoke dispatches out of release publishing and production deployment", () => {
-	const workflow = readFileSync(new URL("../.github/workflows/docker-build.yml", import.meta.url), "utf8");
+	const workflow = readFileSync(new URL("../.github/workflows/docker-publish.yml", import.meta.url), "utf8");
 	const mode = workflow.match(/ {8}run: \|\n([\s\S]*?)\n {2}build:/)?.[1];
 	if (!mode) throw new Error("Publishing mode script is missing");
 	const directory = mkdtempSync(join(tmpdir(), "docker-publishing-"));
@@ -40,9 +40,9 @@ it("keeps smoke dispatches out of release publishing and production deployment",
 });
 
 it("validates release tags against the built version and distinguishes prereleases", () => {
-	const workflow = readFileSync(new URL("../.github/workflows/docker-build.yml", import.meta.url), "utf8");
+	const workflow = readFileSync(new URL("../.github/workflows/docker-publish.yml", import.meta.url), "utf8");
 	const script = workflow.match(
-		/      - name: Resolve publishing version and commit[\s\S]*?        run: \|\n([\s\S]*?)(?=\n      - name:)/,
+		/      - name: Resolve source commit and version[\s\S]*?        run: \|\n([\s\S]*?)(?=\n      - name:)/,
 	)?.[1];
 	if (!script) throw new Error("Publishing version script is missing");
 	const directory = mkdtempSync(join(tmpdir(), "docker-version-"));
@@ -50,16 +50,17 @@ it("validates release tags against the built version and distinguishes prereleas
 
 	try {
 		writeFileSync(join(directory, "git"), `#!/usr/bin/env bash\necho ${commit}\n`, { mode: 0o755 });
-		for (const [event, ref, version, prerelease, tagged, status] of [
-			["push", "refs/tags/v6.0.0", "6.0.0", "false", "true", 0],
-			["push", "refs/tags/v6.0.0-rc.1", "6.0.0-rc.1", "true", "true", 0],
-			["push", "refs/tags/v6.0.1", "6.0.0", "false", "true", 1],
-			["push", "refs/tags/v6.0", "6.0.0", "false", "true", 1],
-			["workflow_dispatch", "refs/heads/main", "6.0.0", "false", "false", 0],
-			["workflow_dispatch", "refs/heads/fix", "6.0.0", "false", "false", 0],
-			["workflow_dispatch", "refs/tags/v6.0.0", "6.0.0", "false", "true", 0],
-			["workflow_dispatch", "refs/tags/v6.0.0-rc.1", "6.0.0-rc.1", "true", "true", 0],
-			["workflow_dispatch", "refs/tags/v6.0.1", "6.0.0", "false", "true", 1],
+		for (const [event, ref, version, prerelease, status] of [
+			["push", "refs/tags/v6.0.0", "6.0.0", "false", 0],
+			["push", "refs/tags/v6.0.0-rc.1", "6.0.0-rc.1", "true", 0],
+			["push", "refs/tags/v6.0.1", "6.0.0", "false", 1],
+			["push", "refs/tags/v6.0", "6.0.0", "false", 1],
+			["workflow_dispatch", "refs/heads/main", "6.0.0", "false", 0],
+			["workflow_dispatch", "refs/heads/main", "6.0.0-rc.1", "true", 0],
+			["workflow_dispatch", "refs/heads/fix", "6.0.0", "false", 0],
+			["workflow_dispatch", "refs/tags/v6.0.0", "6.0.0", "false", 0],
+			["workflow_dispatch", "refs/tags/v6.0.0-rc.1", "6.0.0-rc.1", "true", 0],
+			["workflow_dispatch", "refs/tags/v6.0.1", "6.0.0", "false", 1],
 		] as const) {
 			const output = join(directory, "output");
 			writeFileSync(output, "");
@@ -77,9 +78,86 @@ it("validates release tags against the built version and distinguishes prereleas
 			});
 			expect(result.status, result.stderr).toBe(status);
 			expect(readFileSync(output, "utf8")).toBe(
-				status === 0 ? `version=${version}\nsha=${commit}\nprerelease=${prerelease}\ntagged=${tagged}\n` : "",
+				status === 0 ? `version=${version}\nsha=${commit}\nprerelease=${prerelease}\n` : "",
 			);
 		}
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+const commit = "a".repeat(40);
+const healthy = { service: "reactive-resume", status: "healthy", version: "6.0.0", revision: commit };
+
+it.each([
+	["matching release", [healthy], 0, 3],
+	["previous commit with same version", [{ ...healthy, revision: "b".repeat(40) }], 1, 60],
+	[
+		"rolling deployment and transient failures reset consecutive matches",
+		[
+			healthy,
+			healthy,
+			{ ...healthy, version: "5.0.0" },
+			healthy,
+			healthy,
+			"HTTP_ERROR",
+			healthy,
+			healthy,
+			"not JSON",
+			healthy,
+			healthy,
+			{ ...healthy, status: "unhealthy" },
+			healthy,
+			healthy,
+			{ ...healthy, service: "other" },
+			healthy,
+			healthy,
+			healthy,
+		],
+		0,
+		18,
+	],
+] as const)("waits for published release before cache purge: %s", (_name, responses, status, probes) => {
+	const workflow = readFileSync(new URL("../.github/workflows/docker-publish.yml", import.meta.url), "utf8");
+	const script = workflow.match(
+		/      - name: Deploy production stack[\s\S]*?      - name: Wait for healthy production version[\s\S]*?        run: \|\n([\s\S]*?)(?=\n      - name: Purge production Cloudflare cache)/,
+	)?.[1];
+	if (!script) throw new Error("Production readiness check must run between deployment and cache purge");
+	const directory = mkdtempSync(join(tmpdir(), "docker-readiness-"));
+	try {
+		writeFileSync(
+			join(directory, "responses"),
+			responses.map((response) => (typeof response === "string" ? response : JSON.stringify(response))).join("\n") +
+				"\n",
+		);
+		writeFileSync(join(directory, "count"), "0");
+		writeFileSync(join(directory, "sleep"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+		writeFileSync(
+			join(directory, "curl"),
+			`#!/usr/bin/env bash
+set -eu
+count=$(cat "$FIXTURE/count")
+count=$((count + 1))
+echo "$count" > "$FIXTURE/count"
+line=$(sed -n "${"$"}{count}p" "$FIXTURE/responses")
+if [[ -z "$line" ]]; then line=$(tail -n 1 "$FIXTURE/responses"); fi
+if [[ "$line" == HTTP_ERROR ]]; then exit 22; fi
+printf '%s\\n' "$line"
+`,
+			{ mode: 0o755 },
+		);
+		const result = spawnSync("bash", ["-eu", "-c", script], {
+			encoding: "utf8",
+			env: {
+				...process.env,
+				PATH: `${directory}:${process.env.PATH}`,
+				FIXTURE: directory,
+				COMMIT_SHA: commit,
+				VERSION: healthy.version,
+			},
+		});
+		expect(result.status, result.stderr).toBe(status);
+		expect(Number(readFileSync(join(directory, "count"), "utf8"))).toBe(probes);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}

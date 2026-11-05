@@ -4,6 +4,7 @@ import type { MouseEvent } from "react";
 import { Trans } from "@lingui/react/macro";
 import { cn } from "@reactive-resume/utils/style";
 import { isSameSelection, useEditorStore } from "./store";
+import { useEditorMode } from "./use-editor-mode";
 
 type PageOverlayProps = {
 	pageIndex: number;
@@ -27,11 +28,14 @@ const readSelection = (element: HTMLElement): EditorSelection | null => {
 
 /**
  * Pointer layer over one rendered page: hovering a block tints it, clicking selects its entry, and the
- * selected block gets an accent outline with an "Editing" tag.
+ * selected block gets an accent outline with an "Editing" tag. (Row order is a resume-wide choice: it lives in
+ * Design → Entries, not on one entry's tag.)
  */
 export function PageOverlay({ pageIndex, pageMap, onSelect }: PageOverlayProps) {
 	const selection = useEditorStore((state) => state.selection);
 	const styleHighlight = useEditorStore((state) => state.styleHighlight);
+	// Only Write edits the entry: Design and Check keep the outline but say nothing about editing.
+	const [mode] = useEditorMode();
 	const page = pageMap?.pages[pageIndex];
 	if (!pageMap || !page || page.width <= 0 || page.height <= 0) return null;
 
@@ -40,6 +44,7 @@ export function PageOverlay({ pageIndex, pageMap, onSelect }: PageOverlayProps) 
 	// (the summary, for example) are blocks of their own.
 	const sectionsWithItems = new Set(nodes.flatMap((node) => (node.kind === "item" ? [node.sectionId] : [])));
 	const blocks = nodes.filter((node) => node.kind !== "section" || !sectionsWithItems.has(node.sectionId));
+	const selected = blocks.filter((node) => isSameSelection(selection, toSelection(node)));
 
 	// Custom Styles: each node the rule under the cursor matches, outlined as the closest block the page map knows
 	// (a field inside an entry lights up its entry).
@@ -52,6 +57,13 @@ export function PageOverlay({ pageIndex, pageMap, onSelect }: PageOverlayProps) 
 		}),
 	);
 
+	const boxOf = (node: PageMapNode) => ({
+		left: `calc(${(node.x / page.width) * 100}% - 4px)`,
+		top: `calc(${(node.y / page.height) * 100}% - 3px)`,
+		width: `calc(${(node.width / page.width) * 100}% + 8px)`,
+		height: `calc(${(node.height / page.height) * 100}% + 6px)`,
+	});
+
 	const handleClick = (event: MouseEvent<HTMLDivElement>) => {
 		const target = (event.target as HTMLElement).closest<HTMLElement>("[data-kind]");
 		const next = target ? readSelection(target) : null;
@@ -59,12 +71,10 @@ export function PageOverlay({ pageIndex, pageMap, onSelect }: PageOverlayProps) 
 	};
 
 	return (
-		// A pointer shortcut, hidden from assistive tech: the panel selects the same entries by keyboard.
-		<div aria-hidden="true" data-slot="page-overlay" className="absolute inset-0" onClick={handleClick}>
-			{blocks.map((node) => {
-				const selected = isSameSelection(selection, toSelection(node));
-
-				return (
+		<>
+			{/* A pointer shortcut, hidden from assistive tech: the panel selects the same entries by keyboard. */}
+			<div aria-hidden="true" data-slot="page-overlay" className="absolute inset-0" onClick={handleClick}>
+				{blocks.map((node) => (
 					<div
 						key={`${node.key}:${node.y}`}
 						data-kind={node.kind}
@@ -72,36 +82,36 @@ export function PageOverlay({ pageIndex, pageMap, onSelect }: PageOverlayProps) 
 						data-item-id={node.kind === "item" ? node.itemId : undefined}
 						className={cn(
 							"absolute cursor-pointer rounded-lg outline-[1.5px] transition-[background-color,outline-color] duration-quick outline-solid hover:bg-[oklch(0.5_0.1_150/0.06)]",
-							selected ? "outline-accent" : "outline-transparent",
+							selected.includes(node) ? "outline-accent" : "outline-transparent",
 						)}
-						style={{
-							left: `calc(${(node.x / page.width) * 100}% - 4px)`,
-							top: `calc(${(node.y / page.height) * 100}% - 3px)`,
-							width: `calc(${(node.width / page.width) * 100}% + 8px)`,
-							height: `calc(${(node.height / page.height) * 100}% + 6px)`,
-						}}
+						style={boxOf(node)}
+					/>
+				))}
+				{[...highlighted].map((node) => (
+					<div
+						key={`style:${node.key}:${node.y}`}
+						data-slot="style-highlight"
+						className="pointer-events-none absolute rounded-lg bg-[oklch(0.5_0.1_150/0.08)] outline-[1.5px] outline-accent transition-opacity duration-quick ease-enter outline-dashed starting:opacity-0"
+						style={boxOf(node)}
+					/>
+				))}
+			</div>
+			{/* The tag is in the app's language and direction, not the resume's. */}
+			{mode === "write" &&
+				selected.map((node) => (
+					<div
+						key={`tag:${node.key}:${node.y}`}
+						className="pointer-events-none absolute max-sm:hidden"
+						style={boxOf(node)}
 					>
-						{selected && (
-							<span className="absolute start-1 -top-2 rounded-md bg-accent px-1 text-[8px] leading-3 font-semibold text-on-accent max-sm:hidden">
+						{/* On the outline's lower end, clear of the section heading that sits right above an entry. */}
+						<div className="absolute end-1 -bottom-2 flex gap-1 text-xs leading-4 font-semibold">
+							<span aria-hidden="true" className="rounded-md bg-accent px-1 text-on-accent">
 								<Trans>Editing</Trans>
 							</span>
-						)}
+						</div>
 					</div>
-				);
-			})}
-			{[...highlighted].map((node) => (
-				<div
-					key={`style:${node.key}:${node.y}`}
-					data-slot="style-highlight"
-					className="pointer-events-none absolute rounded-lg bg-[oklch(0.5_0.1_150/0.08)] outline-[1.5px] outline-accent transition-opacity duration-quick ease-enter outline-dashed starting:opacity-0"
-					style={{
-						left: `calc(${(node.x / page.width) * 100}% - 4px)`,
-						top: `calc(${(node.y / page.height) * 100}% - 3px)`,
-						width: `calc(${(node.width / page.width) * 100}% + 8px)`,
-						height: `calc(${(node.height / page.height) * 100}% + 6px)`,
-					}}
-				/>
-			))}
-		</div>
+				))}
+		</>
 	);
 }

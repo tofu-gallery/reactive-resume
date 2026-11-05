@@ -1,13 +1,14 @@
-import type { CheckTab } from "../store";
 import type { CheckIssue } from "./issues";
 import type { CheckResult } from "./use-check";
 import type { AtsCategory, AtsReport } from "@reactive-resume/resume/ats";
 import type { ResumeData } from "@reactive-resume/schema/resume/data";
 import type { CSSProperties } from "react";
-import { t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, t } from "@lingui/core/macro";
 import { Plural, Trans } from "@lingui/react/macro";
+import { getRouteApi } from "@tanstack/react-router";
 import { useState } from "react";
-import { ATS_CATEGORIES } from "@reactive-resume/resume/ats";
+import { ATS_CATEGORIES, atsVerdict } from "@reactive-resume/resume/ats";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Collapsible, CollapsibleContent } from "@reactive-resume/ui/components/collapsible";
 import {
@@ -39,9 +40,13 @@ import { createResumePdfBlob } from "@/features/resume/export/pdf-document";
  * the linked application's posting, not scored) and Writing (an opt-in AI review, not scored).
  */
 export function CheckPanel() {
+	const route = getRouteApi("/builder/$resumeId");
+	const search = route.useSearch();
+	const { applicationId } = search;
+	const navigate = route.useNavigate();
 	const check = useCheck();
 	const tab = useEditorStore((state) => state.checkTab);
-	const match = useJobMatch(check?.data);
+	const match = useJobMatch(check?.data, applicationId);
 
 	if (!check) return null;
 
@@ -51,19 +56,23 @@ export function CheckPanel() {
 
 			<Tabs
 				value={tab}
-				onValueChange={(value) => useEditorStore.setState({ checkTab: value as CheckTab })}
+				onValueChange={(value) => {
+					if (value !== "issues" && value !== "match" && value !== "writing") return;
+					useEditorStore.setState({ checkTab: value });
+					void navigate({ to: ".", search: { ...search, checkTab: value }, replace: true });
+				}}
 				className="gap-3.5"
 			>
 				<TabsList aria-label={t`Check views`} className="h-[38px] w-full">
 					<TabsTrigger value="issues" className="gap-1.5">
 						<Trans>Issues</Trans>
-						<span className="font-mono text-xs text-ink-3">{check.issues.length}</span>
+						<span className="font-mono text-xs text-ink-3">{i18n.number(check.issues.length)}</span>
 					</TabsTrigger>
 					<TabsTrigger value="match" className="gap-1.5">
 						<Trans>Job match</Trans>
 						{match.result && (
 							<span className="font-mono text-xs text-ink-3">
-								{match.result.found.length}/{match.result.total}
+								{i18n.number(match.result.found.length)}/{i18n.number(match.result.total)}
 							</span>
 						)}
 					</TabsTrigger>
@@ -86,8 +95,8 @@ export function CheckPanel() {
 	);
 }
 
-const getVerdict = (score: number) =>
-	score >= 80 ? t`Reads cleanly` : score >= 50 ? t`Mostly readable` : t`Hard for software to read`;
+const getVerdict = (report: AtsReport) =>
+	({ clean: t`Reads cleanly`, mostly: t`Mostly readable`, hard: t`Hard for software to read` })[atsVerdict(report)];
 
 /** The 84px ring (accent, or warn below 80), the verdict and what the score counts. */
 function ScoreSummary({ report }: { report: AtsReport }) {
@@ -98,25 +107,26 @@ function ScoreSummary({ report }: { report: AtsReport }) {
 		<div className="flex items-center gap-4 rounded-xl border border-line p-4">
 			<div
 				role="img"
-				aria-label={t`Readability score: ${score} out of 100`}
+				aria-label={t`Readability score: ${ph({ score: i18n.number(score) })} out of 100`}
 				className="score-ring grid size-[84px] shrink-0 place-items-center rounded-full"
 				style={
 					{
 						"--ring-value": `${score}%`,
-						"--ring-color": score >= 80 ? "var(--accent)" : "var(--warn)",
+						"--ring-color": atsVerdict(report) === "clean" ? "var(--accent)" : "var(--warn)",
 					} as CSSProperties
 				}
 			>
-				<span className="grid size-[70px] place-items-center rounded-full bg-surface font-display text-[26px] font-medium">
+				<span className="grid size-[70px] place-items-center rounded-full bg-surface font-display text-[26px]">
 					<RollingNumber value={score} />
 				</span>
 			</div>
 
 			<div className="grid min-w-0 gap-1">
-				<strong className="text-[15px] font-semibold">{getVerdict(score)}</strong>
+				<strong className="text-[15px] font-semibold">{getVerdict(report)}</strong>
 				<span className="text-[13px] leading-[19px] text-ink-2">
 					<Trans>
-						{passedRules} of {totalRules} checks pass.
+						{ph({ passedRules: i18n.number(passedRules) })} of {ph({ totalRules: i18n.number(totalRules) })} checks
+						pass.
 					</Trans>{" "}
 					{open > 0 ? (
 						<Plural value={open} one="# thing to review." other="# things to review." />
@@ -138,6 +148,8 @@ function IssuesTab({ check }: { check: CheckResult }) {
 	const selected = useEditorStore((state) => state.checkIssue);
 	const { restoreIgnored } = useCheckActions();
 	const locked = useIsResumeLocked();
+	// One obvious next step: the highest-ranked open issue that applies a fix gets the only filled button.
+	const leadingFix = issues.find((issue) => issue.fix.kind === "apply")?.key;
 
 	return (
 		<div className="grid gap-2.5">
@@ -153,7 +165,13 @@ function IssuesTab({ check }: { check: CheckResult }) {
 			) : (
 				<ol aria-label={t`Issues`} className="grid gap-2.5">
 					{issues.map((issue) => (
-						<IssueCard key={issue.key} issue={issue} selected={selected === issue.key} locked={locked} />
+						<IssueCard
+							key={issue.key}
+							issue={issue}
+							selected={selected === issue.key}
+							locked={locked}
+							primary={issue.key === leadingFix}
+						/>
 					))}
 				</ol>
 			)}
@@ -184,10 +202,10 @@ function IssuesTab({ check }: { check: CheckResult }) {
 	);
 }
 
-type IssueCardProps = { issue: CheckIssue; selected: boolean; locked: boolean };
+type IssueCardProps = { issue: CheckIssue; selected: boolean; locked: boolean; primary: boolean };
 
 /** A numbered card: category, title, a plain explanation, the fix, Show on page and Ignore (or Keep). */
-function IssueCard({ issue, selected, locked }: IssueCardProps) {
+function IssueCard({ issue, selected, locked, primary }: IssueCardProps) {
 	const { fix, ignore, showOnPage } = useCheckActions();
 	const titleId = `issue-${issue.number}-title`;
 	const applies = issue.fix.kind === "apply";
@@ -207,15 +225,15 @@ function IssueCard({ issue, selected, locked }: IssueCardProps) {
 			<div className="flex items-start gap-2.5">
 				<span
 					aria-hidden="true"
-					className="grid size-[22px] shrink-0 place-items-center rounded-sm bg-warn text-[12px] font-bold text-[oklch(0.22_0.03_80)]"
+					className="grid size-[22px] shrink-0 place-items-center rounded-sm bg-warn text-xs font-semibold text-warn-ink"
 				>
-					{issue.number}
+					{i18n.number(issue.number)}
 				</span>
 				<div className="grid min-w-0 gap-[3px]">
-					<span className="font-mono text-xs text-ink-3">{getCategoryName(issue.category)}</span>
+					<span className="text-xs font-semibold text-ink-3">{getCategoryName(issue.category)}</span>
 					<h3 id={titleId} className="text-sm leading-5 font-semibold">
 						<span className="sr-only">
-							<Trans>Issue {issue.number}:</Trans>{" "}
+							<Trans>Issue {i18n.number(issue.number)}:</Trans>{" "}
 						</span>
 						{issue.title}
 					</h3>
@@ -227,7 +245,7 @@ function IssueCard({ issue, selected, locked }: IssueCardProps) {
 			<div className="ms-8 flex flex-wrap gap-1.5 [&_button]:max-sm:h-10 [&_button]:max-sm:px-3.5 [&_button]:max-sm:text-sm">
 				<Button
 					size="sm"
-					variant={applies ? "primary" : "secondary"}
+					variant={primary && applies ? "primary" : "secondary"}
 					disabled={locked && applies}
 					onClick={(event) => {
 						event.stopPropagation();
@@ -305,7 +323,7 @@ function CategoryRows({ report }: { report: AtsReport }) {
 										<Plural value={failing} one="# to review" other="# to review" />
 									) : (
 										<Trans>
-											{passed} of {total}
+											{ph({ passed: i18n.number(passed) })} of {ph({ total: i18n.number(total) })}
 										</Trans>
 									)}
 								</span>
@@ -384,7 +402,7 @@ function DeepCheck({ data }: { data: ResumeData }) {
 				open={reportOpen && report !== null}
 				onOpenChange={(open) => useEditorStore.setState({ exportReportOpen: open })}
 			>
-				<DialogContent className="max-h-[85svh] overflow-y-auto sm:max-w-2xl">
+				<DialogContent closeLabel={t`Close`} className="max-h-[85svh] overflow-y-auto sm:max-w-2xl">
 					<DialogHeader>
 						<DialogTitle>
 							<Trans>The exported PDF</Trans>

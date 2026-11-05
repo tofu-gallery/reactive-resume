@@ -22,7 +22,7 @@ import { HOST } from "./primitives";
 import { flattenAlpha, flattenStyle, toFormeStyle, toPoints, WHITE } from "./style";
 
 // A4 in points, the size used for `vw`/`vh` until a page says otherwise.
-const DEFAULT_PAGE = { width: 595.28, height: 841.89 };
+export const DEFAULT_PAGE = { width: 595.28, height: 841.89 };
 /** Free-form pages start this tall; `renderResume` measures the content and converts again at its height. */
 export const FREE_FORM_MEASURE_HEIGHT = 14_400;
 
@@ -56,6 +56,7 @@ type Context = {
 	rowParent: boolean;
 	keepNestedRowsWhole: boolean;
 	breakBeforeNodes: ReadonlySet<string>;
+	presenceAheadNodes: ReadonlyMap<string, number>;
 	/** The parent's padding: Forme places absolute boxes inside it, react-pdf over it. */
 	parentPadding: Edges;
 	/** The opaque colour behind the element being converted (see `flattenAlpha`). */
@@ -67,7 +68,7 @@ type Context = {
 	warnings: Set<string>;
 	sourceMap: WeakMap<object, SourceLocation>;
 	/** Counts list items in document order and names those that start a page (see `LIST_ROLE`). */
-	lists: { count: number; breakBefore: ReadonlySet<number> };
+	lists: { count: number; breakBefore: ReadonlySet<number>; split: ReadonlySet<number> };
 	/** The list item being converted, and what part of it. */
 	listItem?: { index: number; role: (typeof LIST_ROLE)[keyof typeof LIST_ROLE] } | undefined;
 };
@@ -82,7 +83,7 @@ const PADDING_KEYS = [
 	"paddingVertical",
 ] as const;
 
-const pageDimensions = (size: PageSize | undefined, freeFormHeight = FREE_FORM_MEASURE_HEIGHT) => {
+export const pageDimensions = (size: PageSize | undefined, freeFormHeight = FREE_FORM_MEASURE_HEIGHT) => {
 	if (size === "LETTER") return { width: 612, height: 792 };
 	if (size && typeof size === "object") return { width: size.width, height: size.height ?? freeFormHeight };
 	return DEFAULT_PAGE;
@@ -460,7 +461,17 @@ function barAsBorder(spread: { style: FormeStyle; children: ReactNode[] }): {
 }
 
 function convertChildren(children: HostNode[], context: Context): ReactNode[] {
-	return children.map((child, index) => convertNode(child, context, index));
+	let ahead = 0;
+	return children.map((child, index) => {
+		let element = convertNode(child, context, index);
+		if (ahead && element) {
+			element = createElement(FormeView, { key: index, style: { marginTop: -ahead } }, element);
+			ahead = 0;
+		}
+		const key = "props" in child ? child.props[RESUME_NODE_PROP] : undefined;
+		if (typeof key === "string") ahead = context.presenceAheadNodes.get(key) ?? ahead;
+		return element;
+	});
 }
 
 function convertNode(node: HostNode, parentContext: Context, key: number): ReactNode {
@@ -491,6 +502,9 @@ function convertNode(node: HostNode, parentContext: Context, key: number): React
 			);
 			let children = spread.children;
 			const viewStyle = flowStyle(props, spread.style);
+			// A flow constraint stays valid when earlier items move; unlike a forced break it cannot go stale.
+			if (props["data-resume-list-item"] && context.listItem && !context.lists.split.has(context.listItem.index))
+				viewStyle.wrap = false;
 			const nodeKey = props[RESUME_NODE_PROP];
 			if (typeof nodeKey === "string" && context.breakBeforeNodes.has(nodeKey)) viewStyle.breakBefore = true;
 			if (context.listItem?.role === LIST_ROLE.item && context.lists.breakBefore.has(context.listItem.index))
@@ -515,11 +529,12 @@ function convertNode(node: HostNode, parentContext: Context, key: number): React
 			if (
 				context.keepNestedRowsWhole &&
 				context.insideRow &&
+				!props["data-resume-list-item"] &&
 				(style.flexDirection === "row" || style.flexDirection === "row-reverse")
 			)
 				viewStyle.wrap = false;
 			const bordered = insetBorder(viewStyle, children);
-			const element = createElement(
+			let element = createElement(
 				FormeView,
 				{
 					key,
@@ -528,6 +543,12 @@ function convertNode(node: HostNode, parentContext: Context, key: number): React
 				...bordered.children,
 			);
 			tagNode(element, props, context);
+			const ahead = typeof nodeKey === "string" ? context.presenceAheadNodes.get(nodeKey) : undefined;
+			if (ahead) {
+				// Transparent reserved space participates in pagination, then the following content occupies it.
+				element = createElement(FormeView, { key, style: { wrap: false, paddingBottom: ahead } }, element);
+				tagNode(element, props, context);
+			}
 			if (props.fixed !== true)
 				return strutMinWidth(shrinkToFit(placePercentOffset(element, style, context), context), context);
 			// A repeated view nested in a column stays with the column: its fragments already paint on each page.
@@ -959,8 +980,12 @@ export type ConvertOptions = {
 	keepNestedRowsWhole?: boolean;
 	/** List items (by index, see `LIST_ROLE`) that start a new page, so their marker stays with their first line. */
 	breakBeforeListItems?: ReadonlySet<number>;
+	/** Large items remain splittable for page fill; brief marker/content rows paginate as a unit. */
+	splitListItems?: ReadonlySet<number>;
 	/** Unplaced sections or items that need an explicit page break on a render retry. */
 	breakBeforeNodes?: ReadonlySet<string>;
+	/** Keep an entry header with its measured first body fragment, without keeping its whole entry together. */
+	presenceAheadNodes?: ReadonlyMap<string, number>;
 	/** Measured heights of free-form pages, by page index; an unmeasured one is `FREE_FORM_MEASURE_HEIGHT` tall. */
 	freeFormHeights?: readonly (number | undefined)[] | undefined;
 };
@@ -971,7 +996,9 @@ export function toFormeDocument(
 		images = new Map(),
 		keepNestedRowsWhole = false,
 		breakBeforeListItems = new Set(),
+		splitListItems = new Set(),
 		breakBeforeNodes = new Set(),
+		presenceAheadNodes = new Map(),
 		freeFormHeights = [],
 	}: ConvertOptions = {},
 ): ConvertedDocument {
@@ -988,6 +1015,7 @@ export function toFormeDocument(
 		rowParent: false,
 		keepNestedRowsWhole,
 		breakBeforeNodes,
+		presenceAheadNodes,
 		images,
 		backdrop: WHITE,
 		pageMargin: undefined,
@@ -1000,7 +1028,7 @@ export function toFormeDocument(
 		},
 		warnings: new Set(),
 		sourceMap: new WeakMap(),
-		lists: { count: 0, breakBefore: breakBeforeListItems },
+		lists: { count: 0, breakBefore: breakBeforeListItems, split: splitListItems },
 	};
 
 	const { props } = root;

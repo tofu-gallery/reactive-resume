@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AI_PROVIDER_DEFAULT_BASE_URLS } from "./defaults";
 
 const AI_PROVIDERS = [
 	"openai",
@@ -23,24 +24,32 @@ export type AIProvider = (typeof AI_PROVIDERS)[number];
 
 export const aiProviderSchema = z.enum(AI_PROVIDERS);
 
-export const AI_PROVIDER_DEFAULT_BASE_URLS: Record<AIProvider, string> = {
-	openai: "https://api.openai.com/v1",
-	anthropic: "https://api.anthropic.com/v1",
-	gemini: "https://generativelanguage.googleapis.com/v1beta",
-	"vercel-ai-gateway": "https://ai-gateway.vercel.sh/v3/ai",
-	openrouter: "https://openrouter.ai/api/v1",
-	mistral: "https://api.mistral.ai/v1",
-	cohere: "https://api.cohere.com/v2",
-	xai: "https://api.x.ai/v1",
-	groq: "https://api.groq.com/openai/v1",
-	deepseek: "https://api.deepseek.com/v1",
-	togetherai: "https://api.together.xyz/v1",
-	fireworks: "https://api.fireworks.ai/inference/v1",
-	cerebras: "https://api.cerebras.ai/v1",
-	perplexity: "https://api.perplexity.ai",
-	ollama: "https://ollama.com/api",
-	"openai-compatible": "",
-};
+export { AI_PROVIDER_DEFAULT_BASE_URLS };
+
+function normalizeDirectBaseUrl(baseURL: string) {
+	try {
+		const parsed = new URL(baseURL);
+		if (parsed.search || parsed.hash || parsed.username || parsed.password) return null;
+		return parsed.toString().replace(/\/+$/, "");
+	} catch {
+		return null;
+	}
+}
+
+/** Provider-native capabilities belong to the official endpoint, not a compatible proxy. */
+export function isDirectAiProvider(input: { provider: AIProvider; baseURL?: string | null }) {
+	if (!input.baseURL?.trim()) return true;
+	const baseURL = normalizeDirectBaseUrl(input.baseURL);
+	return baseURL !== null && baseURL === normalizeDirectBaseUrl(AI_PROVIDER_DEFAULT_BASE_URLS[input.provider]);
+}
+
+/** The installed SDK exposes native search for these direct providers; individual models can still refuse it. */
+export function supportsNativeWebSearch(input: { provider: AIProvider; baseURL?: string | null }) {
+	return (
+		(input.provider === "openai" || input.provider === "anthropic" || input.provider === "gemini") &&
+		isDirectAiProvider(input)
+	);
+}
 
 // Brand names, used when a message has to name the provider outside a translated UI string. Every
 // such message opens with this value, so the generic fallback is capitalised to match.
@@ -87,3 +96,12 @@ export const AI_VOICE_MODELS: Partial<
 		speech: ["openai/tts-1", "google/gemini-3.8-flash-tts"],
 	},
 };
+
+/** Explicit manual/web-only approval is different from an older client's absent approval header. */
+export const NO_AI_DESTINATION = "none";
+export type AiVoiceOperation = { kind: "speech" | "transcription"; model: string };
+
+/** Opaque provider-owned recipient identity, plus the concrete voice operation when used. */
+export function aiDestination(provider: { id: string; recipientVersion: string }, voice?: AiVoiceOperation) {
+	return JSON.stringify([provider.id, provider.recipientVersion, ...(voice ? [voice] : [])]);
+}

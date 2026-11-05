@@ -1,15 +1,21 @@
-import type { DocumentSummary } from "../../dto/documents";
+import type { EditableFields } from "../../dto/application";
+import type { DocumentFilters, DocumentSummary } from "../../dto/documents";
+import type { DbOrTx } from "@reactive-resume/db/client";
 import { ORPCError } from "@orpc/client";
-import { and, asc, count, eq, isNotNull, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, count, eq, gte, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { db } from "@reactive-resume/db/client";
 import * as schema from "@reactive-resume/db/schema";
-import { applicationService } from "../applications/service";
+import { activeApplications } from "../applications/access";
+import { applicationService, insertApplication } from "../applications/service";
 import { coverLetterService } from "../cover-letters/service";
-import { resumeService } from "../resume/service";
-import { lockUser } from "./ownership";
+import { resumeService, writeResumeFields } from "../resume/service";
+import { followNameWithSlug } from "../resume/slugs";
+import { listDocumentPage, listDocuments } from "./listing";
+import { isRetriedCreate, lockUser, recordCreateRequest } from "./ownership";
 
 type DocumentType = DocumentSummary["type"];
 type DocumentRef = { userId: string; type: DocumentType; id: string };
+type DocumentSelection = Pick<DocumentRef, "type" | "id">;
 
 // Trash keeps documents this long before deleting them for good.
 const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -26,8 +32,8 @@ function suggestCopyName(sourceName: string, company?: string) {
 	return (company ? `${base} — ${company}` : `${base} (copy)`).slice(0, 100);
 }
 
-async function assertOwnedApplication(userId: string, applicationId: string) {
-	const [application] = await db
+async function assertOwnedApplication(userId: string, applicationId: string, reader: DbOrTx = db) {
+	const [application] = await reader
 		.select({
 			id: schema.application.id,
 			company: schema.application.company,
@@ -36,7 +42,7 @@ async function assertOwnedApplication(userId: string, applicationId: string) {
 			sentResumeVersionId: schema.application.sentResumeVersionId,
 		})
 		.from(schema.application)
-		.where(and(eq(schema.application.id, applicationId), eq(schema.application.userId, userId)));
+		.where(and(eq(schema.application.id, applicationId), activeApplications(userId)));
 
 	if (!application)
 		throw new ORPCError("NOT_FOUND", { message: "This application no longer exists. Choose another application." });
@@ -56,6 +62,10 @@ type LetterChanges = Partial<typeof schema.coverLetter.$inferInsert>;
 async function update(ref: DocumentRef, resume: ResumeChanges, letter: LetterChanges = resume as LetterChanges) {
 	await db.transaction(async (tx) => {
 		await lockUser(tx, ref.userId);
+		if (resume.applicationId) await assertOwnedApplication(ref.userId, resume.applicationId, tx);
+		// A private resume's app-made address follows a new name, like a rename in the editor.
+		if (ref.type === "resume" && resume.name !== undefined)
+			await followNameWithSlug(tx, { userId: ref.userId, resumeId: ref.id, name: resume.name });
 		const rows =
 			ref.type === "resume"
 				? await tx.update(schema.resume).set(resume).where(owned(ref)).returning({ id: schema.resume.id })
@@ -105,6 +115,28 @@ async function deleteForGood(ref: DocumentRef, trashedBefore?: Date) {
 			.delete(schema.coverLetter)
 			.where(and(owned(ref), trashedBefore ? lt(schema.coverLetter.trashedAt, trashedBefore) : undefined));
 	});
+}
+
+/**
+ * Deletes a batch of the account's trashed letters in one statement. Selected IDs narrow it; `trashedBefore` keeps a
+ * letter restored by another request. Active letters and other accounts' letters are never touched.
+ */
+async function deleteLettersForGood(input: { userId: string; ids?: readonly string[]; trashedBefore?: Date }) {
+	const rows = await db.transaction(async (tx) => {
+		await lockUser(tx, input.userId);
+		return tx
+			.delete(schema.coverLetter)
+			.where(
+				and(
+					eq(schema.coverLetter.userId, input.userId),
+					isNotNull(schema.coverLetter.trashedAt),
+					input.ids ? inArray(schema.coverLetter.id, [...input.ids]) : undefined,
+					input.trashedBefore ? lt(schema.coverLetter.trashedAt, input.trashedBefore) : undefined,
+				),
+			)
+			.returning({ id: schema.coverLetter.id });
+	});
+	return rows.length;
 }
 
 /** One account's documents trashed more than 30 days ago go for good; runs when the account lists its documents. */
@@ -158,74 +190,17 @@ export const documentsService = {
 	purgeExpired,
 	purgeExpiredTrash,
 
-	/** Every live resume and letter (or everything in Trash), newest edit first. The app filters and sorts them. */
-	list: async (input: { userId: string; trashed: boolean }): Promise<DocumentSummary[]> => {
-		// Trash never shows a document past its 30 days, whether or not the scheduler has reached it yet.
-		if (input.trashed)
+	list: async (
+		input: DocumentFilters & { userId: string; limit?: number | undefined; offset?: number | undefined },
+	) => {
+		// Legacy complete Trash reads retain their cleanup side effect. Bounded reads leave cleanup to the scheduler.
+		if (input.trashed && input.limit === undefined && input.offset === undefined)
 			await purgeExpired(input.userId).catch((error: unknown) =>
 				console.error("[documents] Trash purge failed", error),
 			);
-		const [resumes, letters] = await Promise.all([
-			db
-				.select({
-					id: schema.resume.id,
-					name: schema.resume.name,
-					tags: schema.resume.tags,
-					isLocked: schema.resume.isLocked,
-					isPublic: schema.resume.isPublic,
-					slug: schema.resume.slug,
-					trashedAt: schema.resume.trashedAt,
-					createdAt: schema.resume.createdAt,
-					updatedAt: schema.resume.updatedAt,
-					applicationId: schema.application.id,
-					company: schema.application.company,
-					role: schema.application.role,
-				})
-				.from(schema.resume)
-				.leftJoin(schema.application, eq(schema.resume.applicationId, schema.application.id))
-				.where(
-					and(
-						eq(schema.resume.userId, input.userId),
-						input.trashed ? isNotNull(schema.resume.trashedAt) : isNull(schema.resume.trashedAt),
-					),
-				),
-			db
-				.select({
-					id: schema.coverLetter.id,
-					name: schema.coverLetter.name,
-					tags: schema.coverLetter.tags,
-					isLocked: schema.coverLetter.isLocked,
-					isPublic: sql<boolean>`false`,
-					slug: sql<string | null>`null`,
-					trashedAt: schema.coverLetter.trashedAt,
-					createdAt: schema.coverLetter.createdAt,
-					updatedAt: schema.coverLetter.updatedAt,
-					applicationId: schema.application.id,
-					company: schema.application.company,
-					role: schema.application.role,
-				})
-				.from(schema.coverLetter)
-				.leftJoin(schema.application, eq(schema.coverLetter.sourceApplicationId, schema.application.id))
-				.where(
-					and(
-						eq(schema.coverLetter.userId, input.userId),
-						input.trashed ? isNotNull(schema.coverLetter.trashedAt) : isNull(schema.coverLetter.trashedAt),
-					),
-				),
-		]);
-
-		const toSummary =
-			(type: DocumentType) =>
-			({ applicationId, company, role, ...row }: (typeof resumes | typeof letters)[number]): DocumentSummary => ({
-				type,
-				...row,
-				application: applicationId ? { id: applicationId, company: company ?? "", role: role ?? "" } : null,
-			});
-
-		return [...resumes.map(toSummary("resume")), ...letters.map(toSummary("letter"))].sort(
-			(a, b) => b.updatedAt.getTime() - a.updatedAt.getTime(),
-		);
+		return listDocuments(input);
 	},
+	page: (input: DocumentFilters & { userId: string; limit: number; offset: number }) => listDocumentPage(input),
 
 	counts: async (input: { userId: string }) => {
 		const [[resumes], [letters], [trashedResumes], [trashedLetters]] = await Promise.all([
@@ -240,11 +215,21 @@ export const documentsService = {
 			db
 				.select({ total: count() })
 				.from(schema.resume)
-				.where(and(eq(schema.resume.userId, input.userId), isNotNull(schema.resume.trashedAt))),
+				.where(
+					and(
+						eq(schema.resume.userId, input.userId),
+						gte(schema.resume.trashedAt, new Date(Date.now() - TRASH_RETENTION_MS)),
+					),
+				),
 			db
 				.select({ total: count() })
 				.from(schema.coverLetter)
-				.where(and(eq(schema.coverLetter.userId, input.userId), isNotNull(schema.coverLetter.trashedAt))),
+				.where(
+					and(
+						eq(schema.coverLetter.userId, input.userId),
+						gte(schema.coverLetter.trashedAt, new Date(Date.now() - TRASH_RETENTION_MS)),
+					),
+				),
 		]);
 
 		return {
@@ -265,19 +250,35 @@ export const documentsService = {
 		await update(input, { tags: [...new Set(input.tags)] });
 	},
 
-	setLocked: (input: DocumentRef & { isLocked: boolean }) =>
-		input.type === "resume"
-			? resumeService.setLocked({ id: input.id, userId: input.userId, isLocked: input.isLocked })
-			: update(input, { isLocked: input.isLocked }),
+	setLocked: async (input: DocumentRef & { isLocked: boolean }) => {
+		if (input.type === "resume")
+			await resumeService.setLocked({ id: input.id, userId: input.userId, isLocked: input.isLocked });
+		else await update(input, { isLocked: input.isLocked });
+	},
 
-	linkApplication: async (input: DocumentRef & { applicationId: string | null }) => {
+	linkApplication: async (
+		input: DocumentRef & { applicationId: string | null; expectedUpdatedAt?: Date | undefined },
+	) => {
 		await assertUnlocked(input);
 		const application = input.applicationId ? await assertOwnedApplication(input.userId, input.applicationId) : null;
 		if (input.type === "resume") {
-			await update(input, { applicationId: input.applicationId });
+			// Answers with the resume's new revision, so the open editor's next autosave builds on it. The account lock
+			// comes first, then the resume, then the application: the order every document and application write takes.
+			const resume = await writeResumeFields({
+				id: input.id,
+				userId: input.userId,
+				set: { applicationId: input.applicationId },
+				unlockedOnly: true,
+				expectedUpdatedAt: input.expectedUpdatedAt,
+				mutation: "update",
+				before: async (tx) => {
+					await lockUser(tx, input.userId);
+					if (input.applicationId) await assertOwnedApplication(input.userId, input.applicationId, tx);
+				},
+			});
 			if (application && !application.sentResumeVersionId && (!application.resumeId || application.status === "saved"))
 				await applicationService.update({ userId: input.userId, id: application.id, resumeId: input.id });
-			return;
+			return resume;
 		}
 
 		const letter = await coverLetterService.getById({ id: input.id, userId: input.userId });
@@ -287,6 +288,7 @@ export const documentsService = {
 			expectedRevision: letter.revision,
 			applicationId: input.applicationId,
 		});
+		return null;
 	},
 
 	/** Undoable: Trash hides the document and stops its public link; Restore brings it back intact. */
@@ -297,35 +299,184 @@ export const documentsService = {
 
 	restore: (input: DocumentRef) => update(input, { trashedAt: null }),
 
+	/**
+	 * Restores the selected loaded documents in one transaction. Only this account's documents that are still in Trash
+	 * are touched; a document restored or deleted by another request is skipped instead of failing the batch.
+	 */
+	restoreMany: async (input: { userId: string; documents: DocumentSelection[] }) => {
+		const resumeIds = [...new Set(input.documents.filter(({ type }) => type === "resume").map(({ id }) => id))];
+		const letterIds = [...new Set(input.documents.filter(({ type }) => type === "letter").map(({ id }) => id))];
+		const restored = await db.transaction(async (tx) => {
+			await lockUser(tx, input.userId);
+			const resumes =
+				resumeIds.length === 0
+					? []
+					: await tx
+							.update(schema.resume)
+							.set({ trashedAt: null })
+							.where(
+								and(
+									eq(schema.resume.userId, input.userId),
+									inArray(schema.resume.id, resumeIds),
+									isNotNull(schema.resume.trashedAt),
+								),
+							)
+							.returning({ id: schema.resume.id });
+			const letters =
+				letterIds.length === 0
+					? []
+					: await tx
+							.update(schema.coverLetter)
+							.set({ trashedAt: null, revision: sql`${schema.coverLetter.revision} + 1` })
+							.where(
+								and(
+									eq(schema.coverLetter.userId, input.userId),
+									inArray(schema.coverLetter.id, letterIds),
+									isNotNull(schema.coverLetter.trashedAt),
+								),
+							)
+							.returning({ id: schema.coverLetter.id });
+			return resumes.length + letters.length;
+		});
+		return { restored };
+	},
+
+	/**
+	 * "Delete permanently" for the selected loaded documents. Only this account's documents still in Trash when the
+	 * request runs are deleted, so a concurrent restore wins. Anything else counts as skipped rather than failing.
+	 */
+	purgeMany: async (input: { userId: string; documents: DocumentSelection[] }) => {
+		const cutoff = new Date();
+		const resumeIds = [...new Set(input.documents.filter(({ type }) => type === "resume").map(({ id }) => id))];
+		const letterIds = [...new Set(input.documents.filter(({ type }) => type === "letter").map(({ id }) => id))];
+		const [resumes, letters] = await Promise.all([
+			resumeIds.length === 0
+				? 0
+				: resumeService.deleteTrashedMany({ userId: input.userId, ids: resumeIds, trashedBefore: cutoff }),
+			letterIds.length === 0
+				? 0
+				: deleteLettersForGood({ userId: input.userId, ids: letterIds, trashedBefore: cutoff }),
+		]);
+		const deleted = resumes + letters;
+		return { deleted, skipped: input.documents.length - deleted };
+	},
+
+	/**
+	 * Empty Trash: deletes every one of this account's trashed documents server-side, not the IDs the client has
+	 * loaded. Active documents and other accounts' Trash are untouched, and a concurrent restore wins.
+	 */
+	emptyTrash: async (input: { userId: string }) => {
+		const cutoff = new Date();
+		const [resumes, letters] = await Promise.all([
+			resumeService.deleteTrashedMany({ userId: input.userId, trashedBefore: cutoff }),
+			deleteLettersForGood({ userId: input.userId, trashedBefore: cutoff }),
+		]);
+		return { deleted: resumes + letters };
+	},
+
 	/** "Delete now…": only for documents already in Trash. */
 	purge: async (input: DocumentRef) => {
 		const state = await readState(input);
 		if (!state.trashedAt) throw new ORPCError("BAD_REQUEST", { message: "Move the document to Trash first." });
-		await deleteForGood(input);
+		// A concurrent restore wins; Trash deletes don't need a lock because deleting is the point of being there.
+		await deleteForGood(input, new Date());
 	},
 
-	/** Duplicates a resume for a job, selecting the working copy while preserving submitted versions. */
+	/**
+	 * Duplicates a resume for a job, selecting the working copy while preserving submitted versions. A new job given
+	 * with it is saved in the copy's transaction, so there is never a job without its copy or a copy without its job.
+	 * With `newId`, a retry (a lost response, a second press, a remounted screen) returns the copy already made.
+	 */
 	copyForJob: async (input: {
 		userId: string;
 		resumeId: string;
 		applicationId?: string | undefined;
+		application?: (EditableFields & { company: string; role: string }) | undefined;
 		name?: string | undefined;
+		newId?: string | undefined;
 	}) => {
-		const source = await resumeService.getById({ id: input.resumeId, userId: input.userId });
+		if (input.applicationId && input.application)
+			throw new ORPCError("BAD_REQUEST", { message: "Give an existing job or a new one, not both." });
+
 		const application = input.applicationId ? await assertOwnedApplication(input.userId, input.applicationId) : null;
+		const { userId, resumeId, applicationId, application: newJob, name, newId } = input;
+		// What this copy is for: a retry must ask for the same, so a reused ID never returns or links another resume.
+		const created = newId && {
+			table: "resume" as const,
+			id: newId,
+			userId,
+			request: { operation: "documents.copyForJob", resumeId, applicationId, application: newJob, name },
+		};
+		let retried = Boolean(created && (await isRetriedCreate(db, created)));
+		let id = retried && created ? created.id : undefined;
+		if (!id) {
+			const source = await resumeService.getById({ id: resumeId, userId });
+			try {
+				id = await resumeService.create({
+					...(created ? { id: created.id } : {}),
+					userId,
+					name: name ?? suggestCopyName(source.name, application?.company ?? newJob?.company),
+					tags: source.tags,
+					locale: source.data.metadata.page.locale as never,
+					data: source.data,
+					aiOperationIds: source.aiOperationIds,
+					...(created || newJob
+						? {
+								inTransaction: async (tx, copyId) => {
+									if (created) await recordCreateRequest(tx, created);
+									if (!newJob) return;
+									const jobId = await insertApplication(tx, { userId, fields: { ...newJob, resumeId: copyId } });
+									await tx.update(schema.resume).set({ applicationId: jobId }).where(eq(schema.resume.id, copyId));
+									if (created)
+										await tx
+											.update(schema.createRequest)
+											.set({ applicationId: jobId })
+											.where(eq(schema.createRequest.id, copyId));
+								},
+							}
+						: {}),
+				});
+			} catch (error) {
+				// Two presses at once: the first made the copy, the second returns it.
+				if (!created || !(await isRetriedCreate(db, created))) throw error;
+				id = created.id;
+				retried = true;
+			}
+		}
 
-		const id = await resumeService.create({
-			userId: input.userId,
-			name: input.name ?? suggestCopyName(source.name, application?.company),
-			tags: source.tags,
-			locale: source.data.metadata.page.locale as never,
-			data: source.data,
-		});
+		const [copy] = retried
+			? await db
+					.select({ applicationId: schema.resume.applicationId })
+					.from(schema.resume)
+					.where(eq(schema.resume.id, id))
+			: [];
+		// The job saved with this copy is part of what the request made: if it has since been deleted or unlinked, a retry
+		// is refused rather than saving the job again.
+		if (retried && newJob) {
+			const [receipt] = await db
+				.select({ applicationId: schema.createRequest.applicationId })
+				.from(schema.createRequest)
+				.where(and(eq(schema.createRequest.id, id), eq(schema.createRequest.userId, userId)));
+			const [liveJob] = receipt?.applicationId
+				? await db
+						.select({ id: schema.application.id })
+						.from(schema.application)
+						.where(and(eq(schema.application.id, receipt.applicationId), activeApplications(userId)))
+				: [];
+			if (!liveJob || !receipt?.applicationId || receipt.applicationId !== copy?.applicationId)
+				throw new ORPCError("CONFLICT", {
+					message: "The job saved with this copy has since been deleted, unlinked or changed.",
+				});
+		}
 
+		// A retry completes only links the first attempt didn't finish; a link the user has changed since stays.
 		if (application) {
-			await update({ userId: input.userId, type: "resume", id }, { applicationId: application.id });
-			if (!application.sentResumeVersionId && (!application.resumeId || application.status === "saved"))
-				await applicationService.update({ userId: input.userId, id: application.id, resumeId: id });
+			const jobUnchanged = !application.resumeId || application.resumeId === resumeId;
+			if (!retried || (!copy?.applicationId && (jobUnchanged || application.resumeId === id)))
+				await update({ userId, type: "resume", id }, { applicationId: application.id });
+			const linkable = !application.sentResumeVersionId && (!application.resumeId || application.status === "saved");
+			if (linkable && application.resumeId !== id && (!retried || jobUnchanged))
+				await applicationService.update({ userId, id: application.id, resumeId: id });
 		}
 
 		return id;

@@ -1,5 +1,6 @@
 import z from "zod";
 import { COVER_LETTER_VERSION_KINDS } from "@reactive-resume/db/schema";
+import { aiOperationIdsSchema, aiUsageSummarySchema } from "@reactive-resume/schema/ai-usage";
 import {
 	coverLetterContentSchema,
 	coverLetterDocumentSchema,
@@ -9,6 +10,7 @@ import {
 } from "@reactive-resume/schema/cover-letter/data";
 import { templateSchema } from "@reactive-resume/schema/templates";
 import { paginationShape } from "../pagination";
+import { proposalApplicationsSchema, proposalSafetySchema } from "./proposals";
 
 const idSchema = z.object({ id: z.string().min(1) });
 const revisionSchema = idSchema.extend({ expectedRevision: z.number().int().min(1) });
@@ -32,7 +34,9 @@ const letterVersionSummarySchema = z.object({
 });
 
 const letterVersionSchema = letterVersionSummarySchema.extend({
+	aiUsage: aiUsageSummarySchema.nullable().optional(),
 	data: z.object({
+		aiOperationIds: aiOperationIdsSchema.optional(),
 		name: z.string(),
 		recipient: z.string(),
 		content: z.string(),
@@ -47,6 +51,7 @@ const letterVersionSchema = letterVersionSummarySchema.extend({
 });
 const versionRefSchema = idSchema.extend({ versionId: z.string().min(1) });
 const versionNameSchema = z.string().trim().min(1).max(100);
+export const coverLetterDraftChunkSchema = z.union([z.string(), z.object({ aiOperationId: z.string().min(1) })]);
 
 export const coverLetterDto = {
 	list: {
@@ -68,6 +73,13 @@ export const coverLetterDto = {
 			content: editableSchema.shape.content.default(""),
 			resumeId: z.string().min(1).optional().describe("The resume it goes with; its details and design are linked."),
 			applicationId: z.string().min(1).optional().describe("The job it's for; it fills the recipient."),
+			sourceLetterId: z
+				.string()
+				.min(1)
+				.optional()
+				.describe(
+					"An earlier owned letter to start from. Its body is copied; the new letter still takes its recipient, date, resume and application link from this request, and keeps its own version history.",
+				),
 			template: templateSchema.optional(),
 			layout: coverLetterLayoutSchema
 				.optional()
@@ -80,19 +92,51 @@ export const coverLetterDto = {
 	},
 	update: {
 		input: revisionSchema.extend(editableSchema.partial().shape).extend({
+			aiOperationIds: aiOperationIdsSchema.optional(),
 			template: templateSchema.optional().describe("Sets the letter's own template, which unlinks its design."),
 			metadata: coverLetterStyleSchema.shape.metadata
 				.pick({ typography: true, design: true, page: true })
 				.partial()
 				.optional()
 				.describe("Sets the letter's own type, colors and page settings, which unlinks its design."),
+			locale: z
+				.string()
+				.min(2)
+				.max(35)
+				.optional()
+				.describe("The letter's language for its greeting, sign-off and dates; keeps its design link."),
 			recipientName: recipientFieldsSchema.shape.recipientName.unwrap().optional(),
 			recipientCompany: recipientFieldsSchema.shape.recipientCompany.unwrap().optional(),
 			letterDate: recipientFieldsSchema.shape.letterDate.unwrap().optional(),
 			resumeId: z.string().min(1).nullable().optional().describe("The resume the letter goes with."),
 			applicationId: z.string().min(1).nullable().optional().describe("The job the letter is for."),
+			sender: coverLetterStyleSchema.shape.basics
+				.extend({
+					name: coverLetterStyleSchema.shape.basics.shape.name.describe("The letter sender's full name."),
+					headline: coverLetterStyleSchema.shape.basics.shape.headline.describe("The letter sender's headline."),
+					email: coverLetterStyleSchema.shape.basics.shape.email.describe("The letter sender's email address."),
+					phone: coverLetterStyleSchema.shape.basics.shape.phone.describe("The letter sender's phone number."),
+					location: coverLetterStyleSchema.shape.basics.shape.location.describe("The letter sender's location."),
+					website: coverLetterStyleSchema.shape.basics.shape.website.describe("The letter sender's website."),
+					customFields: coverLetterStyleSchema.shape.basics.shape.customFields.describe(
+						"The letter sender's other contact details and profile links; replaces the whole list.",
+					),
+					picture: coverLetterStyleSchema.shape.picture
+						.pick({ hidden: true })
+						.extend({
+							hidden: coverLetterStyleSchema.shape.picture.shape.hidden.describe(
+								"Whether to hide the copied photo on the letter.",
+							),
+						})
+						.describe("Whether the photo the letter copied from its resume is hidden on the letter."),
+				})
+				.partial()
+				.optional()
+				.describe("Edits the letter's own sender details; turn the sender link off first."),
 			senderLinked: z.boolean().optional().describe("Take the sender's details live from the resume."),
 			designLinked: z.boolean().optional().describe("Take the design live from the resume."),
+			proposalApplications: proposalApplicationsSchema,
+			proposalSafety: proposalSafetySchema,
 			sessionId: z
 				.string()
 				.min(1)
@@ -107,7 +151,10 @@ export const coverLetterDto = {
 	createVersion: { input: idSchema.extend({ name: versionNameSchema }), output: letterVersionSummarySchema },
 	renameVersion: { input: versionRefSchema.extend({ name: versionNameSchema }), output: letterVersionSummarySchema },
 	deleteVersion: { input: versionRefSchema, output: z.void() },
-	restoreVersion: { input: versionRefSchema, output: coverLetterSchema },
+	restoreVersion: {
+		input: versionRefSchema.extend({ proposalSafety: proposalSafetySchema }),
+		output: coverLetterSchema,
+	},
 	draft: {
 		input: idSchema.extend({
 			variant: z
@@ -115,13 +162,17 @@ export const coverLetterDto = {
 				.default("draft")
 				.describe("draft writes the body; shorter and personal revise `previous`."),
 			previous: z.string().max(20_000).optional().describe("The draft being revised."),
+			includeProvenance: z.boolean().optional().describe("Emit an initial AI operation reference before text."),
 		}),
 	},
 	refreshStyle: { input: revisionSchema.extend({ resumeId: z.string().min(1) }), output: coverLetterSchema },
 	duplicate: { input: idSchema.extend({ name: editableSchema.shape.name.optional() }), output: coverLetterSchema },
 	delete: { input: revisionSchema, output: z.void() },
 	export: { input: idSchema, output: coverLetterDocumentSchema },
-	import: { input: z.object({ document: coverLetterDocumentSchema }), output: coverLetterSchema },
+	import: {
+		input: z.object({ document: coverLetterDocumentSchema, aiOperationIds: aiOperationIdsSchema.optional() }),
+		output: coverLetterSchema,
+	},
 };
 
 export type CoverLetterListInput = z.infer<typeof coverLetterDto.list.input>;

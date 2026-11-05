@@ -23,6 +23,8 @@ When to write one, how to build it from the requirement table, what to cut, and 
 
 ## 2. Write or skip
 
+If the employer forbids AI assistance or requires an unaided statement, do not draft, rewrite, edit, outline or choose content for it. Explain the restriction and offer only help its rules permit; this takes precedence over the writing suggestions below.
+
 | Situation                                                                  | Do                                            |
 | -------------------------------------------------------------------------- | --------------------------------------------- |
 | Required, or there is an upload field labelled "cover letter"              | Write a tailored one                          |

@@ -3,10 +3,17 @@ import type { AgentUIMessage } from "@reactive-resume/ai/tools/agent-tool-contra
 import type { ChatTransport, UIMessage } from "ai";
 import { useChat } from "@ai-sdk/react";
 import { eventIteratorToUnproxiedDataStream } from "@orpc/client";
-import { lastAssistantMessageIsCompleteWithToolCalls, parseJsonEventStream, uiMessageChunkSchema } from "ai";
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+	lastAssistantMessageIsCompleteWithApprovalResponses,
+	lastAssistantMessageIsCompleteWithToolCalls,
+	parseJsonEventStream,
+	uiMessageChunkSchema,
+} from "ai";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { agentMessageMetadataSchema } from "@reactive-resume/ai/tools/agent-tool-contracts";
-import { streamClient } from "@/libs/orpc/client";
+import { getAccountGeneration } from "@/libs/auth/account-scope";
+import { orpc, streamClient } from "@/libs/orpc/client";
 
 // Apart from chat.ts so pages that only list conversations don't load the AI SDK.
 
@@ -47,7 +54,15 @@ type UseAssistantChatInput = {
  * and only the newest message is sent (the server keeps the transcript).
  */
 export function useAssistantChat({ threadId, initialMessages, resume, context, onFinish }: UseAssistantChatInput) {
+	const queryClient = useQueryClient();
+	const [generation] = useState(getAccountGeneration);
+	const refreshWebAccess = () => {
+		if (generation === getAccountGeneration())
+			void queryClient.invalidateQueries({ queryKey: orpc.webAccess.status.key() });
+	};
 	const contextRef = useRef(context);
+	const [resuming, setResuming] = useState(resume);
+	const resumeRequest = useRef(0);
 	useLayoutEffect(() => {
 		contextRef.current = context;
 	});
@@ -67,21 +82,41 @@ export function useAssistantChat({ threadId, initialMessages, resume, context, o
 					),
 				);
 			},
-			async reconnectToStream() {
-				return parseSse(eventIteratorToUnproxiedDataStream(await streamClient.agent.messages.resume({ threadId })));
+			async reconnectToStream({ abortSignal }) {
+				// The SDK takes over the busy state once this RPC returns; only the latest request can unlock it.
+				const request = ++resumeRequest.current;
+				setResuming(true);
+				try {
+					return parseSse(
+						eventIteratorToUnproxiedDataStream(
+							await streamClient.agent.messages.resume({ threadId }, abortSignal ? { signal: abortSignal } : {}),
+						),
+					);
+				} finally {
+					if (request === resumeRequest.current) setResuming(false);
+				}
 			},
 		}),
 		[threadId],
 	);
 
-	return useChat<AgentUIMessage>({
-		id: threadId,
-		messages: initialMessages as AgentUIMessage[],
-		resume,
-		transport,
-		throttle: 50,
-		messageMetadataSchema: agentMessageMetadataSchema,
-		sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
-		onFinish,
-	});
+	return {
+		...useChat<AgentUIMessage>({
+			id: threadId,
+			messages: initialMessages as AgentUIMessage[],
+			resume,
+			transport,
+			throttle: 50,
+			messageMetadataSchema: agentMessageMetadataSchema,
+			sendAutomaticallyWhen: (input) =>
+				lastAssistantMessageIsCompleteWithToolCalls(input) ||
+				lastAssistantMessageIsCompleteWithApprovalResponses(input),
+			onFinish: () => {
+				refreshWebAccess();
+				onFinish();
+			},
+			onError: refreshWebAccess,
+		}),
+		resuming,
+	};
 }

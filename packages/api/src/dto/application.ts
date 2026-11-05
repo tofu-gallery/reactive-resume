@@ -12,6 +12,7 @@ import {
 	postingSourceSchema,
 } from "@reactive-resume/schema/applications/data";
 import { paginationShape } from "../pagination";
+import { agentConversationSchema } from "./agent";
 
 const MAX_APPLICATION_JOB_DESCRIPTION_CHARS = 20_000;
 const MAX_APPLICATION_DOCUMENT_BYTES = 10 * 1024 * 1024;
@@ -42,6 +43,7 @@ const applicationSchema = createSelectSchema(schema.application, {
 	role: z.string().trim().min(1).describe("The role / job title."),
 	location: z.string().trim().nullable(),
 	salary: z.string().trim().nullable(),
+	laneId: z.string().nullable().optional().describe("The owner-defined pipeline lane, when supported."),
 	status: applicationStatusSchema.describe("The current pipeline stage. `closed` ends it, with a reason."),
 	closedReason: applicationClosedReasonSchema
 		.nullable()
@@ -79,12 +81,80 @@ const applicationSchema = createSelectSchema(schema.application, {
 	coverLetterName: z.string().nullable(),
 	followUpAt: z.date().nullable(),
 	followUpNote: z.string().trim().nullable(),
+	followUpDateOnly: z
+		.boolean()
+		.optional()
+		.describe(
+			"True for a legacy date-only follow-up. False preserves an exact reminder instant, including UTC midnight.",
+		),
 	tags: z.array(z.string()),
 	contacts: z.array(contactSchema),
 	activity: z.array(applicationTimelineEntrySchema),
 	appliedAt: z.date(),
 	createdAt: z.date(),
 	updatedAt: z.date(),
+	trashedAt: z.date().nullable().optional(),
+})
+	.omit({ submittedAt: true })
+	.extend({
+		replyVersion: z
+			.string()
+			.length(64)
+			.optional()
+			.describe(
+				"Opaque snapshot for logReply. Read the full application, review it, then send this value as expectedVersion. On CONFLICT, reload and review again.",
+			),
+		contactsVersion: z
+			.string()
+			.length(64)
+			.optional()
+			.describe("Opaque contacts snapshot for deleteContact. Unrelated application edits do not change it."),
+	});
+
+/** An application's stage as a write left it, with the ID of its latest stage change: what a later move expects. */
+export const savedStagesSchema = z.array(
+	z.object({
+		id: z.string(),
+		status: applicationStatusSchema,
+		laneId: z.string().nullable(),
+		closedReason: applicationClosedReasonSchema.nullable(),
+		stageEntryId: z.string().nullable(),
+	}),
+);
+
+const applicationSummarySchema = applicationSchema.pick({
+	id: true,
+	company: true,
+	role: true,
+	location: true,
+	salary: true,
+	status: true,
+	laneId: true,
+	closedReason: true,
+	resumeId: true,
+	coverLetterId: true,
+	resumeFileUrl: true,
+	coverLetterUrl: true,
+	source: true,
+	tags: true,
+	sourceUrl: true,
+	matchScore: true,
+	followUpAt: true,
+	followUpNote: true,
+	followUpDateOnly: true,
+	contacts: true,
+	activity: true,
+	appliedAt: true,
+	createdAt: true,
+	updatedAt: true,
+});
+
+const applicationSummaryWithInitialDetailSchema = applicationSummarySchema.extend({
+	// Optional for clients connecting to older servers without submission hints.
+	sentResumeVersionId: applicationSchema.shape.sentResumeVersionId.optional(),
+	sentCoverLetterVersionId: applicationSchema.shape.sentCoverLetterVersionId.optional(),
+	/** A small number of full rows can be attached to the initial list response for eager detail rendering. */
+	initialDetail: applicationSchema.omit({ userId: true }).optional(),
 });
 
 // Fields a client is allowed to set/change. `status`, `activity` and AI-owned fields are
@@ -106,6 +176,7 @@ const editableSchema = applicationSchema.pick({
 	coverLetterName: true,
 	followUpAt: true,
 	followUpNote: true,
+	followUpDateOnly: true,
 	contacts: true,
 	resumeId: true,
 	coverLetterId: true,
@@ -120,6 +191,7 @@ const createInputSchema = editableSchema.partial().extend({
 	company: applicationSchema.shape.company,
 	role: applicationSchema.shape.role,
 	status: applicationStatusSchema.optional(),
+	laneId: z.string().min(1).optional(),
 	closedReason: applicationClosedReasonSchema.nullable().optional(),
 	stageEnteredAt: timelineDateSchema.optional(),
 });
@@ -130,11 +202,26 @@ export const applicationDto = {
 			.object({
 				...paginationShape,
 				status: applicationStatusSchema.optional(),
+				laneId: z.string().min(1).optional(),
 				tags: z.array(z.string()).optional(),
 			})
 			.optional()
 			.default({}),
 		output: z.array(applicationSchema.omit({ userId: true })),
+	},
+
+	listSummary: {
+		input: z
+			.object({
+				...paginationShape,
+				status: applicationStatusSchema.optional(),
+				laneId: z.string().min(1).optional(),
+				tags: z.array(z.string()).optional(),
+				includeInitialDetails: z.number().int().min(0).max(6).optional(),
+			})
+			.optional()
+			.default({}),
+		output: z.array(applicationSummaryWithInitialDetailSchema),
 	},
 
 	getById: {
@@ -143,13 +230,26 @@ export const applicationDto = {
 	},
 
 	create: {
-		input: createInputSchema.extend(documentFilesShape),
+		input: createInputSchema.extend({
+			...documentFilesShape,
+			newId: z
+				.uuid()
+				.optional()
+				.describe(
+					"A UUID the client chose for the new application. A retry of the same request with the same ID (after a lost response, say) returns the application already saved instead of saving another. The ID with any other request, one already used by a resume or application, or one whose application has since been deleted is refused with CONFLICT and nothing changes.",
+				),
+		}),
 		output: z.string().describe("The ID of the created application."),
 	},
 
 	// Bulk create from a CSV import. Each item is a create input; company/role required per item.
 	import: {
-		input: z.object({ items: z.array(createInputSchema).min(1).max(500) }),
+		input: z.object({
+			items: z
+				.array(createInputSchema.extend({ applicationDate: timelineDateSchema.optional() }))
+				.min(1)
+				.max(500),
+		}),
 		output: z.object({ imported: z.number() }),
 	},
 
@@ -158,6 +258,7 @@ export const applicationDto = {
 			...documentFilesShape,
 			id: z.string(),
 			status: applicationStatusSchema.optional(),
+			laneId: z.string().min(1).optional(),
 			stageEnteredAt: timelineDateSchema.optional(),
 			closedReason: applicationClosedReasonSchema
 				.nullable()
@@ -165,6 +266,18 @@ export const applicationDto = {
 				.describe("Why the application closed; kept when status stays closed, cleared by any other stage."),
 		}),
 		output: applicationSchema.omit({ userId: true }),
+	},
+
+	deleteContact: {
+		input: z.object({
+			id: z.string(),
+			index: z.number().int().min(0),
+			expectedVersion: z
+				.string()
+				.length(64)
+				.describe("The contactsVersion of the contacts array reviewed before removal."),
+		}),
+		output: z.void(),
 	},
 
 	attachDocument: {
@@ -186,6 +299,22 @@ export const applicationDto = {
 
 	addNote: {
 		input: z.object({ id: z.string(), text: z.string().trim().min(1), date: timelineDateSchema.optional() }),
+		output: applicationSchema.omit({ userId: true }),
+	},
+
+	logFollowUp: {
+		input: z.object({ id: z.string() }),
+		output: applicationSchema.omit({ userId: true }),
+	},
+
+	logReply: {
+		input: z.object({
+			id: z.string(),
+			expectedVersion: z
+				.string()
+				.length(64)
+				.describe("The replyVersion from the full application you reviewed; reload and review again on CONFLICT."),
+		}),
 		output: applicationSchema.omit({ userId: true }),
 	},
 
@@ -244,10 +373,35 @@ export const applicationDto = {
 		input: z.object({
 			ids: z.array(z.string()).min(1).max(200, "Too many items in a single bulk operation"),
 			status: applicationStatusSchema.optional(),
+			laneId: z.string().min(1).optional(),
 			closedReason: applicationClosedReasonSchema.nullable().optional(),
 			addTags: z.array(z.string()).optional(),
+			expectedStages: z
+				.array(
+					z.object({
+						id: z.string(),
+						status: applicationStatusSchema,
+						laneId: z.string().nullable().optional(),
+						closedReason: applicationClosedReasonSchema.nullable(),
+						stageEntryId: z
+							.string()
+							.nullable()
+							.optional()
+							.describe("The ID of its latest stage change in `activity` then, so a move away and back counts too."),
+					}),
+				)
+				.max(200)
+				.optional()
+				.describe(
+					"The stage each application had when the move was chosen. An application whose stage has changed since is left as it is, so a later move wins over a deferred one.",
+				),
 		}),
-		output: z.object({ updated: z.number() }),
+		output: z.object({
+			updated: z.number(),
+			stages: savedStagesSchema.describe(
+				"Each counted application's stage as saved, with the ID of its latest stage change: what a later move of it expects.",
+			),
+		}),
 	},
 
 	bulkDelete: {
@@ -269,6 +423,17 @@ export const applicationDto = {
 	tags: {
 		input: z.object({}).optional().default({}),
 		output: z.array(z.string()),
+	},
+
+	tailorResume: {
+		input: z.object({ id: z.string() }),
+		output: z.object({
+			resumeId: z.string(),
+			name: z.string(),
+			reviewRequired: z.literal(true).optional(),
+			generationStatus: z.enum(["ready", "interrupted"]).optional(),
+			conversation: agentConversationSchema.optional(),
+		}),
 	},
 };
 

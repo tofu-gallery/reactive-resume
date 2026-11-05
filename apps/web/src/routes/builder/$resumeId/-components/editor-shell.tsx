@@ -2,16 +2,20 @@ import type { EditorMode } from "@/features/resume/editor/store";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { getRouteApi, Outlet } from "@tanstack/react-router";
-import { Suspense, useEffect } from "react";
+import { Suspense, useCallback, useEffect } from "react";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Tabs, TabsContent } from "@reactive-resume/ui/components/tabs";
+import { useFloatingToolbarSpace } from "@reactive-resume/ui/hooks/use-floating-toolbar-space";
 import { cn } from "@reactive-resume/utils/style";
+import { DownloadSheet } from "./download-sheet";
 import { EditorBar } from "./editor-bar";
 import { DesignPanel, DesignSheet, ModePanel } from "./mode-panels";
-import { ShareSheet } from "./share-sheet";
 import { useEditorHotkeys } from "./use-editor-hotkeys";
 import { ResumeAssistant } from "@/features/assistant/dock";
+import { takeAssistantHandoff } from "@/features/assistant/handoff";
 import { openAssistantFrom } from "@/features/assistant/open";
+import { useAssistantInUrl } from "@/features/assistant/use-assistant-url";
+import { useMarkDocumentOpened } from "@/features/documents/new-documents";
 import { usePreviewPausedStore } from "@/features/resume/builder/draft";
 import { IssueStepper } from "@/features/resume/editor/check/page-layer";
 import { EditorFrame, MobileTabBar, useEditorLayout } from "@/features/resume/editor/chrome/shell";
@@ -25,7 +29,7 @@ import { whenIdle } from "@/features/resume/preview/resume-thumbnail.shared";
 /**
  * The editor: a 56px bar over a 400px panel and the page canvas (desktop). On tablets the panel is a 380px
  * drawer over the page, pinnable beside it in landscape; on phones one view shows at a time, switched by
- * Write · Page · Design · Check tabs.
+ * Write · Page · Design · Check · Share tabs.
  */
 export function EditorShell() {
 	const [mode, setMode] = useEditorMode();
@@ -41,9 +45,14 @@ export function EditorShell() {
 			preloadRichTextEditor();
 		});
 	}, []);
+	const { checkTab } = routeApi.useSearch();
+	useEffect(() => {
+		if (checkTab) useEditorStore.setState({ checkTab });
+	}, [checkTab]);
 	useOpenVersionFromUrl();
 	useOpenAssistantFromUrl();
 	useResumeWebMcpTools(routeApi.useParams().resumeId);
+	useMarkDocumentOpened(routeApi.useParams().resumeId);
 
 	return (
 		<Tabs value={mode} onValueChange={(value) => setMode(value as EditorMode)} className="contents">
@@ -57,7 +66,7 @@ export function EditorShell() {
 				assistant={<ResumeAssistant />}
 				mobile={<MobileBody mode={mode} onModeChange={setMode} />}
 			>
-				<ShareSheet />
+				<DownloadSheet />
 				<EditorHotkeys onModeChange={setMode} />
 			</EditorFrame>
 		</Tabs>
@@ -73,7 +82,7 @@ function useOpenVersionFromUrl() {
 
 	useEffect(() => {
 		if (!version) return;
-		useEditorStore.getState().setShareTab("history");
+		useEditorStore.getState().setSheetTab("history");
 		useEditorStore.setState({ historyVersionId: version });
 		void navigate({
 			to: ".",
@@ -84,24 +93,32 @@ function useOpenVersionFromUrl() {
 	}, [version, navigate]);
 }
 
-/** `?assistant=` opens the assistant on that conversation; `?ask=` only fills its composer. Both then leave the URL. */
+/**
+ * The assistant and the URL (see `useAssistantInUrl`). Text handed over in the app (the coach's Add to resume) fills the
+ * composer the same way, without passing through the URL.
+ */
 function useOpenAssistantFromUrl() {
 	const { assistant, ask } = routeApi.useSearch();
+	const { resumeId } = routeApi.useParams();
+	const { session } = routeApi.useRouteContext();
 	const navigate = routeApi.useNavigate();
 
 	useEffect(() => {
-		if (!openAssistantFrom({ assistant, draft: ask })) return;
-		void navigate({
-			to: ".",
-			resetScroll: false,
-			search: (current: ReturnType<typeof routeApi.useSearch>) => ({
-				...current,
-				assistant: undefined,
-				ask: undefined,
+		const handed = takeAssistantHandoff(session.user.id, resumeId);
+		if (handed) openAssistantFrom({ draft: handed });
+	}, [session.user.id, resumeId]);
+
+	const setSearch = useCallback(
+		(patch: { assistant?: string | undefined; ask?: string | undefined }) =>
+			void navigate({
+				to: ".",
+				resetScroll: false,
+				search: (current: ReturnType<typeof routeApi.useSearch>) => ({ ...current, ...patch }),
+				replace: true,
 			}),
-			replace: true,
-		});
-	}, [assistant, ask, navigate]);
+		[navigate],
+	);
+	useAssistantInUrl({ assistant, ask }, setSearch);
 }
 
 function EditorHotkeys({ onModeChange }: { onModeChange: (mode: EditorMode) => void }) {
@@ -109,7 +126,8 @@ function EditorHotkeys({ onModeChange }: { onModeChange: (mode: EditorMode) => v
 	return null;
 }
 
-const panelLabel = (mode: EditorMode) => ({ write: t`Content`, design: t`Design`, check: t`Check` })[mode];
+const panelLabel = (mode: EditorMode) =>
+	({ write: t`Content`, design: t`Design`, check: t`Check`, share: t`Share` })[mode];
 
 type MobileBodyProps = {
 	mode: EditorMode;
@@ -167,6 +185,7 @@ function MobileBody({ mode, onModeChange }: MobileBodyProps) {
 					{ view: "page", icon: "file-text", label: t`Page` },
 					{ view: "design", icon: "palette", label: t`Design` },
 					{ view: "check", icon: "list-checks", label: t`Check` },
+					{ view: "share", icon: "globe-hemisphere-west", label: t`Share` },
 				]}
 				view={view}
 				onModeChange={onModeChange}
@@ -178,10 +197,14 @@ function MobileBody({ mode, onModeChange }: MobileBodyProps) {
 /** Phones: tapping a line on the page selects it and offers to edit that entry. Improve joins it in M10. */
 function SelectionBar({ onEdit }: { onEdit: () => void }) {
 	const selection = useEditorStore((state) => state.selection);
+	const { ref } = useFloatingToolbarSpace();
 	if (!selection) return null;
 
 	return (
-		<div className="absolute bottom-[76px] left-1/2 z-10 flex -translate-x-1/2 items-center rounded-xl bg-ink p-1 text-bg shadow-e3 transition-[opacity,translate] duration-standard ease-enter starting:translate-y-2 starting:opacity-0">
+		<div
+			ref={ref}
+			className="absolute bottom-[76px] left-1/2 z-10 flex -translate-x-1/2 items-center rounded-xl bg-ink p-1 text-bg shadow-e3 transition-[opacity,translate] duration-standard ease-enter starting:translate-y-2 starting:opacity-0"
+		>
 			<button
 				type="button"
 				className="flex h-10 items-center gap-1.5 rounded-lg px-3 text-[15px] font-semibold"

@@ -1,5 +1,5 @@
 import type { ComponentProps } from "react";
-import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
+import { MessageScroller as MessageScrollerPrimitive, useMessageScroller } from "@shadcn/react/message-scroller";
 import { Button } from "@reactive-resume/ui/components/button";
 import { cn } from "@reactive-resume/utils/style";
 
@@ -8,7 +8,11 @@ import { cn } from "@reactive-resume/utils/style";
  * the reader is at the live edge, settles each new turn near the top, reopens a saved thread on its last turn, and
  * offers a way back to the latest message. Wrap every direct child of the content in `MessageScrollerItem`.
  */
-const MessageScrollerProvider = MessageScrollerPrimitive.Provider;
+type MessageScrollerProviderProps = ComponentProps<typeof MessageScrollerPrimitive.Provider>;
+
+function MessageScrollerProvider({ scrollEdgeThreshold = 24, ...props }: MessageScrollerProviderProps) {
+	return <MessageScrollerPrimitive.Provider scrollEdgeThreshold={scrollEdgeThreshold} {...props} />;
+}
 
 /** The frame: fills its parent, so put it in a height-constrained container. */
 function MessageScroller({ className, ...props }: ComponentProps<typeof MessageScrollerPrimitive.Root>) {
@@ -86,4 +90,5 @@ export {
 	MessageScrollerItem,
 	MessageScrollerProvider,
 	MessageScrollerViewport,
+	useMessageScroller,
 };

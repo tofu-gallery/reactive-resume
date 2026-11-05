@@ -2,7 +2,8 @@ import type { DialogProps } from "../store";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useMutation } from "@tanstack/react-query";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
+import { useRef } from "react";
 import z from "zod";
 import { Button } from "@reactive-resume/ui/components/button";
 import {
@@ -16,10 +17,10 @@ import { FormControl, FormDescription, FormItem, FormLabel, FormMessage } from "
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
 import { toast } from "@reactive-resume/ui/components/toast";
-import { generateRandomName } from "@reactive-resume/utils/slug";
 import { useDialogStore } from "../store";
 import { ChipInput } from "@/components/input/chip-input";
-import { usePatchResume } from "@/features/resume/builder/draft";
+import { useExistingTags } from "@/features/documents/tag-suggestions";
+import { saveResumeMetadata } from "@/features/resume/builder/draft";
 import { useFormBlocker } from "@/hooks/use-form-blocker";
 import { getResumeErrorMessage } from "@/libs/error-message";
 import { orpc } from "@/libs/orpc/client";
@@ -27,7 +28,7 @@ import { useAppForm } from "@/libs/tanstack-form";
 
 const formSchema = z.object({
 	id: z.string(),
-	name: z.string().min(1).max(64),
+	name: z.string().trim().min(1).max(100),
 	tags: z.array(z.string()),
 });
 
@@ -38,25 +39,32 @@ type ResumeDialogProps = {
 
 export function ResumeDialog({ mode, data }: ResumeDialogProps) {
 	const isUpdate = mode === "update";
+	const commitTags = useRef<(() => string[]) | null>(null);
 	const navigate = useNavigate();
 	const closeDialog = useDialogStore((state) => state.closeDialog);
-	const patchResume = usePatchResume();
-	const params = useParams({ strict: false }) as { resumeId?: string };
+	const suggestions = useExistingTags(["resume"]);
 
-	const update = useMutation(orpc.resume.update.mutationOptions());
+	const updateOptions = orpc.resume.update.mutationOptions();
+	const update = useMutation({
+		...updateOptions,
+		mutationFn: (value) =>
+			saveResumeMetadata(value.id, (expectedUpdatedAt, options) =>
+				orpc.resume.update.call({ ...value, expectedUpdatedAt }, options),
+			),
+	});
 	const duplicate = useMutation(orpc.resume.duplicate.mutationOptions());
 
 	const form = useAppForm({
 		defaultValues: {
 			id: data.id,
-			name: isUpdate ? data.name : `${data.name} (Copy)`,
+			name: data.name,
 			tags: data.tags,
 		},
 		validators: { onSubmit: formSchema },
 		onSubmit: ({ value }) => {
 			const toastId = toast.add({
 				type: "loading",
-				description: isUpdate ? t`Updating your resume...` : t`Duplicating your resume...`,
+				description: isUpdate ? t`Updating your resume…` : t`Duplicating your resume…`,
 			});
 			const onError = (error: unknown) => {
 				toast.add({ type: "error", description: getResumeErrorMessage(error), id: toastId });
@@ -64,18 +72,7 @@ export function ResumeDialog({ mode, data }: ResumeDialogProps) {
 
 			if (isUpdate) {
 				update.mutate(value, {
-					onSuccess: (updated) => {
-						if (params.resumeId === updated.id) {
-							patchResume((draft) => {
-								draft.name = updated.name;
-								draft.slug = updated.slug;
-								draft.tags = updated.tags;
-								draft.isLocked = updated.isLocked;
-								draft.isPublic = updated.isPublic;
-								draft.hasPassword = updated.hasPassword;
-							});
-						}
-
+					onSuccess: () => {
 						toast.add({ type: "success", description: t`Your resume has been updated.`, id: toastId });
 						closeDialog();
 					},
@@ -99,19 +96,17 @@ export function ResumeDialog({ mode, data }: ResumeDialogProps) {
 	useFormBlocker(form);
 
 	return (
-		<DialogContent>
+		<DialogContent closeLabel={t`Close`}>
 			<DialogHeader>
 				<DialogTitle className="flex items-center gap-x-2">
 					<Icon name="pencil-simple" size={16} />
-					{isUpdate ? <Trans>Update resume</Trans> : <Trans>Duplicate resume</Trans>}
+					{isUpdate ? <Trans>Edit resume</Trans> : <Trans>Duplicate resume</Trans>}
 				</DialogTitle>
-				<DialogDescription>
-					{isUpdate ? (
-						<Trans>Changed your mind? Rename your resume to something more descriptive.</Trans>
-					) : (
+				{!isUpdate && (
+					<DialogDescription>
 						<Trans>Duplicate your resume to create a new one, just like the original.</Trans>
-					)}
-				</DialogDescription>
+					</DialogDescription>
+				)}
 			</DialogHeader>
 
 			<form
@@ -119,6 +114,7 @@ export function ResumeDialog({ mode, data }: ResumeDialogProps) {
 				onSubmit={(event) => {
 					event.preventDefault();
 					event.stopPropagation();
+					commitTags.current?.();
 					void form.handleSubmit();
 				}}
 			>
@@ -128,29 +124,18 @@ export function ResumeDialog({ mode, data }: ResumeDialogProps) {
 							<FormLabel>
 								<Trans>Name</Trans>
 							</FormLabel>
-							<div className="flex items-center gap-x-2">
-								<FormControl
-									render={
-										<Input
-											minLength={1}
-											maxLength={64}
-											name={field.name}
-											value={field.state.value}
-											onBlur={field.handleBlur}
-											onChange={(event) => field.handleChange(event.target.value)}
-										/>
-									}
-								/>
-
-								<Button
-									size="icon"
-									variant="secondary"
-									title={t`Generate a random name`}
-									onClick={() => form.setFieldValue("name", generateRandomName())}
-								>
-									<Icon name="magic-wand" size={16} />
-								</Button>
-							</div>
+							<FormControl
+								render={
+									<Input
+										minLength={1}
+										maxLength={100}
+										name={field.name}
+										value={field.state.value}
+										onBlur={field.handleBlur}
+										onChange={(event) => field.handleChange(event.target.value)}
+									/>
+								}
+							/>
 							<FormMessage errors={field.state.meta.errors} />
 							<FormDescription>
 								<Trans>Name the resume after the position you are applying for.</Trans>
@@ -168,10 +153,13 @@ export function ResumeDialog({ mode, data }: ResumeDialogProps) {
 							<FormControl
 								render={
 									<ChipInput
+										commitRef={commitTags}
 										value={field.state.value}
 										onChange={(value) => {
 											field.handleChange(value);
 										}}
+										suggestions={suggestions}
+										suggestionsLabel={t`Your tags`}
 									/>
 								}
 							/>

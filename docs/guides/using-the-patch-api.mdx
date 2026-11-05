@@ -9,7 +9,7 @@ The patch endpoint lets you make small, targeted changes to a resume's content w
 
 - Create an API key and try a first request, as described in [Using the API](/guides/using-the-api).
 - Find the resume's ID with `GET /api/openapi/resumes`, then fetch its current content with `GET /api/openapi/resumes/{id}`. Paths in your operations point into the `data` object of that response.
-- Keep the [JSON resume schema](/guides/json-resume-schema) at hand. It lists every field, its type and which fields a new item needs.
+- Keep the [Reactive Resume JSON schema](/guides/json-resume-schema) at hand. It lists every field, its type and which fields a new item needs.
 
 ## Choose PATCH or PUT
 
@@ -152,7 +152,7 @@ Experience (and its roles), education, projects and volunteer entries, and award
 | `start`   | A year (`"2022"`) or a year and month (`"2022-03"`), or `null`. Single-date entries (awards, certifications, publications) use only `start`. |
 | `end`     | A year or year and month, or `null` while the entry is ongoing or for single dates.                                                          |
 | `present` | `true` when the entry is ongoing. It prints as "Present" in the resume's language.                                                           |
-| `raw`     | Optional. Original text that couldn't be read exactly, such as "Summer 2016". It prints as written until the dates are edited.               |
+| `raw`     | Optional. Custom date text, or imported text that couldn't be read exactly. It prints as written, whatever the date format.                  |
 
 **Write `dates`, not the text.** Each entry also has a text field, `period` (ranges) or `date` (single dates). On every save, the server rewrites that text from `dates`, in the resume's language and date format (`/metadata/page/dateFormat`: `short`, `long`, `numeric` or `iso`). A patch that changes only `period` or `date` is overwritten, and the resume keeps its old dates.
 
@@ -222,5 +222,5 @@ If the resume has moved on, you get `409` with the code `RESUME_VERSION_CONFLICT
 ## Related guides
 
 - [Using the API](/guides/using-the-api): keys, authentication and the other endpoints.
-- [JSON resume schema](/guides/json-resume-schema): every path and value type you can patch.
+- [Reactive Resume JSON schema](/guides/json-resume-schema): every path and value type you can patch.
 - [Using the MCP server](/guides/using-the-mcp-server): let an AI client write these patches for you.

@@ -11,9 +11,10 @@ import { ORPCError } from "@orpc/client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Storage from "expo-sqlite/kv-store";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { AppState } from "react-native";
 import { EMPTY_WORKSPACE } from "@reactive-resume/schema/career";
 import { createAutosave, createDraftStore, nextDraftState, saveFailure } from "./state";
-import { orpc } from "@/api/client";
+import { client, orpc } from "@/api/client";
 import { getServer, useSession } from "@/auth/session";
 import { getDraftScope } from "@/draft";
 import { useHasAIProvider } from "@/features/ai/providers";
@@ -73,13 +74,13 @@ export function useWorkspace(applicationId: string) {
 	});
 	const current = () => queryClient.getQueryData<CareerWorkspace>(queryKey) ?? EMPTY_WORKSPACE;
 	/** Resolves once the server confirmed the change, or with why it failed (already reported). Never rejects. */
-	const save = (patch: Partial<CareerWorkspace>): Promise<SaveResult> => {
+	const save = (patch: Partial<CareerWorkspace>, expectedSnapshot?: Partial<CareerWorkspace>): Promise<SaveResult> => {
 		if (getServer() !== server) return Promise.resolve({ ok: false, transient: false, code: "SERVER_CHANGED" });
 		const previous = current();
 		const defined = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
-		const expected = Object.fromEntries(
-			Object.keys(defined).map((key) => [key, previous[key as keyof CareerWorkspace]]),
-		);
+		const expected =
+			expectedSnapshot ??
+			Object.fromEntries(Object.keys(defined).map((key) => [key, previous[key as keyof CareerWorkspace]]));
 		// Capture and publish synchronously, so another control's immediate write builds on this one.
 		void queryClient.cancelQueries({ queryKey });
 		queryClient.setQueryData(queryKey, { ...previous, ...defined });
@@ -110,6 +111,7 @@ export function useWorkspace(applicationId: string) {
 		 */
 		fetchConfirmed: async () => {
 			while (pending.size > 0) await Promise.allSettled(pending);
+			await queryClient.cancelQueries({ queryKey });
 			return queryClient.fetchQuery({
 				...orpc.career.workspace.queryOptions({ input: { applicationId } }),
 				queryKey,
@@ -140,33 +142,30 @@ export function useTicks(applicationId: string, key: string) {
 	};
 }
 
-export function useSavedItems(applicationId: string) {
+export function useSavedItems(applicationId: string | null) {
 	const { server, enabled } = useSignedIn();
-	const options = orpc.career.savedItems.queryOptions({ input: { applicationId } });
+	const options = orpc.career.savedItems.queryOptions({
+		input: applicationId === null ? { scope: "shared" } : { applicationId },
+	});
 	return useQuery({ ...options, queryKey: [...options.queryKey, server], enabled });
 }
 
-export function useFacts(applicationId: string) {
-	const { server, enabled } = useSignedIn();
+export function useFacts(applicationId: string | null, enabled = true) {
+	const { server, enabled: signedIn } = useSignedIn();
 	const options = orpc.career.facts.queryOptions({ input: { applicationId } });
-	return useQuery({ ...options, queryKey: [...options.queryKey, server], enabled });
+	return useQuery({ ...options, queryKey: [...options.queryKey, server], enabled: signedIn && enabled });
 }
 
-export function useStories(applicationId: string) {
-	const { server, enabled } = useSignedIn();
+export function useStories(applicationId: string | null, enabled = true) {
+	const { server, enabled: signedIn } = useSignedIn();
 	const options = orpc.career.stories.queryOptions({ input: { applicationId } });
-	return useQuery({ ...options, queryKey: [...options.queryKey, server], enabled });
+	return useQuery({ ...options, queryKey: [...options.queryKey, server], enabled: signedIn && enabled });
 }
 
 export function useSchedules() {
 	const { server, enabled } = useSignedIn();
 	const options = orpc.career.schedules.queryOptions({ input: {} });
 	return useQuery({ ...options, queryKey: [...options.queryKey, server], enabled });
-}
-
-export function useFlags() {
-	const { server } = useSignedIn();
-	return useQuery({ ...orpc.flags.get.queryOptions(), queryKey: [...orpc.flags.get.key(), server] });
 }
 
 /** The newest saved item of one kind, optionally for one interview. */
@@ -181,24 +180,47 @@ export function latest<K extends SavedItem["data"]["kind"]>(
 	);
 }
 
+type GenerateInput = Parameters<typeof client.career.generate>[0];
+
+/** What a failed workspace task says: an unreadable answer names the provider and where to switch it. */
+function generateFailure(error: unknown, name: string | undefined) {
+	if (error instanceof ORPCError && error.code === "INTERNAL_SERVER_ERROR")
+		return name
+			? t`Couldn't read ${name}'s answer. Try again, or switch the default provider in AI settings.`
+			: t`Couldn't read the AI's answer. Try again, or switch the default provider in AI settings.`;
+	const who = name ?? t`Your AI connection`;
+	return workspaceError(error, t`${who} didn't respond. Nothing was changed; try again.`);
+}
+
 /**
- * Asks the coach for one structured piece of work for a tab. Errors say what didn't run; stored data stays usable.
+ * Asks the coach for one structured piece of work for a tab. A failure is kept as `failure` for the tab to show inline;
+ * `stop` cancels the request and clears it. Stored data stays usable either way.
  */
-export function useGenerate(applicationId: string) {
+export function useGenerate(applicationId: string | null) {
 	const { i18n } = useLingui();
 	const queryClient = useQueryClient();
 	const connection = useHasAIProvider();
-	const name = connection.defaultProvider?.label ?? t`Your AI connection`;
+	const controller = useRef<AbortController | null>(null);
 	const mutation = useMutation({
-		...orpc.career.generate.mutationOptions(),
+		mutationKey: orpc.career.generate.mutationKey(),
+		mutationFn: (input: GenerateInput) => {
+			const abort = new AbortController();
+			controller.current = abort;
+			return client.career.generate(input, { signal: abort.signal });
+		},
 		onSuccess: (result) => {
 			if (result.item) void queryClient.invalidateQueries({ queryKey: orpc.career.savedItems.key() });
 		},
-		onError: (error) =>
-			showToast({ message: workspaceError(error, t`${name} didn't respond. Nothing was changed; try again.`) }),
 	});
+	const { reset } = mutation;
 	return {
 		...mutation,
+		failure: mutation.error ? generateFailure(mutation.error, connection.defaultProvider?.label) : null,
+		// Reset first: the aborted request then rejects without reaching this hook's state.
+		stop: () => {
+			reset();
+			controller.current?.abort();
+		},
 		run: (task: GenerateTask) => {
 			if (connection.isUnavailable)
 				return Promise.reject(new Error(t`AI connections haven't loaded. Try again before generating.`));
@@ -256,7 +278,15 @@ export function useAutosave(
 			autosave.block({ value: blockedValue, code: blockedCode });
 	}, [autosave, blockedValue, blockedCode]);
 	useEffect(() => autosave.update(value, saved), [autosave, value, saved]);
-	useEffect(() => () => autosave.dispose(), [autosave]);
+	useEffect(() => {
+		const listener = AppState.addEventListener("change", (state) => {
+			if (state !== "active") autosave.flush();
+		});
+		return () => {
+			listener.remove();
+			autosave.dispose();
+		};
+	}, [autosave]);
 	return {
 		flush: autosave.flush,
 		retry: autosave.retry,
@@ -344,7 +374,7 @@ function useDraftScope() {
  * A draft kept on the device until the server or the coach has it: it survives leaving the screen and restarting the
  * app, scoped by server and account. `clear(sent)` removes it only while it is still that revision.
  */
-export function useDraft<T>(name: string | null, initial: T) {
+export function useDraft<T>(name: string | null, initial: T, reviewOnRestore = false) {
 	const scope = useDraftScope();
 	const key = name !== null && scope !== null ? `${draftPrefix(scope)}${name}` : null;
 	const [state, setState] = useState<DraftState<T>>(() => ({ key, owner: key, value: initial, touched: false }));
@@ -359,7 +389,15 @@ export function useDraft<T>(name: string | null, initial: T) {
 	if (blocked.key !== key)
 		setBlockedState({
 			key,
-			value: key === null ? blocked.value : (draftStore.read<Blocked>(`${key}${BLOCKED}`) ?? null),
+			value:
+				key === null
+					? blocked.value
+					: (draftStore.read<Blocked>(`${key}${BLOCKED}`) ??
+						(reviewOnRestore &&
+						draftStore.read<T>(key) !== undefined &&
+						JSON.stringify(draftStore.read<T>(key)) !== JSON.stringify(initial)
+							? { value: JSON.stringify(draftStore.read<T>(key)), code: "RECOVERED_DRAFT" }
+							: null)),
 		});
 	const current = useRef(state);
 	useLayoutEffect(() => {

@@ -1,11 +1,13 @@
 import type { ColumnRect, PendingMove } from "./board";
-import type { Application } from "@/features/applications/types";
-import type { ApplicationStatus } from "@reactive-resume/schema/applications/data";
+import type { ApplicationLane } from "@/features/applications/lanes";
+import type { ApplicationSummary as Application } from "@/features/applications/types";
 import type { ComponentRef } from "react";
 import type { ScrollView } from "react-native";
 import type { SharedValue } from "react-native-reanimated";
+import { i18n } from "@lingui/core";
 import { plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
+import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { RefreshControl, Pressable, View, useWindowDimensions } from "react-native";
@@ -19,16 +21,23 @@ import Animated, {
 	withSpring,
 } from "react-native-reanimated";
 import { scheduleOnRN } from "react-native-worklets";
-import { keepPending, pendingAfterError, stageAt } from "./board";
+import { keepPending, pendingAfterError, stageAt, tabletColumnWidth } from "./board";
 import { useApplicationSearch } from "./search";
 import { ApplicationsViewFrame } from "./views";
-import { useUserTime } from "@/features/application-detail/hooks";
+import { useNow, useUserTime } from "@/features/application-detail/hooks";
 import { CloseSheet, MarkAppliedSheet } from "@/features/application-detail/sheets";
 import { applicationError } from "@/features/applications/error";
+import { useApplicationLanes } from "@/features/applications/lane-queries";
+import { getLaneLabel, laneInput, resolveLane, undoLaneInput, visibleLanes } from "@/features/applications/lanes";
 import { filterApplications } from "@/features/applications/list";
 import { describeNextStep, getNextStep } from "@/features/applications/next-step";
 import { useApplicationMutations, useApplications } from "@/features/applications/queries";
-import { getStageColor, getStageLabel } from "@/features/applications/stages";
+import {
+	listedApplication,
+	offerHintFor,
+	useOfferHints,
+	useStageMovedToast,
+} from "@/features/applications/stage-actions";
 import { routes } from "@/routes";
 import { useIsTablet } from "@/shell/use-is-tablet";
 import {
@@ -50,10 +59,8 @@ import {
 } from "@/ui";
 import { usePullRefresh } from "@/ui/use-pull-refresh";
 
-const STAGES: readonly ApplicationStatus[] = ["saved", "applied", "screening", "interview", "offer", "closed"];
-// Column widths from the mockup (career.html `.column`): phone 268 pt, tablet 250 pt.
+// Preferred column widths from the mockup (career.html `.column`); tablet lanes can shrink to fit.
 const PHONE_COLUMN = 268;
-const TABLET_COLUMN = 250;
 // Cards mounted per column at first; the rest show in batches, as web.
 const COLUMN_PAGE_SIZE = 50;
 const LONG_PRESS_MS = 400;
@@ -84,14 +91,22 @@ export function BoardScreen() {
  */
 function Board() {
 	const router = useRouter();
+	const queryClient = useQueryClient();
 	const { t } = useLingui();
 	const { motion, radius, shadows, space } = useTheme();
 	const { width: windowWidth } = useWindowDimensions();
 	const tablet = useIsTablet();
+	const [boardWidth, setBoardWidth] = useState(0);
 	const reduceMotion = useReducedMotion();
 	const query = useApplications();
-	const { search } = useApplicationSearch();
+	const laneQuery = useApplicationLanes();
+	const [actionLane, setActionLane] = useState<ApplicationLane | undefined>();
+	const { search, needsYou, clearFilters } = useApplicationSearch();
+	const now = useNow();
+	const { timeZone } = useUserTime();
+	const offers = useOfferHints();
 	const { update } = useApplicationMutations();
+	const stageMoved = useStageMovedToast();
 	// One open flag per sheet: a sheet's late dismissal can never close the one that replaced it.
 	const [moving, setMoving] = useState<Application | null>(null);
 	const [moveOpen, setMoveOpen] = useState(false);
@@ -100,7 +115,7 @@ function Board() {
 	const [marking, setMarking] = useState<Application | null>(null);
 	const [markOpen, setMarkOpen] = useState(false);
 	const [drag, setDrag] = useState<Drag | null>(null);
-	const [hover, setHover] = useState<ApplicationStatus | null>(null);
+	const [hover, setHover] = useState<string | null>(null);
 	// The list publishes the optimistic move after an await, so until then the board shows the card in its new column
 	// itself; otherwise it blinks back for a frame (web board does the same).
 	const [pending, setPending] = useState<PendingMove | null>(null);
@@ -109,45 +124,64 @@ function Board() {
 	const finger = useSharedValue(0);
 	const dragActive = useSharedValue(false);
 	const lift = useSharedValue(1);
-	const columnRects = useSharedValue<{ stage: ApplicationStatus; x: number; width: number }[]>([]);
+	const columnRects = useSharedValue<{ stage: string; x: number; width: number }[]>([]);
 	const bounds = useSharedValue({ x: 0, width: 0 });
 	const lastEdgeScroll = useSharedValue(0);
 	const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
 	const board = useRef<ComponentRef<typeof View>>(null);
 	const boardRect = useRef({ x: 0, y: 0, width: 0 });
-	const columns = useRef(new Map<ApplicationStatus, ComponentRef<typeof View>>());
-	const rects = useRef(new Map<ApplicationStatus, ColumnRect>());
+	const columns = useRef(new Map<string, ComponentRef<typeof View>>());
+	const rects = useRef(new Map<string, ColumnRect>());
 	const scrollX = useSharedValue(0);
 	const autoScrolled = useRef(false);
-	const hovered = useRef<ApplicationStatus | null>(null);
+	const hovered = useRef<string | null>(null);
 	const dragged = useRef<Application | null>(null);
 
-	const applications = filterApplications(query.data ?? [], { search, tag: "", showClosed: true });
+	const applications = filterApplications(
+		query.data ?? [],
+		{ search, tag: "", showClosed: true, needsYou },
+		now,
+		timeZone,
+		offers,
+	);
 	if (pending && !keepPending(pending, query.data ?? [])) setPending(null);
 	const statusOf = (application: Application) =>
-		pending?.id === application.id ? pending.to : (application.status as ApplicationStatus);
-	const byStage = new Map<ApplicationStatus, Application[]>(STAGES.map((stage) => [stage, []]));
+		pending?.id === application.id ? pending.to : resolveLane(laneQuery.lanes, application).id;
+	const stages = visibleLanes(laneQuery.lanes, applications);
+	const stageIds = stages.map((lane) => lane.id);
+	const byStage = new Map<string, Application[]>(stageIds.map((stage) => [stage, []]));
 	for (const application of applications) byStage.get(statusOf(application))?.push(application);
 
-	const columnWidth = tablet ? TABLET_COLUMN : Math.min(PHONE_COLUMN, windowWidth - space.s4 * 2 - space.s8);
+	const columnWidth = tablet
+		? boardWidth
+			? tabletColumnWidth(boardWidth, stages.filter((lane) => lane.category !== "closed").length, space.s4, space.s3)
+			: 250
+		: Math.min(PHONE_COLUMN, windowWidth - space.s4 * 2 - space.s8);
 	const cardWidth = columnWidth - space.s3 * 2;
 
-	const moveTo = (application: Application, stage: ApplicationStatus) => {
-		const from = statusOf(application);
-		if (stage === from) return;
-		if (stage === "closed") {
-			setClosing(application);
+	const moveTo = (application: Application, stage: string) => {
+		const before = listedApplication(queryClient, application.id);
+		const lane = laneQuery.active.find((item) => item.id === stage);
+		if (!before || !laneQuery.ready || !lane || update.isPending || stage === statusOf(before)) return;
+		setActionLane(lane);
+		if (lane.category === "closed" && !lane.closedReason) {
+			setClosing(before);
 			return setCloseOpen(true);
 		}
-		if (from === "saved" && stage === "applied") {
-			setMarking(application);
+		if (before.status === "saved" && lane.category === "applied") {
+			setMarking(before);
 			return setMarkOpen(true);
 		}
-		setPending({ id: application.id, from: application.status as ApplicationStatus, to: stage });
+		setPending({ id: application.id, from: before.laneId ?? before.status, to: stage });
 		update.mutate(
-			{ id: application.id, status: stage },
+			{ id: application.id, ...laneInput(lane, laneQuery.supported) },
 			{
-				onSuccess: () => showToast({ message: t`Moved to ${getStageLabel(stage)}` }),
+				onSuccess: () => {
+					const from = resolveLane(laneQuery.lanes, before);
+					stageMoved(application, lane, undefined, () =>
+						update.mutateAsync({ id: application.id, ...undoLaneInput(from, before, laneQuery.supported) }),
+					);
+				},
 				onError: (error) => {
 					setPending((current) => pendingAfterError(current, application.id, stage));
 					showToast({ message: applicationError(error) });
@@ -305,17 +339,20 @@ function Board() {
 	if (applications.length === 0) {
 		return (
 			<EmptyState
+				variant="card"
 				icon="briefcase"
-				title={search.trim() && query.data?.length ? t`No matching applications` : t`Your job search starts here`}
+				title={
+					(search.trim() || needsYou) && query.data?.length ? t`No matching applications` : t`Track your first job`
+				}
 				message={
-					search.trim() && query.data?.length
+					(search.trim() || needsYou) && query.data?.length
 						? t`Try different words or clear your filters.`
-						: t`Save a job link, paste a posting, or fill in the details manually.`
+						: t`Paste a job link. We'll save the posting so Check, the assistant and your letter can use it.`
 				}
 				action={
-					search.trim() && query.data?.length
-						? { label: t`Clear filters`, onPress: () => useApplicationSearch.getState().setSearch("") }
-						: { label: t`Open the list`, onPress: () => router.replace(routes.applications()) }
+					(search.trim() || needsYou) && query.data?.length
+						? { label: t`Clear filters`, onPress: clearFilters }
+						: { label: t`Save a job`, onPress: () => router.setParams({ create: "1" }) }
 				}
 			/>
 		);
@@ -326,12 +363,13 @@ function Board() {
 			<View
 				ref={board}
 				style={{ flex: 1 }}
-				onLayout={() =>
+				onLayout={(event) => {
+					setBoardWidth(event.nativeEvent.layout.width);
 					board.current?.measureInWindow((x, y, width) => {
 						boardRect.current = { x, y, width };
 						bounds.set({ x, width });
-					})
-				}
+					});
+				}}
 			>
 				<AnimatedScrollView
 					ref={scrollRef}
@@ -344,15 +382,15 @@ function Board() {
 					onScroll={onBoardScroll}
 					contentContainerStyle={{ padding: space.s4, gap: space.s3 }}
 				>
-					{STAGES.map((stage) => (
+					{stages.map((lane) => (
 						<Column
-							key={stage}
+							key={lane.id}
 							onRefresh={query.refetch}
-							stage={stage}
-							applications={byStage.get(stage) ?? []}
+							stage={lane}
+							applications={byStage.get(lane.id) ?? []}
 							width={columnWidth}
 							cardWidth={cardWidth}
-							highlighted={hover === stage && drag !== null && statusOf(drag.application) !== stage}
+							highlighted={hover === lane.id && drag !== null && statusOf(drag.application) !== lane.id}
 							draggingId={drag?.application.id ?? null}
 							handlers={stableHandlers}
 							onMove={(application) => {
@@ -360,8 +398,8 @@ function Board() {
 								setMoveOpen(true);
 							}}
 							register={(view) => {
-								if (view) columns.current.set(stage, view);
-								else columns.current.delete(stage);
+								if (view) columns.current.set(lane.id, view);
+								else columns.current.delete(lane.id);
 							}}
 						/>
 					))}
@@ -396,15 +434,19 @@ function Board() {
 					if (moving) setTimeout(() => moveTo(moving, stage), motion.d3);
 				}}
 			/>
-			{closing ? <CloseSheet application={closing} open={closeOpen} onClose={() => setCloseOpen(false)} /> : null}
-			{marking ? <MarkAppliedSheet application={marking} open={markOpen} onClose={() => setMarkOpen(false)} /> : null}
+			{closing ? (
+				<CloseSheet lane={actionLane} application={closing} open={closeOpen} onClose={() => setCloseOpen(false)} />
+			) : null}
+			{marking ? (
+				<MarkAppliedSheet lane={actionLane} application={marking} open={markOpen} onClose={() => setMarkOpen(false)} />
+			) : null}
 		</View>
 	);
 }
 
 type ColumnProps = {
 	onRefresh: () => Promise<unknown>;
-	stage: ApplicationStatus;
+	stage: ApplicationLane;
 	applications: Application[];
 	width: number;
 	cardWidth: number;
@@ -434,6 +476,7 @@ function Column({
 	const shown = applications.slice(0, visible);
 	// Columns mount once the board has data, so cards stagger in when the board opens.
 	const firstAppearance = useFirstAppearance(true);
+	const reduced = useReducedMotion();
 	const remaining = applications.length - shown.length;
 
 	return (
@@ -451,8 +494,8 @@ function Column({
 				accessible
 				accessibilityRole="header"
 				accessibilityLabel={plural(applications.length, {
-					one: `${getStageLabel(stage)}, # application`,
-					other: `${getStageLabel(stage)}, # applications`,
+					one: `${getLaneLabel(stage)}, # application`,
+					other: `${getLaneLabel(stage)}, # applications`,
 				})}
 				style={{
 					flexDirection: "row",
@@ -467,14 +510,14 @@ function Column({
 						width: space.s2,
 						height: space.s2,
 						borderRadius: radius.rLg,
-						backgroundColor: getStageColor(stage, colors),
+						backgroundColor: stage.color,
 					}}
 				/>
 				<Text variant="label" style={{ flex: 1 }}>
-					{getStageLabel(stage)}
+					{getLaneLabel(stage)}
 				</Text>
 				<Text variant="mono" color="ink3">
-					{applications.length}
+					{i18n.number(applications.length)}
 				</Text>
 			</View>
 			<LegacyScrollView
@@ -482,11 +525,15 @@ function Column({
 				refreshControl={<RefreshControl {...pull} tintColor={colors.accent} colors={[colors.accent]} />}
 				contentContainerStyle={{ padding: space.s3, paddingTop: space.s2, gap: space.s3 }}
 			>
-				{stage === "closed" && applications.length === 0 ? (
+				{stage.category === "closed" && !stage.closedReason && applications.length === 0 ? (
 					<Text variant="callout" color="ink3">{t`Drop here to close with a reason.`}</Text>
 				) : null}
 				{shown.map((application, index) => (
-					<Animated.View key={application.id} {...listItemMotion(index, firstAppearance)} layout={listLayout}>
+					<Animated.View
+						key={application.id}
+						{...listItemMotion(index, firstAppearance, { reduced })}
+						layout={listLayout}
+					>
 						<DraggableCard
 							application={application}
 							width={cardWidth}
@@ -500,7 +547,7 @@ function Column({
 					<Button
 						variant="ghost"
 						size="sm"
-						label={t`Show ${Math.min(remaining, COLUMN_PAGE_SIZE)} more`}
+						label={t`Show ${i18n.number(Math.min(remaining, COLUMN_PAGE_SIZE))} more`}
 						onPress={() => setVisible((count) => count + COLUMN_PAGE_SIZE)}
 					/>
 				) : null}
@@ -561,7 +608,15 @@ function BoardCard({ application, onMove }: BoardCardProps) {
 	const { t, i18n } = useLingui();
 	const { space } = useTheme();
 	const { timeZone } = useUserTime();
-	const next = describeNextStep(getNextStep(application), application, i18n.locale, timeZone);
+	const lanes = useApplicationLanes();
+	const hints = useOfferHints();
+	const next = describeNextStep(
+		getNextStep(application, undefined, lanes.lanes, timeZone, offerHintFor(hints, application.id)),
+		application,
+		i18n.locale,
+		timeZone,
+	);
+
 	return (
 		<Card>
 			<Pressable
@@ -593,14 +648,15 @@ function BoardCard({ application, onMove }: BoardCardProps) {
 
 type MoveSheetProps = {
 	application: Application | null;
-	current: ApplicationStatus | null;
+	current: string | null;
 	open: boolean;
 	onClose: () => void;
-	onPick: (stage: ApplicationStatus) => void;
+	onPick: (stage: string) => void;
 };
 
 /** The accessible alternative to dragging (mockup `app-move`). */
 function MoveSheet({ application, current, open, onClose, onPick }: MoveSheetProps) {
+	const lanes = useApplicationLanes();
 	const { t } = useLingui();
 	const { space } = useTheme();
 	return (
@@ -610,17 +666,19 @@ function MoveSheet({ application, current, open, onClose, onPick }: MoveSheetPro
 					<Text color="ink2" style={{ paddingHorizontal: space.s4, paddingBottom: space.s2 }}>
 						{application.role} · {application.company}
 					</Text>
-					{STAGES.map((stage) => (
+					{lanes.active.map((stage) => (
 						<ListRow
-							key={stage}
-							title={stage === "closed" ? t`Close…` : getStageLabel(stage)}
-							leading={stage === current ? "check-circle" : "circle"}
-							selected={stage === current}
-							disabled={stage === current}
-							onPress={() => onPick(stage)}
+							key={stage.id}
+							title={getLaneLabel(stage)}
+							subtitle={stage.category === "closed" && !stage.closedReason ? t`Choose outcome` : undefined}
+							trailing={<View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: stage.color }} />}
+							leading={stage.id === current ? "check-circle" : "circle"}
+							selected={stage.id === current}
+							disabled={!lanes.ready || stage.id === current}
+							onPress={() => onPick(stage.id)}
 						/>
 					))}
-					{current === "saved" ? (
+					{application.status === "saved" ? (
 						<Text variant="callout" color="ink3" style={{ paddingHorizontal: space.s4, paddingTop: space.s2 }}>
 							{t`Moving to Applied asks what you actually sent.`}
 						</Text>

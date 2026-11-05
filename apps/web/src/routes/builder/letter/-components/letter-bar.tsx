@@ -1,9 +1,8 @@
-import { t } from "@lingui/core/macro";
+import { ph, t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
-import { Button } from "@reactive-resume/ui/components/button";
+import { useRef, useState } from "react";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -16,15 +15,16 @@ import { IconButton } from "@reactive-resume/ui/components/icon-button";
 import { Spinner } from "@reactive-resume/ui/components/spinner";
 import { TabsList, TabsTrigger } from "@reactive-resume/ui/components/tabs";
 import { toast } from "@reactive-resume/ui/components/toast";
-import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { downloadWithAnchor } from "@reactive-resume/utils/file";
+import { isolate } from "@reactive-resume/utils/string";
 import { cn } from "@reactive-resume/utils/style";
+import { showKeyboardShortcuts } from "@/features/keyboard-shortcuts/store";
 import { createLetterFile, letterFileName } from "@/features/letters/export";
 import { useLetterEditorStore } from "@/features/letters/store";
 import { DocumentMenuTrigger } from "@/features/resume/editor/chrome";
 import { DownloadButtons, EditorBarFrame } from "@/features/resume/editor/chrome/bar";
 import { useEditorStore } from "@/features/resume/editor/store";
-import { usePrompt } from "@/hooks/use-confirm";
+import { useConfirm, usePrompt } from "@/hooks/use-confirm";
 import { getOrpcErrorMessage, getReadableErrorMessage } from "@/libs/error-message";
 import { ENTER_CLASS } from "@/libs/motion";
 import { client, orpc } from "@/libs/orpc/client";
@@ -36,13 +36,12 @@ type LetterBarProps = {
 };
 
 /**
- * The 56px bar: back, the letter's name and save state · Write/Design · History, Share and Download PDF. The mode
+ * The 56px bar: back, the letter's name and save state · Write/Design · History, Export and Download PDF. The mode
  * switch stays centered through a `1fr auto 1fr` grid.
  */
 export function LetterBar({ layout, pinnable }: LetterBarProps) {
-	const setShareTab = useEditorStore((state) => state.setShareTab);
-	// Below 1280 the bar is too narrow for Share's label next to everything else.
-	const wide = useBreakpoint() === "wide";
+	const setSheetTab = useEditorStore((state) => state.setSheetTab);
+	// Below 1280 the bar is too narrow for Export's label next to everything else.
 	const download = useDownloadLetter();
 
 	return (
@@ -63,14 +62,8 @@ export function LetterBar({ layout, pinnable }: LetterBarProps) {
 				</TabsList>
 			}
 		>
-			{layout === "desktop" && wide ? (
-				<Button variant="secondary" className="gap-1.5" onClick={() => setShareTab("download")}>
-					<Icon name="export" />
-					<Trans>Share</Trans>
-				</Button>
-			) : (
-				<IconButton icon="export" label={t`Share`} onClick={() => setShareTab("download")} />
-			)}
+			{/* Download PDF's ▾ opens the other formats; phones show only its icon, so they keep this way in. */}
+			{layout === "mobile" && <IconButton icon="export" label={t`Export`} onClick={() => setSheetTab("download")} />}
 			<DownloadButtons
 				busy={download.busy}
 				onDownload={() => void download.run()}
@@ -114,6 +107,8 @@ const failed = (error: unknown) =>
 
 /** The name opens the letter's menu: rename, duplicate, lock and Move to Trash. The save state sits under it. */
 function LetterMenu() {
+	const helpRequested = useRef(false);
+	const menuTrigger = useRef<HTMLButtonElement>(null);
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
 	const prompt = usePrompt();
@@ -132,7 +127,11 @@ function LetterMenu() {
 		try {
 			if (!(await useLetterEditorStore.getState().flush()))
 				throw new Error(t`Couldn't save your changes. Try again before continuing.`);
-			const copy = await client.coverLetters.duplicate({ id });
+			const suggested = await client.documents.suggestDuplicateName({ type: "letter", id });
+			const answer = await prompt(t`Duplicate`, { defaultValue: suggested, maxLength: 100, confirmText: t`Duplicate` });
+			const copyName = answer?.trim().slice(0, 100);
+			if (!copyName) return;
+			const copy = await client.coverLetters.duplicate({ id, name: copyName });
 			void queryClient.invalidateQueries({ queryKey: orpc.documents.key() });
 			toast.add({ description: t`Letter duplicated` });
 			void navigate({ to: "/builder/letter/$coverLetterId", params: { coverLetterId: copy.id } });
@@ -160,7 +159,7 @@ function LetterMenu() {
 			void queryClient.invalidateQueries({ queryKey: orpc.documents.key() });
 			void navigate({ to: "/dashboard" });
 			toast.add({
-				description: t`“${name}” moved to Trash`,
+				description: t`“${ph({ name: isolate(name) })}” moved to Trash`,
 				actionProps: {
 					children: t`Undo`,
 					onClick: () =>
@@ -177,8 +176,15 @@ function LetterMenu() {
 
 	return (
 		<>
-			<DropdownMenu>
-				<DropdownMenuTrigger render={<DocumentMenuTrigger name={name} isLocked={isLocked} />} />
+			<DropdownMenu
+				onOpenChangeComplete={(open) => {
+					if (!open && helpRequested.current) {
+						helpRequested.current = false;
+						showKeyboardShortcuts(menuTrigger.current);
+					}
+				}}
+			>
+				<DropdownMenuTrigger ref={menuTrigger} render={<DocumentMenuTrigger name={name} isLocked={isLocked} />} />
 				<DropdownMenuContent align="start" className="w-60">
 					<DropdownMenuItem disabled={isLocked} onClick={() => void rename()}>
 						<Icon name="pencil-simple" />
@@ -193,6 +199,14 @@ function LetterMenu() {
 						{isLocked ? <Trans>Unlock editing</Trans> : <Trans>Lock editing</Trans>}
 					</DropdownMenuItem>
 					<DropdownMenuSeparator />
+					<DropdownMenuItem
+						onClick={() => {
+							helpRequested.current = true;
+						}}
+					>
+						<Icon name="keyboard" />
+						<Trans>Keyboard shortcuts</Trans>
+					</DropdownMenuItem>
 					<DropdownMenuItem variant="destructive" disabled={isLocked} onClick={() => void trash()}>
 						<Icon name="trash" />
 						<Trans>Move to Trash</Trans>
@@ -204,21 +218,58 @@ function LetterMenu() {
 	);
 }
 
-/** Saved, Saving…, Not saved · Retry, or Changed elsewhere · Reload (after which the letter reads as saved). */
+/** Saved, Saving…, Not saved · Retry, or Review saved version · Reload. */
 function LetterSaveStatus() {
 	const status = useLetterEditorStore((state) => state.status);
-	const id = useLetterEditorStore((state) => state.letter?.id ?? "");
+	const confirm = useConfirm();
+	const queryClient = useQueryClient();
+	const [reloading, setReloading] = useState(false);
 
 	const reload = async () => {
+		if (reloading) return;
+		const { sessionId } = useLetterEditorStore.getState();
+		setReloading(true);
 		try {
-			useLetterEditorStore.getState().load(await client.coverLetters.getById({ id }));
+			if (
+				!(await confirm(t`Reload the saved version?`, {
+					description: t`Your edits will be kept as a separate letter in Documents before loading the saved version.`,
+					confirmText: t`Keep a copy and reload`,
+				}))
+			)
+				return;
+			if (useLetterEditorStore.getState().sessionId !== sessionId) return;
+			const copy = await useLetterEditorStore.getState().reloadFromServer();
+			if (copy) toast.add({ type: "success", description: t`Your edits were kept as “${copy.name}”.` });
 		} catch (error) {
 			failed(error);
+		} finally {
+			void queryClient.invalidateQueries({ queryKey: orpc.documents.key() });
+			setReloading(false);
 		}
 	};
 
+	// Announced apart from the visible line, so its Retry and Reload buttons aren't inside a live region; a failed save
+	// is assertive, every other state polite.
+	const announcement =
+		status === "saving"
+			? t`Saving…`
+			: status === "saved"
+				? t`Saved`
+				: status === "error"
+					? t`Not saved`
+					: status === "conflict"
+						? t`Review saved version`
+						: "";
+
 	return (
-		<span role="status" aria-live="polite" className="flex min-w-0 items-center gap-1.5 text-xs leading-4 text-ink-3">
+		<span className="flex min-w-0 items-center gap-1.5 text-xs leading-4 text-ink-3">
+			<span
+				className="sr-only"
+				role={status === "error" ? "alert" : "status"}
+				aria-live={status === "error" ? "assertive" : "polite"}
+			>
+				{announcement}
+			</span>
 			{status === "saving" && (
 				<>
 					<Spinner decorative className="size-3" />
@@ -250,13 +301,14 @@ function LetterSaveStatus() {
 				<span className={cn(ENTER_CLASS, "flex min-w-0 items-center gap-1.5 text-warn-text")}>
 					<Icon name="cloud-warning" size={16} />
 					<span className="truncate">
-						<Trans>Changed elsewhere</Trans>
+						<Trans>Review saved version</Trans>
 					</span>
 					<span aria-hidden="true">·</span>
 					<button
 						type="button"
+						disabled={reloading}
 						onClick={() => void reload()}
-						className="rounded-sm font-semibold underline underline-offset-2 hover:opacity-80"
+						className="rounded-sm font-semibold underline underline-offset-2 hover:opacity-80 disabled:opacity-50"
 					>
 						<Trans>Reload</Trans>
 					</button>

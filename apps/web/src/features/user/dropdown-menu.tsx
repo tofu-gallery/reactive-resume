@@ -19,11 +19,12 @@ import {
 } from "@reactive-resume/ui/components/dropdown-menu";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { toast } from "@reactive-resume/ui/components/toast";
+import { getLocaleOptions } from "@/features/locale/locale-options";
 import { useTheme } from "@/features/theme/provider";
 import { clearAccountData } from "@/libs/auth/clear-account-data";
 import { authClient } from "@/libs/auth/client";
 import { getReadableErrorMessage } from "@/libs/error-message";
-import { changeLocale, localeMap } from "@/libs/locale";
+import { changeLocale } from "@/libs/locale";
 import { isTheme } from "@/libs/theme";
 
 type Props = {
@@ -43,14 +44,15 @@ export function UserDropdownMenu({ children }: Props) {
 	};
 
 	const handleLogout = async () => {
-		const toastId = toast.add({ type: "loading", description: t`Signing out...` });
+		const toastId = toast.add({ type: "loading", description: t`Signing out…` });
 
 		await authClient.signOut({
 			fetchOptions: {
 				onSuccess: () => {
 					toast.close(toastId);
 					clearAccountData(queryClient);
-					void router.invalidate();
+					// Signed out, people land on the site, not on a sign-in form that would bring them back here.
+					void router.navigate({ to: "/", replace: true }).then(() => router.invalidate());
 				},
 				onError: ({ error }) => {
 					toast.add({
@@ -89,9 +91,9 @@ export function UserDropdownMenu({ children }: Props) {
 						</DropdownMenuSubTrigger>
 						<DropdownMenuSubContent className="max-h-[400px] overflow-y-auto">
 							<DropdownMenuRadioGroup value={i18n.locale} onValueChange={changeLocale}>
-								{Object.entries(localeMap).map(([value, label]) => (
+								{getLocaleOptions().map(({ value, label }) => (
 									<DropdownMenuRadioItem key={value} value={value}>
-										{i18n.t(label)}
+										{label}
 									</DropdownMenuRadioItem>
 								))}
 							</DropdownMenuRadioGroup>

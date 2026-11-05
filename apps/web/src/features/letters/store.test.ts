@@ -1,8 +1,9 @@
 import type { CoverLetter } from "@reactive-resume/schema/cover-letter/data";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { ORPCError } from "@orpc/client";
 import { copyCoverLetterStyle } from "@reactive-resume/resume/cover-letter";
 import { defaultResumeData } from "@reactive-resume/schema/resume/default";
+import { setAccountScope } from "@/libs/auth/account-scope";
 
 const mocks = vi.hoisted(() => ({ update: vi.fn(), draft: vi.fn() }));
 vi.mock("@/libs/orpc/client", () => ({
@@ -10,7 +11,8 @@ vi.mock("@/libs/orpc/client", () => ({
 	streamClient: { coverLetters: { draft: mocks.draft } },
 }));
 
-const { discardLetterDraft, startLetterDraft, useLetterEditorStore } = await import("./store");
+const { discardLetterDraft, dismissLetterDraftFailure, startLetterDraft, stopLetterDraft, useLetterEditorStore } =
+	await import("./store");
 
 const letter: CoverLetter = {
 	id: "letter",
@@ -46,16 +48,104 @@ function deferred<T>() {
 	return { promise, resolve, reject };
 }
 
-function* chunks(...parts: string[]) {
+function* chunks(...parts: (string | { aiOperationId: string })[]) {
 	yield* parts;
 }
 
 beforeEach(() => {
 	vi.resetAllMocks();
+	setAccountScope("account-a");
 	store().load(letter);
 });
 
+afterEach(() => {
+	store().reset();
+	vi.unstubAllGlobals();
+});
+
 describe("saving", () => {
+	it.each(["success", "failure"])("pauses sender edits throughout a relink request on %s", async (result) => {
+		store().load({ ...letter, senderLinked: false });
+		const request = deferred<CoverLetter>();
+		const relink = vi.fn(() => request.promise);
+		const changing = store().change(relink);
+		expect(store().changing).toBe(true);
+		await vi.waitFor(() => expect(relink).toHaveBeenCalled());
+		expect(store().savedName).toBe(letter.name);
+		store().edit({ sender: { name: "Late input" } });
+		expect(store().pending).toEqual({});
+		if (result === "success") {
+			request.resolve({ ...letter, name: "Confirmed letter", revision: 2 });
+			await changing;
+			expect(store().savedName).toBe("Confirmed letter");
+			expect(store().letter?.style.basics).toEqual(letter.style.basics);
+		} else {
+			const failed = expect(changing).rejects.toThrow("offline");
+			request.reject(new Error("offline"));
+			await failed;
+			expect(store().savedName).toBe(letter.name);
+			store().edit({ sender: { name: "Retry input" } });
+			expect(store().pending).toEqual({ sender: { name: "Retry input" } });
+		}
+		expect(store().changing).toBe(false);
+		expect(mocks.update).not.toHaveBeenCalled();
+	});
+
+	it("merges sender fields through an in-flight save and flushes them before relinking", async () => {
+		store().load({ ...letter, senderLinked: false });
+		const request = deferred<CoverLetter>();
+		mocks.update
+			.mockReturnValueOnce(request.promise)
+			.mockImplementation(async () => ({ ...store().letter, revision: 3 }));
+		store().edit({ sender: { name: "Jordan" } });
+		store().edit({ sender: { email: "jordan@example.test" } });
+		const saving = store().flush();
+		store().edit({ sender: { location: "Berlin" } });
+		request.resolve({
+			...letter,
+			senderLinked: false,
+			style: { ...letter.style, basics: { ...letter.style.basics, name: "Jordan", email: "jordan@example.test" } },
+			revision: 2,
+		});
+		await saving;
+		expect(store().letter?.style.basics).toMatchObject({
+			name: "Jordan",
+			email: "jordan@example.test",
+			location: "Berlin",
+		});
+		expect(mocks.update).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({ sender: { name: "Jordan", email: "jordan@example.test" } }),
+		);
+		expect(mocks.update).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({ expectedRevision: 2, sender: { location: "Berlin" } }),
+		);
+		store().edit({ sender: { phone: "5550100" } });
+		const relink = vi.fn(async () => ({ ...letter, revision: 5 }));
+		await store().change(relink);
+		expect(mocks.update).toHaveBeenLastCalledWith(expect.objectContaining({ sender: { phone: "5550100" } }));
+		expect(store().letter?.style.basics).toEqual(letter.style.basics);
+	});
+
+	it("shows and saves the header details an unlinked letter edits, including leaving its photo off", async () => {
+		const style = structuredClone(letter.style);
+		style.picture.url = "https://example.test/photo.png";
+		store().load({ ...letter, senderLinked: false, style });
+		mocks.update.mockImplementation(async () => ({ ...store().letter, revision: 2 }));
+		const sender = {
+			headline: "",
+			website: { url: "https://jordan.example", label: "" },
+			customFields: [{ id: "gh", icon: "github-logo", text: "github.com/jordan", link: "" }],
+			picture: { hidden: true },
+		};
+		store().edit({ sender });
+
+		expect(store().letter?.style.basics).toMatchObject({ headline: "", website: sender.website });
+		expect(store().letter?.style.picture).toEqual({ ...style.picture, hidden: true });
+		await store().flush();
+		expect(mocks.update).toHaveBeenCalledWith(expect.objectContaining({ sender }));
+	});
 	it.each(["success", "failure"])("ignores an old session's %s while another letter is edited", async (result) => {
 		const request = deferred<CoverLetter>();
 		mocks.update.mockReturnValueOnce(request.promise).mockImplementation(async (input) => ({
@@ -75,6 +165,26 @@ describe("saving", () => {
 		expect(store().status).toBe("saving");
 		await store().flush();
 		expect(mocks.update.mock.calls.map(([input]) => input.id)).toEqual(["letter", "B"]);
+	});
+
+	it("retains confirmed usage on save echoes and hides it only for a different pending source", async () => {
+		const usage = {
+			requests: 1,
+			models: [{ providerId: "provider", label: "Original", provider: "openai", model: "original" }],
+		};
+		const saved = { ...letter, aiOperationIds: ["original-op"], aiUsage: usage, revision: 2 };
+		const request = deferred<CoverLetter>();
+		mocks.update.mockReturnValueOnce(request.promise);
+		store().edit({ content: "<p>Draft</p>", aiOperationIds: ["original-op"] });
+		const saving = store().flush();
+		request.resolve(saved);
+		await saving;
+		expect(store().letter?.aiUsage).toEqual(usage);
+		expect(mocks.update).toHaveBeenCalledWith(
+			expect.objectContaining({ content: "<p>Draft</p>", aiOperationIds: ["original-op"] }),
+		);
+		store().edit({ content: "<p>Another draft</p>", aiOperationIds: ["new-op"] });
+		expect(store().letter?.aiUsage).toBeNull();
 	});
 
 	it("reports failed saves, retains the draft, and prevents a destructive change", async () => {
@@ -157,12 +267,213 @@ describe("drafts", () => {
 	it("streams a draft beside the body, which only changes when the draft is kept", async () => {
 		mocks.draft.mockResolvedValue(chunks("I'm applying", " for the role."));
 		await startLetterDraft();
-		expect(mocks.draft).toHaveBeenCalledWith({ id: "letter", variant: "draft" }, expect.anything());
-		expect(store().draft).toEqual({ phase: "ready", text: "I'm applying for the role." });
+		expect(mocks.draft).toHaveBeenCalledWith(
+			{ id: "letter", variant: "draft", includeProvenance: true },
+			expect.anything(),
+		);
+		expect(store().draft).toEqual({
+			phase: "ready",
+			aiOperationIds: [],
+			text: "I'm applying for the role.",
+			versions: [],
+		});
 		expect(store().letter?.content).toBe("<p>Mine</p>");
 
 		discardLetterDraft();
 		expect(store().draft).toEqual({ phase: "idle" });
 		expect(store().letter?.content).toBe("<p>Mine</p>");
+	});
+
+	it("keeps per-version sources through revisions, failed runs, Stop and reload without guessing old-server sources", async () => {
+		const stored = new Map<string, string>();
+		vi.stubGlobal("sessionStorage", {
+			getItem: (key: string) => stored.get(key) ?? null,
+			setItem: (key: string, value: string) => stored.set(key, value),
+			removeItem: (key: string) => stored.delete(key),
+		});
+		mocks.draft.mockResolvedValueOnce(chunks({ aiOperationId: "original-op" }, "Original"));
+		await startLetterDraft();
+		mocks.draft.mockResolvedValueOnce(chunks({ aiOperationId: "revision-op" }, "Revised"));
+		await startLetterDraft("shorter", "Original", ["original-op"]);
+		expect(store().draft).toMatchObject({
+			text: "Revised",
+			aiOperationIds: ["original-op", "revision-op"],
+			versions: [{ text: "Original", aiOperationIds: ["original-op"] }],
+		});
+		expect(JSON.parse(stored.get("letter-draft:account-a:letter") ?? "null").versions).toEqual(["Original"]);
+		const held = deferred<void>();
+		mocks.draft.mockResolvedValueOnce(
+			(async function* () {
+				yield { aiOperationId: "partial-op" };
+				yield "Partial";
+				await held.promise;
+			})(),
+		);
+		const pending = startLetterDraft("personal", "Original", ["original-op"]);
+		await vi.waitFor(() => expect(store().draft).toMatchObject({ text: "Partial" }));
+		stopLetterDraft();
+		expect(store().draft).toMatchObject({
+			phase: "ready",
+			text: "Partial",
+			aiOperationIds: ["original-op", "partial-op"],
+			stopped: true,
+		});
+		held.resolve();
+		await pending;
+		store().load(letter);
+		expect(store().draft).toMatchObject({
+			phase: "ready",
+			text: "Partial",
+			aiOperationIds: ["original-op", "partial-op"],
+			versions: [
+				{ text: "Original", aiOperationIds: ["original-op"] },
+				{ text: "Revised", aiOperationIds: ["original-op", "revision-op"] },
+			],
+		});
+		mocks.draft.mockRejectedValueOnce(new Error("Provider down"));
+		await startLetterDraft("shorter", "Partial", ["original-op", "partial-op"]);
+		dismissLetterDraftFailure();
+		expect(store().draft).toMatchObject({ text: "Partial", aiOperationIds: ["original-op", "partial-op"] });
+		// String-only recovery from older clients is still readable, with unknown history.
+		stored.set(
+			"letter-draft:account-a:letter",
+			JSON.stringify({ text: "Legacy", versions: ["Earlier legacy"], revision: letter.revision }),
+		);
+		store().load(letter);
+		expect(store().draft).toMatchObject({
+			text: "Legacy",
+			aiOperationIds: [],
+			versions: [{ text: "Earlier legacy", aiOperationIds: [] }],
+		});
+	});
+
+	it("keeps the earlier draft beside a Shorter one, and goes back to it when a later run fails (A3-15)", async () => {
+		mocks.draft.mockResolvedValueOnce(chunks("The long draft."));
+		await startLetterDraft();
+		mocks.draft.mockResolvedValueOnce(chunks("Short."));
+		await startLetterDraft("shorter", "The long draft.");
+		expect(store().draft).toEqual({
+			phase: "ready",
+			aiOperationIds: [],
+			text: "Short.",
+			versions: [{ text: "The long draft.", aiOperationIds: [] }],
+		});
+
+		mocks.draft.mockRejectedValueOnce(new Error("Provider down"));
+		await startLetterDraft("personal", "Short.");
+		expect(store().draft).toMatchObject({
+			phase: "failed",
+			versions: [
+				{ text: "The long draft.", aiOperationIds: [] },
+				{ text: "Short.", aiOperationIds: [] },
+			],
+		});
+		dismissLetterDraftFailure();
+		expect(store().draft).toEqual({
+			phase: "ready",
+			aiOperationIds: [],
+			text: "Short.",
+			versions: [{ text: "The long draft.", aiOperationIds: [] }],
+		});
+	});
+
+	it("keeps what streamed when drafting is stopped (A3-15)", async () => {
+		mocks.draft.mockResolvedValueOnce(
+			(async function* () {
+				yield "Dear team, I";
+				await new Promise(() => {});
+			})(),
+		);
+		void startLetterDraft();
+		await vi.waitFor(() => expect(store().draft).toMatchObject({ phase: "streaming", text: "Dear team, I" }));
+		stopLetterDraft();
+		expect(store().draft).toEqual({
+			phase: "ready",
+			aiOperationIds: [],
+			text: "Dear team, I",
+			versions: [],
+			stopped: true,
+		});
+	});
+
+	it("shows a ready, unkept draft again after a reload without asking the provider twice", async () => {
+		const stored = new Map<string, string>();
+		vi.stubGlobal("sessionStorage", {
+			getItem: (key: string) => stored.get(key) ?? null,
+			setItem: (key: string, value: string) => void stored.set(key, value),
+			removeItem: (key: string) => void stored.delete(key),
+		});
+		mocks.draft.mockResolvedValue(chunks("A draft I paid for."));
+		await startLetterDraft();
+		expect(stored.get("letter-draft:account-a:letter")).toContain("A draft I paid for.");
+
+		// A reload: the store is empty, then the route loads the same letter.
+		useLetterEditorStore.setState({ letter: null, draft: { phase: "idle" } });
+		store().load(letter);
+		expect(store().draft).toEqual({ phase: "ready", aiOperationIds: [], text: "A draft I paid for.", versions: [] });
+		expect(mocks.draft).toHaveBeenCalledTimes(1);
+		// The body is still untouched until Keep.
+		expect(store().letter?.content).toBe("<p>Mine</p>");
+
+		// A draft written against an older revision is not offered after the letter changed elsewhere.
+		store().load({ ...letter, revision: letter.revision + 1 });
+		expect(store().draft).toEqual({ phase: "idle" });
+
+		discardLetterDraft();
+		expect(stored.has("letter-draft:account-a:letter")).toBe(false);
+		vi.unstubAllGlobals();
+	});
+	it("keeps unkept text in the account that paid for it, even when another account loads the same id", async () => {
+		const stored = new Map<string, string>();
+		vi.stubGlobal("sessionStorage", {
+			getItem: (key: string) => stored.get(key) ?? null,
+			setItem: (key: string, value: string) => void stored.set(key, value),
+			removeItem: (key: string) => void stored.delete(key),
+		});
+		mocks.draft.mockResolvedValue(chunks("Private account A draft"));
+		await startLetterDraft();
+		store().reset();
+		setAccountScope("account-b");
+		store().load(letter);
+		expect(store().draft).toEqual({ phase: "idle" });
+		discardLetterDraft();
+		setAccountScope("account-a");
+		store().load(letter);
+		expect(store().draft).toEqual({
+			phase: "ready",
+			aiOperationIds: [],
+			text: "Private account A draft",
+			versions: [],
+		});
+		expect(mocks.draft).toHaveBeenCalledTimes(1);
+	});
+
+	it("flushes new links before drafting and stores against the saved revision", async () => {
+		mocks.update.mockResolvedValue({ ...letter, recipientName: "Dana", revision: 2 });
+		mocks.draft.mockImplementation(() => {
+			expect(store().pending).toEqual({});
+			expect(store().letter?.revision).toBe(2);
+			return chunks("Saved revision draft");
+		});
+		store().edit({ recipientName: "Dana" });
+		await startLetterDraft();
+		expect(store().draft).toEqual({ phase: "ready", aiOperationIds: [], text: "Saved revision draft", versions: [] });
+	});
+
+	it("does not start a paid request when saving fails or the account changes during the save", async () => {
+		mocks.update.mockRejectedValueOnce(new Error("Offline"));
+		store().edit({ recipientName: "Dana" });
+		await startLetterDraft();
+		expect(store().draft.phase).toBe("failed");
+		expect(mocks.draft).not.toHaveBeenCalled();
+		const save = deferred<CoverLetter>();
+		mocks.update.mockReturnValueOnce(save.promise);
+		const pending = startLetterDraft();
+		setAccountScope("account-b");
+		store().load(letter);
+		save.resolve({ ...letter, revision: 2 });
+		await pending;
+		expect(mocks.draft).not.toHaveBeenCalled();
+		expect(store().draft).toEqual({ phase: "idle" });
 	});
 });

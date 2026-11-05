@@ -1,27 +1,42 @@
 ---
-title: "Updating your profile"
+title: "Updating your account details"
 description: "Change your account photo, name, username, email address and password in Reactive Resume's Settings, and learn what each change affects."
 ---
 
-Your profile is the name, photo, username and email tied to your account. You can change any of them in **Settings → Account**. This page also covers changing your password.
+Your account details are the name, photo, username and email tied to your account. You can change any of them in **Settings → Account**. This page also covers changing your password.
 
 <Note>
-  Your profile is separate from your resumes. Changing your account name or photo does not change the name or photo on
-  any resume. Those live in each resume's **Basics** section.
+  Your account details are separate from your resumes. Changing your account name or photo does not change the name or
+  photo on any resume. Those live in each resume's **Basics** section.
 </Note>
 
-## Open your profile
+## Open your account details
 
-Select your name at the bottom of the sidebar, then **Settings**. **Account** opens first, with **Profile** at the top.
+Select your name at the bottom of the sidebar, then **Settings**. **Account** opens first, with **Account details** at the top.
 
 On a phone, **Settings** opens a short list first. Tap **Account**.
 
-<Frame caption="The Profile section in Settings → Account">
+<Frame caption="The Account details section in Settings → Account">
   <img
     src="/images/guides/updating-your-profile/profile-section.webp"
-    alt="The Profile section with an initials avatar, a Change photo button, Name and Username fields, and an Email field with a hint about confirmation"
+    alt="Account details with fictional David Kowalski name, username and email, separate from the application Profile"
   />
 </Frame>
+
+## Manage sign-in security in the native app
+
+In the iOS or Android app, open **Settings → Account** and select **Email**, **Password**, **Two-step verification**, **Passkeys** or **Linked accounts**. Each opens its own section in your server's authenticated browser tab inside the app. Native sign-in does not copy your app credentials into the browser; you may need to sign in there.
+
+The browser must use the same account as the app. If another account is signed in, management controls stay hidden. Choose **Sign in again** and sign in with the account that opened the settings. You return to the section you selected. Closing the browser without changing anything leaves your account unchanged.
+
+<Frame caption="A different browser account must sign in again before managing security">
+  <img
+    src="/images/guides/updating-your-profile/native-browser-account-check.png"
+    alt="Account settings hiding management controls and asking to sign in with the account that opened these settings, with a Sign in again button"
+  />
+</Frame>
+
+Password checks, current-address approval, passkey verification and the restriction against disconnecting your last sign-in method still apply. Two-step verification needs a password; servers without social sign-in providers say so under **Linked accounts**. When you close the browser, the app refreshes your profile and API-key list if the opening account is still signed in.
 
 ## Change your name, username or email
 
@@ -30,18 +45,19 @@ Click a field, type the new value, then press <kbd>Enter</kbd> or click anywhere
 If a value can't be saved, it stays in the field with the reason underneath, for example when a username is already taken.
 
 - **Name**: up to 64 characters. Shown in the app, not on your resumes.
-- **Username**: 3 to 64 characters, using lowercase letters, numbers, dots, hyphens and underscores. The field shows your site address in front of it, because the username is part of every public resume link.
+- **Username**: 3 to 64 characters, using Latin letters a–z, numbers, dots, hyphens and underscores. The field shows your site address in front of it, because the username is part of every public resume link.
 - **Email**: see below. Changing it takes an extra step.
 
 <Warning>
-  Changing your username changes the address of every public resume. Links you have already shared, such as the one on a
-  job application, stop working. Share the new links after the change. Your old username stays reserved for you for 30
-  days, so nobody else can take it and its links in that time.
+  Changing your username changes the address of every public resume. If any resume is public, Reactive Resume first says
+  how many links will change; choose **Change username** to go ahead or **Keep username** to put the old one back. For
+  30 days your old username stays reserved for you, and links you have already shared, such as the one on a job
+  application, send visitors to the new address. After that they stop working, so share the new links before then.
 </Warning>
 
 ### Confirm a new email address
 
-When you change **Email** and your current address is verified, Reactive Resume first sends an approval link to the current address, so nobody else can move your account. Open it, then open the confirmation link that arrives at the new address. Your account keeps the old address until both are done. Check both inboxes, including spam.
+When you change **Email** and your current address is verified, Reactive Resume first sends an approval link to the current address, so nobody else can move your account. Open it, then open the confirmation link that arrives at the new address. Your account keeps the old address until both are done, so the field shows it again, with a line under it naming the address the change is waiting on. Select **Resend** to send the link again, or **Cancel** to forget the request on this device; the links stop working after an hour. Check both inboxes, including spam. On a server that can't send email, the address can't be changed in the app.
 
 If your current address isn't verified, the confirmation link goes straight to the new address.
 
@@ -71,11 +87,11 @@ Select **Change photo** and choose an image. It uploads right away and replaces 
 <Frame caption="The Change your password dialog">
   <img
     src="/images/guides/updating-your-profile/update-password-dialog.webp"
-    alt="The Change your password dialog with Current password and New password fields and a Change password button"
+    alt="Change your password dialog with Current password, New password and Change password"
   />
 </Frame>
 
-If you signed up with a social account, the **Password** row reads **You sign in without one**, and the button says **Set a password**. It takes you to the password reset page, where you can have a link emailed to you to create one.
+If you signed up with a social account, the **Password** row reads **You sign in without one**, and the button says **Set a password**. Enter a new password and select **Set password** to add it as another way to sign in. Unlike a password reset, it keeps you signed in on your other devices and keeps your passkeys, API keys and connected apps. You need to have signed in within the last 24 hours.
 
 ## Related guides
 

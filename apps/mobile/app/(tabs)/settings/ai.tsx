@@ -24,6 +24,12 @@ export default function AiScreen() {
 					onPress={() => router.push("/settings/ai-mcp")}
 				/>
 				<ListRow
+					title={t`Connected applications`}
+					leading="plugs-connected"
+					chevron
+					onPress={() => router.push("/settings/ai-connections")}
+				/>
+				<ListRow
 					title={t`Report AI content`}
 					leading="warning-circle"
 					chevron

@@ -1,30 +1,35 @@
 import type { CSSProperties, ReactNode } from "react";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { Link } from "@tanstack/react-router";
 import { cn } from "@reactive-resume/utils/style";
 import { getHeadline } from "./hero";
 import { SCENE } from "./scroll";
+import { LanguageDoorway } from "./sections";
 import { labelClass } from "./ui";
 import { useTheme } from "@/features/theme/provider";
 
 const githubUrl = "https://github.com/reactive-resume/reactive-resume";
 const licenseUrl = `${githubUrl}/blob/main/LICENSE`;
-const linkClass = "text-ink transition-colors hover:text-accent-text";
+// On touch, each link is a 44px row; the column gap closes so the columns don't grow.
+const linkClass =
+	"text-ink transition-colors hover:text-accent-text pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center";
 
 type FooterLink =
 	| { label: string; href: string }
-	| { label: string; to: "/ats-checker" | "/auth/register" | "/resume-templates" };
+	| { label: string; to: "/ats-checker" | "/auth/login" | "/auth/register" | "/resume-templates" };
 
-const getColumns = (): { id: string; title: string; links: FooterLink[] }[] => [
+const getColumns = (story: boolean): { id: string; title: string; links: FooterLink[] }[] => [
 	{
 		id: "product",
 		title: t`Product`,
 		links: [
 			{ label: t`Templates`, to: "/resume-templates" },
-			{ label: t`Features`, href: "#write" },
+			{ label: t`Features`, href: story ? "#write" : "https://rxresu.me/#write" },
 			{ label: t`ATS checker`, to: "/ats-checker" },
 			{ label: t`Get started`, to: "/auth/register" },
+			{ label: t`Sign in`, to: "/auth/login" },
 		],
 	},
 	{
@@ -81,11 +86,16 @@ function FooterLinkItem({ link }: { link: FooterLink }): ReactNode {
  * the page (the resume to Write, the glasses to Check, the letters to Share, the calendar to Prepare, the window to
  * Remember), and its lamp switches the theme.
  */
-export function LandingFooter() {
+type LandingFooterProps = { story?: boolean };
+
+export function LandingFooter({ story = true }: LandingFooterProps) {
 	const headline = getHeadline();
 
 	return (
-		<footer data-scene={SCENE.footer} className="relative overflow-hidden border-t border-line">
+		<footer
+			data-scene={SCENE.footer}
+			className={cn("relative overflow-hidden border-t border-line", !story && "pb-12")}
+		>
 			<div className="relative z-1 mx-auto grid max-w-[1440px] gap-x-12 gap-y-14 px-(--gutter) pt-20 min-[1000px]:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
 				<div className="flex min-w-0 flex-col items-start gap-5">
 					<img
@@ -114,7 +124,7 @@ export function LandingFooter() {
 				</div>
 
 				<div className="grid grid-cols-2 gap-x-8 gap-y-10 min-[640px]:grid-cols-4">
-					{getColumns().map((column) => (
+					{getColumns(story).map((column) => (
 						<nav
 							key={column.id}
 							aria-labelledby={`footer-${column.id}`}
@@ -123,7 +133,7 @@ export function LandingFooter() {
 							<h2 id={`footer-${column.id}`} className={cn(labelClass, "mb-1 text-ink-3")}>
 								{column.title}
 							</h2>
-							<ul className="flex flex-col gap-2.5">
+							<ul className="flex flex-col gap-2.5 pointer-coarse:gap-0">
 								{column.links.map((link) => (
 									<li key={link.label}>
 										<FooterLinkItem link={link} />
@@ -139,6 +149,7 @@ export function LandingFooter() {
 				{/* Narrow enough to wrap into two balanced lines in any language, without splitting the translation. */}
 				<p className="max-w-[20ch] text-balance">{t`By the community, for the community.`}</p>
 				<p className="flex flex-wrap items-center gap-x-4 gap-y-1">
+					<LanguageDoorway story={story} className={cn("gap-1.5", linkClass)} />
 					<span>
 						<Trans>
 							Licensed under{" "}
@@ -154,7 +165,7 @@ export function LandingFooter() {
 				</p>
 			</div>
 
-			<FooterDesk />
+			{story && <FooterDesk />}
 		</footer>
 	);
 }
@@ -188,6 +199,9 @@ const spotWashClass =
 const spotLabelClass =
 	"pointer-events-none absolute bottom-[calc(100%+8px)] left-1/2 flex -translate-x-1/2 translate-y-1 items-center gap-1.5 rounded-sm bg-ink px-2 py-1 font-ui text-xs font-medium whitespace-nowrap text-bg opacity-0 shadow-e2 transition-[opacity,translate] duration-standard ease-enter group-hover/spot:translate-y-0 group-hover/spot:opacity-100 group-focus-visible/spot:translate-y-0 group-focus-visible/spot:opacity-100";
 
+// Phones crop the 3:1 drawing to a 16:10 box (object-fit: cover), so it renders at 1.875× the viewport width there.
+const deskSizes = "(max-width: 699px) 188vw, (min-width: 1800px) 1800px, 100vw";
+
 /**
  * The desk at the end of the page: a resume, letters, a calendar, glasses and a lamp in front of an open window. Day
  * in the light theme, night in the dark one. Each drawing is blended into the page (white vanishes into the light
@@ -202,6 +216,8 @@ function FooterDesk() {
 			<div aria-hidden="true" className="footer-dawn" />
 			<img
 				src="/illustrations/footer-desk-light.webp"
+				srcSet="/illustrations/footer-desk-light-1600.webp 1600w, /illustrations/footer-desk-light-2400.webp 2400w, /illustrations/footer-desk-light.webp 3200w"
+				sizes={deskSizes}
 				alt=""
 				width={2172}
 				height={724}
@@ -212,6 +228,8 @@ function FooterDesk() {
 			/>
 			<img
 				src="/illustrations/footer-desk-dark.webp"
+				srcSet="/illustrations/footer-desk-dark-1600.webp 1600w, /illustrations/footer-desk-dark-2400.webp 2400w, /illustrations/footer-desk-dark.webp 3200w"
+				sizes={deskSizes}
 				alt=""
 				width={2172}
 				height={724}
@@ -226,7 +244,7 @@ function FooterDesk() {
 					<span aria-hidden="true" className={spotWashClass} />
 					<span className={spotLabelClass}>
 						<span aria-hidden="true" className="font-mono text-[10px] opacity-60">
-							{spot.number}
+							{i18n.number(Number(spot.number), { minimumIntegerDigits: 2 })}
 						</span>
 						{spot.label}
 					</span>

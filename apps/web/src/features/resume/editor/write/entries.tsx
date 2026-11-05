@@ -3,8 +3,10 @@ import type { Entry } from "./model";
 import type { CustomSectionType, RoleItem, Website } from "@reactive-resume/schema/resume/data";
 import type { DateFormat, ResumeDates } from "@reactive-resume/schema/resume/dates";
 import type { ReactNode } from "react";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
+import { useEffect } from "react";
 import { EMPTY_RESUME_DATES } from "@reactive-resume/schema/resume/dates";
 import { Button } from "@reactive-resume/ui/components/button";
 import { FormControl, FormDescription, FormItem, FormLabel } from "@reactive-resume/ui/components/form";
@@ -12,6 +14,7 @@ import { IconButton } from "@reactive-resume/ui/components/icon-button";
 import { PopoverTrigger } from "@reactive-resume/ui/components/popover";
 import { Slider } from "@reactive-resume/ui/components/slider";
 import { generateId } from "@reactive-resume/utils/string";
+import { useEditorStore } from "../store";
 import { DatesField } from "./dates-field";
 import { MoreOptions, TextField, WebsiteField } from "./fields";
 import { RichTextEditor } from "./rich-text-editor";
@@ -59,12 +62,13 @@ function Text({
 	);
 }
 
-function Dates({ entry, write, page, single }: FieldSetProps & { single?: boolean }) {
+function Dates({ entry, write, page, single, expectable }: FieldSetProps & { single?: boolean; expectable?: boolean }) {
 	return (
 		<DatesField
 			className="col-span-full"
 			dates={valuesOf(entry).dates ?? EMPTY_RESUME_DATES}
 			single={single}
+			expectable={expectable}
 			locale={page.locale}
 			format={page.dateFormat}
 			onChange={(dates) =>
@@ -102,10 +106,14 @@ function Description({
 			<RichTextEditor
 				label={label ?? t`Description`}
 				value={str(valuesOf(entry)[field])}
-				onChange={(html) =>
-					write(field, (target) => {
-						target[field] = html;
-					})
+				onChange={(html, options) =>
+					write(
+						field,
+						(target) => {
+							target[field] = html;
+						},
+						options,
+					)
 				}
 			/>
 		</div>
@@ -155,7 +163,7 @@ function Level({ entry, write }: FieldSetProps) {
 					/>
 				}
 			/>
-			<FormDescription>{level === 0 ? t`Hidden` : `${level} / 5`}</FormDescription>
+			<FormDescription>{level === 0 ? t`Hidden` : `${i18n.number(level)} / ${i18n.number(5)}`}</FormDescription>
 		</FormItem>
 	);
 }
@@ -201,10 +209,14 @@ function IconAndColor({ entry, write }: FieldSetProps) {
 function Roles({ entry, write, page }: FieldSetProps) {
 	const roles = valuesOf(entry).roles ?? [];
 
-	const writeRoles = (key: string, mutate: (roles: RoleItem[]) => void) =>
-		write(`roles:${key}`, (target) => {
-			mutate(target.roles as RoleItem[]);
-		});
+	const writeRoles = (key: string, mutate: (roles: RoleItem[]) => void, options?: Parameters<EntryWriter>[2]) =>
+		write(
+			`roles:${key}`,
+			(target) => {
+				mutate(target.roles as RoleItem[]);
+			},
+			options,
+		);
 
 	return (
 		<div className="col-span-full grid gap-3">
@@ -212,7 +224,7 @@ function Roles({ entry, write, page }: FieldSetProps) {
 				<div key={role.id} className="grid grid-cols-2 gap-x-3 gap-y-2.5 rounded-lg border border-line bg-bg p-3">
 					<div className="col-span-full flex items-center justify-between">
 						<span className="text-[13px] font-medium text-ink-2">
-							<Trans>Role {index + 1}</Trans>
+							<Trans>Role {i18n.number(index + 1)}</Trans>
 						</span>
 						<div className="flex">
 							<IconButton
@@ -269,13 +281,17 @@ function Roles({ entry, write, page }: FieldSetProps) {
 							<Trans>Description</Trans>
 						</span>
 						<RichTextEditor
-							label={t`Description of role ${index + 1}`}
+							label={t`Description of role ${i18n.number(index + 1)}`}
 							value={role.description}
-							onChange={(html) =>
-								writeRoles(`${role.id}:description`, (list) => {
-									const target = list[index];
-									if (target) target.description = html;
-								})
+							onChange={(html, options) =>
+								writeRoles(
+									`${role.id}:description`,
+									(list) => {
+										const target = list[index];
+										if (target) target.description = html;
+									},
+									options,
+								)
 							}
 						/>
 					</div>
@@ -310,6 +326,11 @@ export function EntryFields({
 	autoFocus,
 	...props
 }: FieldSetProps & { type: CustomSectionType; autoFocus?: boolean | undefined }) {
+	// Consume the request after fields mount, including when a phone sheet mounts them through its portal.
+	useEffect(() => {
+		if (autoFocus) useEditorStore.setState({ focusEntryId: null });
+	}, [autoFocus]);
+
 	switch (type) {
 		case "experience":
 			return (
@@ -331,7 +352,7 @@ export function EntryFields({
 					<Text {...props} field="area" label={<Trans>Area of study</Trans>} />
 					<Text {...props} field="grade" label={<Trans>Grade</Trans>} />
 					<Text {...props} field="location" label={<Trans>Location</Trans>} />
-					<Dates {...props} />
+					<Dates {...props} expectable />
 					<Link {...props} />
 					<Description {...props} />
 				</>

@@ -67,6 +67,8 @@ export const aiProvidersRouter = {
 					label: input.label,
 					provider: input.provider,
 					model: input.model,
+					...(input.fastModel !== undefined ? { fastModel: input.fastModel } : {}),
+					...(input.capableModel !== undefined ? { capableModel: input.capableModel } : {}),
 					...(input.baseURL !== undefined ? { baseURL: input.baseURL } : {}),
 					apiKey: input.apiKey,
 				});
@@ -97,6 +99,8 @@ export const aiProvidersRouter = {
 					...(input.label !== undefined ? { label: input.label } : {}),
 					...(input.provider !== undefined ? { provider: input.provider } : {}),
 					...(input.model !== undefined ? { model: input.model } : {}),
+					...(input.fastModel !== undefined ? { fastModel: input.fastModel } : {}),
+					...(input.capableModel !== undefined ? { capableModel: input.capableModel } : {}),
 					...(input.baseURL !== undefined ? { baseURL: input.baseURL } : {}),
 					...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}),
 					...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
@@ -154,9 +158,9 @@ export const aiProvidersRouter = {
 		.output(aiProviderResponseSchema)
 		.use(aiRequestRateLimit)
 		.errors({ BAD_REQUEST, FORBIDDEN, BAD_GATEWAY, NOT_FOUND, PRECONDITION_FAILED })
-		.handler(async ({ context, input }) => {
+		.handler(async ({ context, input, signal }) => {
 			try {
-				return await aiProvidersService.test({ id: input.id, userId: context.user.id });
+				return await aiProvidersService.test({ id: input.id, userId: context.user.id, signal });
 			} catch (error) {
 				if (isInvalidAiBaseUrl(error)) throwInvalidProviderConfig();
 				if (error instanceof ORPCError) throw error;

@@ -1,16 +1,16 @@
 ---
 title: "Contributing translations"
-description: "Help translate Reactive Resume on Crowdin: read the glossary, keep placeholders intact, request a new language, and update catalogs in a checkout."
+description: "Help translate the web and native apps: follow the glossary, preserve placeholders, review catalogs, and contribute changes in a pull request."
 ---
 
-Reactive Resume is available in more than 50 languages, and every translation comes from volunteers. If you speak a language other than English, you can help people build their resume in it. You don't need to write code: translations happen in your browser on Crowdin.
+Reactive Resume is available in more than 50 languages. If you speak a language other than English, you can help people build their resume in it by reviewing interface translations. The web and native apps have separate catalogs, with shared wording reused where the messages match.
 
 ## How translations reach the app
 
-1. Developers write every interface string in English. The strings are collected in one source catalog, `apps/web/locales/en-US.po`.
-2. Translators work on that catalog in the [Reactive Resume project on Crowdin](https://crowdin.com/project/reactive-resume).
-3. After each change to the `main` branch, a GitHub workflow uploads the source catalog, downloads the latest translations, and opens a pull request titled "Sync Translations from Crowdin".
-4. Once that pull request is merged, your translations ship with the next release of the app. There's usually a delay of a few days to a few weeks, depending on the release cycle.
+1. Developers write interface strings in English. Extraction updates the source catalogs at `apps/web/locales/en-US.po` and `apps/mobile/locales/en-US.po`.
+2. Contributors fill and review the target `.po` catalogs. Native extraction also copies matching web translations into empty native entries; existing native translations stay intact.
+3. A pull request carries the reviewed catalogs and any changed PDF translation files. The repository no longer has an automatic Crowdin synchronization workflow: changes on Crowdin need a maintainer to import them before they reach the app.
+4. Merged translations ship with a subsequent release or compatible mobile update. A Crowdin suggestion or a merged catalog change alone does not mean the deployed app has updated.
 
 The same translations also label the default section headings in downloaded PDFs, such as "Experience" and "Education", and the word "Present" in date ranges.
 
@@ -20,7 +20,9 @@ Most of the interface is made of short, standalone labels like `Board`, `Resume`
 
 The [glossary](https://github.com/reactive-resume/reactive-resume/blob/main/GLOSSARY.md) explains what each recurring term means in Reactive Resume, lists the wrong senses that earlier translations used, and names the terms that stay in English: the product name, technology names such as PDF, DOCX, JSON, API, and MCP, AI provider names, and template names such as Azurill and Pikachu. Read the entry for a term before you translate it.
 
-## Translate on Crowdin
+## Suggest translations on Crowdin
+
+The [Reactive Resume project on Crowdin](https://crowdin.com/project/reactive-resume) remains linked from the repository. Before working there, coordinate with a maintainer about importing your changes: the former automatic upload/download workflow is no longer present. For a contribution that can be reviewed directly in the repository, use [Updating catalogs in a checkout](#updating-catalogs-in-a-checkout).
 
 <Steps>
   <Step title="Create a Crowdin account">
@@ -77,40 +79,67 @@ Translate the text inside each set of braces, keep `#` where the number goes, an
 
 ### Be consistent
 
-- Choose a formal or informal tone based on what's normal for software in your language, and use it everywhere.
+- Choose a formal or informal tone based on what's normal for software in your language, and use it everywhere. Buttons and short labels avoid addressing the reader at all where your language allows: German uses the infinitive ("Lebenslauf vorbereiten", not "Bereiten Sie …" or "Schreibe …"), Russian the perfective imperative or infinitive ("Добавить").
 - Where your language normally calls this document a CV, use CV.
 - Reuse the same word for a term throughout. The glossary lists the terms that matter most.
 
 ## Request a new language
 
-First check whether your language is already listed in the [Crowdin project](https://crowdin.com/project/reactive-resume). If it isn't:
+First check the configured locales in `apps/web/lingui.config.ts` and `packages/utils/src/locale.ts`. If your language isn't listed:
 
 1. Open a new issue on [GitHub](https://github.com/reactive-resume/reactive-resume/issues/new/choose).
 2. Title it "Add [language name] translation".
 3. Include the language name and its locale code, such as `ja-JP` for Japanese.
 
-Once a maintainer adds the language, you can start translating it on Crowdin.
+Once a maintainer adds the locale configuration and extracts its catalogs, you can contribute translations for both apps. `zu-ZA` is reserved for the generated pseudo-locale used in testing; it is not a Zulu translation catalog.
 
 ## Updating catalogs in a checkout
 
 This section is for developers working in the repository.
 
-After you add or change user-facing strings with Lingui macros, extract them:
+After you add or change user-facing strings with Lingui macros, extract the catalogs from the repository root:
 
 ```bash
 pnpm lingui:extract
 ```
 
-This updates every catalog in `apps/web/locales/*.po` and then runs `pnpm pdf:translations`, which regenerates two files from the catalogs:
+This updates `apps/web/locales/*.po`, then `apps/mobile/locales/*.po`, seeds empty native messages from matching web translations, and regenerates the PDF translations. Extract before you build or run a production build: production bundles drop the English source text, so a message missing from the catalogs shows its raw message ID. CI runs `pnpm lingui:check` and fails when either app's catalogs differ from what extraction would write.
+
+Fill the empty active translations in the affected target catalogs and review any changed wording. If you update web translations after native extraction, run `pnpm --filter mobile exec node scripts/seed-locales.mjs` again to copy them into matching empty native entries. It does not replace existing native translations, so review those separately when wording needs to change.
+
+Check that both catalogs contain translations before fallback:
+
+```bash
+pnpm --filter web exec lingui check missing --mode catalog
+pnpm --filter mobile exec lingui check missing --mode catalog
+```
+
+A successful compile or an English fallback does not prove that a target catalog is complete. Follow the placeholder and plural rules above when resolving missing messages.
+
+Before you open a pull request, compare your catalogs with the main branch:
+
+```bash
+pnpm locales:diff
+```
+
+It fails when a translation was emptied or when a new or changed translation drops or renames a placeholder, plural argument or numbered tag such as `<0>…</0>`. It also lists changed translations for review and counts new untranslated and removed messages. Pass `--base <ref>` to compare with a branch other than `origin/main`. CI runs the same check on pull requests that change catalogs.
+
+Then regenerate the PDF translations:
+
+```bash
+pnpm pdf:translations
+```
+
+This produces two files from the web catalogs:
 
 - `packages/pdf/src/section-title-catalog.json`: default section titles for PDFs.
 - `packages/schema/src/resume/present-labels.json`: the translated word for "Present" in date ranges.
 
 `pnpm check` and `pnpm build` also regenerate them. Commit the generated files together with the catalog changes. Edit the `.po` files, never the JSON; a test in `tooling/locales` fails when the two drift apart.
 
-Only edit `en-US.po` by extracting it from code. Other catalogs arrive through the Crowdin pull request, so change translations on Crowdin rather than in the repository, or your edit is overwritten by the next sync.
+Update English source catalogs by extracting messages from code, rather than editing the extracted text by hand. Target catalogs can be edited and reviewed in the repository. Include both the web and native catalog changes where the same user-facing wording appears; do not replace unrelated translations.
 
-To add a new locale, a maintainer adds its code to `locales` in `apps/web/lingui.config.ts`, to `localeSchema` in `packages/utils/src/locale.ts`, and to `localeMap` in `apps/web/src/libs/locale.ts`, then runs `pnpm lingui:extract`.
+To add a new locale, a maintainer adds its code to `locales` in `apps/web/lingui.config.ts`, to `localeSchema` in `packages/utils/src/locale.ts`, and to `localeMap` in `apps/web/src/libs/locale.ts`, then extracts both apps. The native configuration reads its locale list from `localeSchema`.
 
 ## Related pages
 

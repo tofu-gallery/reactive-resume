@@ -61,4 +61,46 @@ describe("resume DTO output validation", () => {
 			name: "Renamed",
 		});
 	});
+
+	it("accepts an explicit Word opt-in without adding one to legacy writes", () => {
+		expect(resumeDto.update.input.parse({ id: "r1", allowWordDownload: true })).toEqual({
+			id: "r1",
+			allowWordDownload: true,
+		});
+		expect(resumeDto.update.input.parse({ id: "r1", showDownloadButtons: false })).not.toHaveProperty(
+			"allowWordDownload",
+		);
+		expect(() => resumeDto.update.input.parse({ id: "r1", allowWordDownload: "true" })).toThrow();
+	});
+
+	it("does not fail output validation on existing legacy records with long slug", () => {
+		const legacyRecord = {
+			id: "r1",
+			name: "Legacy Resume",
+			slug: "a".repeat(300),
+			tags: [],
+			isPublic: false,
+			showDownloadButtons: true,
+			showInSearchEngines: false,
+			hideContactDetails: false,
+			isPrimary: false,
+			isLocked: false,
+			createdAt: new Date(),
+			updatedAt: new Date(),
+			hasPassword: false,
+			applicationId: null,
+			data: defaultResumeData,
+		};
+		expect(() => resumeDto.getById.output.parse(legacyRecord)).not.toThrow();
+	});
+
+	it("allows checking slugs longer than 64 characters so service can suggest truncations", () => {
+		const longSlug = "a".repeat(300);
+		expect(() => resumeDto.checkSlug.input.parse({ resumeId: "r1", slug: longSlug })).not.toThrow();
+	});
+
+	it("allows update inputs with slugs longer than 64 characters so service can check if unchanged", () => {
+		const longSlug = "a".repeat(300);
+		expect(() => resumeDto.update.input.parse({ id: "r1", slug: longSlug })).not.toThrow();
+	});
 });

@@ -7,6 +7,17 @@ You should not have to rewrite your best project from scratch for every job. Sav
 
 Start with one useful example. You do not need to write your entire career history first.
 
+Preferences autosave after a short pause and when you leave. Unsaved edits are kept on this browser/device. After an interrupted save, review the recovered draft before retrying it, or choose **Use saved version**. Recovered drafts never automatically replace newer server preferences. Sign-out clears account-local recovery data.
+
+Preferences uses the same searchable currency choices as manual offers: code plus localized symbol. Offer periods start from your saved preference when the job has no pay-period hint. The timezone note stays outside the salary requirements.
+
+<Frame caption="Preferences keeps currency, pay period and account timezone distinct.">
+  <img
+    src="/images/guides/career/career-preferences-currency.png"
+    alt="Fictional Career preferences with JPY and its yen symbol, minimum base salary 7000 per month, and the timezone note below Requirements"
+  />
+</Frame>
+
 ## Add a fact
 
 1. Open **Knowledge → Facts**.
@@ -16,7 +27,35 @@ Start with one useful example. You do not need to write your entire career histo
 
 A useful fact names what you did: “I created a weekly review with sales and support to turn recurring customer questions into a prioritized backlog.” It is more useful than “I am a strong collaborator.”
 
+After answering a clarifying question in the document assistant, **Remember** lets you review that answer as a fact, edit its wording and type, and choose its scope before saving. **Cancel** saves nothing; this explicit action makes no AI request. The saved fact remains your statement, not independently verified evidence.
+
 Use **Source** on a fact to see where it came from. Facts you add yourself are your statements; the app does not independently verify them.
+
+<Frame caption="With no facts yet, Add a fact focuses the manual entry field; it saves nothing until you choose Add.">
+  <img
+    src="/images/guides/career/knowledge-first-fact.png"
+    alt="Empty Facts view with the serif No facts yet heading, guidance, and an Add a fact action"
+  />
+</Frame>
+
+## Start from a resume
+
+On web or native mobile, open **Knowledge → Facts → Pull facts from my resume**. Choose an owned resume, then select **Review resume facts**. No resume is preselected and no AI connection receives this operation.
+
+Review the visible career excerpts, edit their wording and type, and turn off **Save this fact** for anything you do not want kept. **Source quotation** retains the original excerpt even when you edit the fact. Select **Save selected facts** only when those statements are accurate: they become shared Knowledge available across your applications. **Cancel** discards the unsaved review. Native asks before discarding a review with proposals.
+
+<Frame caption="Review and edit resume excerpts before saving selected facts to Knowledge.">
+  <img
+    src="/images/guides/career/resume-facts-review.png"
+    alt="Fictional Maya Example resume review with edited experience, its original source quotation and a skill left unselected"
+  />
+</Frame>
+
+This copies excerpts rather than inventing or verifying claims. Header contact fields and the References section are excluded, along with hidden sections and cover letters.
+
+Visible excerpts are copied as written, including any email address or phone number typed into them. The original quotation is saved with the fact even if you edit the fact text. Deselect an excerpt if you do not want its content in shared Knowledge.
+
+The review includes up to 50 excerpts, each at most 2,000 Unicode characters; an omitted-text notice tells you to add other facts manually. A changed or trashed resume requires a fresh review before saving. Existing facts are not overwritten, and corrected, switched-off or forgotten Knowledge is not restored by repeating an import. You can return later to save other quotations from the same resume. Your resume stays unchanged.
 
 ## Write a five-part story
 
@@ -30,23 +69,53 @@ Open **Knowledge → Stories → Add a story**. Give the story a clear title, ad
 | **Result**     | What changed, and how do you know?     | A measured improvement, if you have the records to support it.                       |
 | **Reflection** | What did you learn?                    | Define success measures before starting the next rollout.                            |
 
-Situation, Task and Action are required. Leave Result blank if you cannot support the outcome. A story can still be useful without a number. Reflection can also stay blank until you have something useful to add.
+A story needs a title, Situation, Task and Action; the form marks only Result and Reflection as optional. Leave Result blank if you cannot support the outcome. A story can still be useful without a number. Reflection can also stay blank until you have something useful to add.
+
+If a required part is blank, **Save story** names each missing part beside its field and moves focus to the first one. Your draft stays in the editor so you can finish it. Result and Reflection remain optional on web and native mobile.
 
 Under **Backed by**, select the facts that support the story. Then select **Save story**.
 
-<Frame caption="The story has five parts and links back to the facts behind it.">
+When you arrive through an interview plan's **Draft story**, its title and note come with you. Only its cited active shared facts start selected; review or untick them before saving. Opening the draft saves no story. See [Draft a story from a preparation plan](/guides/preparing-for-interview-day#make-a-plan-before-the-day).
+
+<Frame caption="Build a story from your own evidence">
   <img
     src="/images/guides/career/story.png"
-    alt="Saved STARR story showing the applicant's situation, responsibility, actions, measured result, reflection and supporting facts"
+    alt="Fictional accessible gameplay story with Situation, Task, Action, Result and Reflection"
+  />
+</Frame>
+
+When the coach proposes a story, it shows the title, each part labeled Situation, Task, Action, Result and Reflection, the tags, and the facts it says back the story. A part the coach left empty says **Left blank**. Check that the listed facts support what the story claims. Select **Save story** to keep that exact proposal, **Edit first** to change it in the story editor before saving, or **Skip** to leave Knowledge unchanged. **Edit first** opens the editor in the conversation, on web and mobile; **Cancel** returns to the proposal and keeps your edits for the next time you choose **Edit first**. Saving your edited version declines the proposal as it stood, so only your version is kept. A story proposed in a job's coach stays with that job, and can rest only on facts shared with all applications or kept for that job. This approval is required even when automatic fact memory is enabled. A fact the coach only proposed isn't saved yet, so it can't back a story until you remember it. Saving checks the facts again; a fact you forgot or that belongs to another application can't back it.
+
+<Frame caption="Review the proposed story before saving it to Knowledge.">
+  <img
+    src="/images/guides/career/story-approval.png"
+    alt="Coach proposing a fictional onboarding story with each part labeled, Result left blank, the fact backing it, and Save story, Edit first and Skip; nothing has been saved yet"
+  />
+</Frame>
+
+<Frame caption="The empty Stories view offers Add a story beside its explanation.">
+  <img
+    src="/images/guides/career/knowledge-first-story.png"
+    alt="Empty Stories view with No stories yet, a five-part story explanation, and Add a story"
   />
 </Frame>
 
 ## Reuse the story
 
 - In **Apply**, add a form question and choose **Draft** to draw on relevant Knowledge.
-- In **Prepare**, open the stories suggested for the interview, or draft one that is missing.
+- In **Interview prep**, open the stories suggested for the interview, or draft one that is missing.
 - In **Practice**, rehearse a question using your story, then review feedback.
 - In **Coach**, keep **Knowledge** on when you want those facts and stories included with your message.
+- In the document assistant, turn on **Use Knowledge** to let it look up switched-on facts and cite them when tailoring a resume. It's off by default, and only facts, not stories, are used. See [Using the assistant](/guides/using-the-assistant#use-knowledge).
+
+In **Knowledge → Stories**, **Practice** names the upcoming interview or lets you choose its company and round. If there are no upcoming interviews, it opens **Practice without an application**. No job or interview is created. You can type or speak an answer, review what the provider receives, and request feedback. Each saved attempt stays with that story; leaving and reopening keeps an unfinished answer on this device. Shared practice uses only facts and stories available to all applications, so an employer's private Knowledge is left out. A story without supporting facts, with switched-off facts, or with facts changed since the story was saved cannot be practised until you link or review its facts. The same choices are available in the native app.
+
+<Frame caption="Practice a shared story without creating a job application.">
+  <img
+    src="/images/guides/career/standalone-story-practice.png"
+    alt="Fictional service-recovery story in Practice without an application, showing a typed answer, provider disclosure and a saved attempt"
+  />
+</Frame>
 
 Each use has a different audience. Review the wording rather than pasting the whole story into every answer. [Write an application answer](/guides/writing-application-answers) or [rehearse for an interview](/guides/preparing-for-interview-day#practice-one-answer).
 
@@ -62,26 +131,35 @@ At the top of **Facts**, **Remember facts from my messages** offers three choice
 
 Practice answers are not remembered as career facts. You can still add a real accomplishment manually when you are ready to stand behind it.
 
-<Frame caption="Facts have source, correction and coaching controls. This demo account has Automatically selected; new accounts start with Ask first.">
+<Frame caption="Keep facts you can support and choose their scope">
   <img
     src="/images/guides/career/facts.png"
-    alt="Facts page with Ask first, Automatically and Never memory choices, plus Source, Correct, Forget and Used in coaching controls on each fact"
+    alt="Career Knowledge Facts with a fictional edited experience statement, its Source control, coaching controls and Pull facts from my resume"
   />
 </Frame>
 
 ## Correct an old fact
 
-Select **Correct** on the fact, update the text and save it. Its earlier text remains in correction history. Stories linked to that fact are flagged when the correction is newer than the story.
+Select **Correct** on the fact. Edit its text, **Fact type** (**Type** on native mobile), or **Scope**. Choose **All applications** for shared Knowledge, or an application to keep the fact private to that job. Select **Save correction** on web or **Save fact** on native mobile. The changes save together; earlier text remains in correction history. Type and scope corrections also flag linked stories for review.
+
+If another edit or removal happened while the correction was open, the save stops and your draft stays open. Close the correction, review the current fact, then reopen it to make the changes you still want. A failed connection also keeps the draft open for retry. Native asks before discarding changes to text, type or scope. Older self-hosted servers need an update before these correction controls can save; a failed correction does not fall back to saving only its text.
+
+<Frame caption="Correct the type or scope together with the wording before saving.">
+  <img
+    src="/images/guides/career/fact-correction.png"
+    alt="Fictional Cedar fact correction with Skill selected and its scope restricted to the Fictional Cedar application"
+  />
+</Frame>
 
 Open each flagged story, check the affected claims, edit them and save the story again. Review older drafts too; correcting Knowledge does not rewrite documents or messages you already sent.
 
-A flagged story is excluded from new coaching until you review and save it. Unfinished story text stays in this browser tab when you navigate or refresh. **Practice** opens the selected story with a relevant application; a missing story link shows an error instead of opening another story.
+A flagged story is excluded from new coaching until you review and save it. Unfinished story text stays in this browser tab when you navigate or refresh. **Practice** opens the selected story in the workspace of an upcoming interview: it names the company when there's one interview, and lists them when there are several. It's unavailable, with the reason on hover, until the story is linked to at least one fact, while a fact it uses is switched off or was corrected after the story was saved, or when no interview is coming up. A missing story link shows an error instead of opening another story.
 
 ## Keep a detail for one job
 
 Application notes belong to that application. A debrief can also suggest remembering a detail **for that company only**, such as what an interviewer asked you to explain next time.
 
-Facts show their scope. Choose **Use for all applications** only when a private fact is useful beyond that job. This changes its scope, not its truth.
+Facts show their scope. **Correct → Scope** can restrict a shared fact to one job or move it to another application. Choose **Use for all applications** only when a private fact is useful beyond that job. This changes its scope, not its truth. Previously written documents and messages are not rewritten or recalled.
 
 ## Stop using or forget a fact
 
@@ -89,6 +167,51 @@ Switch **Used in coaching** off to keep the fact in your account while excluding
 
 Select **Forget** to remove the fact and its evidence links. Use **Undo** within the six-second notice if you change your mind. The original resume, file or message is not deleted, and copies already exported or sent to a provider remain outside this action. See [Your data](/guides/career-workspace-reference#your-data).
 
+The notice appears once the removal is ready. Leaving the page or putting the native app in the background ends the Undo window and starts the pending removal. Undo cancels that pending action; it cannot recover content already forgotten elsewhere. If the saved state cannot be checked, the fact stays hidden and **Retry** checks it again before showing anything.
+
+Turn on **Show forgotten** to confirm the recorded number of forgotten facts and when they were forgotten, in your account timezone. This view contains counts and timestamps only. It does not reveal earlier wording, source quotations or correction history, and it cannot restore a forgotten fact. Facts belonging to an application in Trash stay out of this view until that application is restored.
+
+<Frame caption="Confirm that facts were forgotten without revealing their erased content.">
+  <img
+    src="/images/guides/career/forgotten-facts.png"
+    alt="Knowledge with Show forgotten enabled and one fact forgotten shown only as a count and an account-local timestamp"
+  />
+</Frame>
+
+<Frame caption="A failed check keeps the forgotten fact hidden. Retry checks the saved state; it never recreates erased text.">
+  <img
+    src="/images/guides/career/forget-readback-retry.png"
+    alt="Fictional Knowledge Facts screen with the removed fact absent and a failed change notice offering Retry"
+  />
+</Frame>
+
 Linked story text remains yours, but its supporting links are cleared and the story stops being shared with AI. Review it and deliberately reconnect suitable facts before using it again. AI work already running with changed or forgotten Knowledge is discarded instead of publishing that obsolete result.
 
-After you correct, switch off or forget a fact, older interview debriefs remain in **Saved** but are left out of the coach's interview history. New debriefs can use your updated Knowledge.
+After you correct, switch off or forget a fact, older interview debriefs remain in **Library** but are left out of the coach's interview history. New debriefs can use your updated Knowledge.
+
+## Keep application details private
+
+Open **Settings → Profile** on web or native mobile. Enter application-only contact details, address, links, country-specific work authorization and sponsorship answers, relocation willingness, requested salary and references. These details are stored separately from resumes and Career knowledge; editing them needs no AI connection.
+
+Blank details and missing countries remain unknown. Choosing an address country does not answer authorization or sponsorship questions. Add a country and choose **Yes**, **No** or **Unknown** for each question. Enter and correct references yourself; the app does not infer them or contact them.
+
+Use **Career preferences** for existing work locations, office days, notice period and minimum base salary. Requested salary has its own amount, currency and pay period, and never copies your minimum automatically. **Save** or **Update** saves the whole profile and records when you last updated it. Save before leaving this screen. **Manage profile → Reload and discard unsaved changes** discards unsaved edits deliberately; a conflicting save from another device leaves your draft intact until you reload.
+
+<Frame caption="Application-only details live outside resumes and AI knowledge. The fictional profile keeps authorization and sponsorship unknown until Casey explicitly answers them.">
+  <img
+    src="/images/guides/career/application-profile.png"
+    alt="Profile settings with fictional contact details, an address and explicit unknown answers"
+  />
+</Frame>
+
+Private profile fields are never automatically added to public resume links, PDF/DOCX or other document exports, coach context or MCP tool results. If you deliberately copy a detail into a document or application answer, it becomes part of that content and follows that content's sharing and AI controls. Submitted answers and document versions remain unchanged when the profile later changes or is deleted.
+
+**Manage profile → Export saved profile** downloads or shares a JSON record containing its data, last-updated date and revision. **Export everything** also includes it. **Manage profile → Delete profile** removes the saved private profile and references after confirmation; it leaves Career preferences and previously submitted answers unchanged. Downloaded or shared copies cannot be recalled. [Export your data](/guides/exporting-your-data) before deletion if you need a copy.
+
+Self-identification answers are not collected in this phase. A future extension needs a separate consent, category and retention-policy review, and must keep those answers out of AI prompts.
+
+When a guest account is linked to a permanent account, a private profile transfers if the permanent account has none. If both have profiles, linking stops rather than choosing or merging answers. Export and delete one profile in **Settings → Profile → Manage profile**, then retry linking. Authorized API credentials with read permission can read the profile; write and delete permissions are checked separately. Share credentials only with integrations you intend to trust with this data.
+
+Preferences also offers optional [target-role suggestions](/guides/finding-roles-automatically#optional-role-suggestions). Select the AI connection and explicitly share a resume and/or enabled shared Knowledge. Cited statements stay user records, not confirmed qualifications. Suggestions remain drafts until you edit and use them; no search, schedule, fact or answer is created automatically. Private application facts, the application profile and saved answers are excluded.
+
+Fit’s explicit **Add evidence** can be followed by **Propose a resume bullet**. That separate sharing approval sends only the selected statement, linked resume and posting to the existing assistant. Saving Knowledge alone never mutates a resume. See [checking fit](/guides/checking-job-fit).

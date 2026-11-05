@@ -1,4 +1,5 @@
 import type { AtsReport } from "@reactive-resume/resume/ats";
+import { i18n } from "@lingui/core";
 import { plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { useEffect } from "react";
@@ -11,6 +12,7 @@ import Animated, {
 	withTiming,
 } from "react-native-reanimated";
 import Svg, { Circle } from "react-native-svg";
+import { atsVerdict } from "@reactive-resume/resume/ats";
 import { Card, Text, useReducedMotion, useTheme } from "@/ui";
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
@@ -51,7 +53,7 @@ export function Score({ report }: ScoreProps) {
 						cx={diameter / 2}
 						cy={diameter / 2}
 						r={ringRadius}
-						stroke={report.score >= 80 ? colors.accent : colors.warn}
+						stroke={atsVerdict(report) === "clean" ? colors.accent : colors.warn}
 						strokeWidth={space.s1}
 						fill="none"
 						strokeDasharray={`${circumference} ${circumference}`}
@@ -60,20 +62,20 @@ export function Score({ report }: ScoreProps) {
 						origin={`${diameter / 2}, ${diameter / 2}`}
 					/>
 				</Svg>
-				<Text variant="display">{report.score}</Text>
+				<Text variant="display">{i18n.number(report.score)}</Text>
 			</View>
 			<View style={{ flex: 1, gap: space.s1 }}>
 				<Text variant="title">
-					{report.score >= 80
-						? t`Reads cleanly`
-						: report.score >= 50
-							? t`Mostly readable`
-							: t`Hard for software to read`}
+					{
+						{ clean: t`Reads cleanly`, mostly: t`Mostly readable`, hard: t`Hard for software to read` }[
+							atsVerdict(report)
+						]
+					}
 				</Text>
 				<Text variant="callout" color="ink2">
 					{plural(report.totalRules, {
-						one: `${report.passedRules} of # check passes.`,
-						other: `${report.passedRules} of # checks pass.`,
+						one: `${i18n.number(report.passedRules)} of # check passes.`,
+						other: `${i18n.number(report.passedRules)} of # checks pass.`,
 					}) +
 						" " +
 						plural(report.findings.length, { one: "# thing to review.", other: "# things to review." })}

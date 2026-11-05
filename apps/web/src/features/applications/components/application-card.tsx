@@ -1,25 +1,42 @@
-import type { Application } from "../types";
-import { useLingui } from "@lingui/react";
+import type { ApplicationSummary } from "../types";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { cn } from "@reactive-resume/utils/style";
 import { describeNextStep, getNextStep } from "../next-step";
+import { offerHintFor, useOfferHints } from "../queries";
 import { ApplicationActionsMenu } from "./application-actions-menu";
+import { TagChips } from "./tag-chips";
+import { useCareerTime } from "@/features/career/shared";
 
 type ApplicationCardProps = {
-	application: Application;
+	application: ApplicationSummary;
 	onClick?: () => void;
+	/** A tag chip filters the page's existing search. */
+	onTagSelect?: ((tag: string) => void) | undefined;
 	/** The ⋯ menu (Move to…, Close…, Delete); cards dragged in the overlay go without. */
 	withMenu?: boolean;
 	dragging?: boolean;
 };
 
 /** A board card: the company's initial, role and company, and the next step (warn when it's overdue). */
-export function ApplicationCard({ application, onClick, withMenu = false, dragging = false }: ApplicationCardProps) {
-	const { i18n } = useLingui();
-	const next = describeNextStep(getNextStep(application), application, i18n.locale);
+export function ApplicationCard({
+	application,
+	onClick,
+	onTagSelect,
+	withMenu = false,
+	dragging = false,
+}: ApplicationCardProps) {
+	const { locale, timeZone } = useCareerTime();
+	const hints = useOfferHints(application.status === "offer");
+	const next = describeNextStep(
+		getNextStep(application, undefined, timeZone, offerHintFor(hints, application.id)),
+		application,
+		locale,
+		timeZone,
+	);
 
 	return (
 		<div
+			data-application-id={application.id}
 			className={cn(
 				"group relative grid gap-2 rounded-lg border border-line bg-surface p-3 shadow-e1 transition-[border-color,scale] duration-quick ease-enter hover:border-line-2 active:not-has-[[data-slot=button]:active]:scale-[0.98]",
 				// The overlay card lifts as it's picked up and settles flat again while the drop animation flies it home.
@@ -34,14 +51,23 @@ export function ApplicationCard({ application, onClick, withMenu = false, draggi
 				>
 					{application.company.slice(0, 1).toUpperCase()}
 				</span>
-				<button
-					type="button"
-					onClick={onClick}
-					className="grid min-w-0 flex-1 text-start after:absolute after:inset-0 after:rounded-lg"
-				>
-					<span className="truncate text-sm font-semibold">{application.role}</span>
-					<span className="truncate text-xs text-ink-3">{application.company}</span>
-				</button>
+				<div className="grid min-w-0 flex-1 gap-1">
+					<button
+						type="button"
+						data-application-open
+						onClick={onClick}
+						className="grid min-w-0 text-start after:absolute after:inset-0 after:rounded-lg"
+					>
+						<span dir="auto" className="truncate text-sm font-semibold">
+							{application.role}
+						</span>
+						<span dir="auto" className="truncate text-xs text-ink-3">
+							{application.company}
+						</span>
+					</button>
+					{/* Above the open button's stretched target, so filtering never opens the card. */}
+					<TagChips tags={application.tags} onSelect={onTagSelect} className="relative z-10 ms-0" />
+				</div>
 				{withMenu && <ApplicationActionsMenu application={application} className="relative z-10 -me-1.5 -mt-1.5" />}
 			</div>
 			<span

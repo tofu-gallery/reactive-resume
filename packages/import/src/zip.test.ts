@@ -19,6 +19,13 @@ const streamed = (files: Record<string, Uint8Array>) => {
 };
 
 describe("unzipEntries", () => {
+	it("caps headers even when every archive entry is rejected", () => {
+		const files = Object.fromEntries(
+			Array.from({ length: 2_001 }, (_, index) => [`ignored-${index}`, new Uint8Array()]),
+		);
+		expect(() => unzipEntries(zipSync(files), () => false, 1024)).toThrow("ZIP contains too many entries");
+	});
+
 	it.each([
 		["central-directory sizes", zipSync],
 		["data descriptors", streamed],
@@ -54,5 +61,14 @@ describe("unzipEntries", () => {
 		expect(() => unzipEntries(archive, (name) => name === "word/document.xml", 64 * 1024)).toThrow(
 			ZipEntryTooLargeError,
 		);
+	});
+});
+
+describe("unzipEntries total limit", () => {
+	it("stops when the selected entries together inflate past the total", () => {
+		const big = new Uint8Array(600);
+		const archive = zipSync({ "a.xml": big, "b.xml": big });
+		expect(() => unzipEntries(archive, () => true, 1_000, 1_000)).toThrow(ZipEntryTooLargeError);
+		expect(Object.keys(unzipEntries(archive, () => true, 1_000, 2_000))).toEqual(["a.xml", "b.xml"]);
 	});
 });

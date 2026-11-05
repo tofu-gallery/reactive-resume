@@ -2,21 +2,35 @@ import type { PageSettings } from "./entries";
 import type { OutlineRow, WriteSection } from "./model";
 import type { DragEndEvent } from "@dnd-kit/core";
 import type { MessageDescriptor } from "@lingui/core";
-import type { CustomSectionType } from "@reactive-resume/schema/resume/data";
+import type { CustomSectionType, SectionType } from "@reactive-resume/schema/resume/data";
 import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { msg } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { msg, ph, t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
 import { Fragment, useMemo } from "react";
+import { templateLayouts } from "@reactive-resume/schema/templates";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { useEditorStore } from "../store";
 import { addEntryTo } from "./actions";
 import { EntryCard } from "./entry-card";
-import { getEntries, getOutlineRows, getSectionKind, getSectionType, moveSection } from "./model";
+import {
+	describeEntry,
+	getEntries,
+	getOutlineRows,
+	getSectionKind,
+	getSectionObject,
+	getSectionType,
+	moveSection,
+	resolveSection,
+} from "./model";
 import { SectionRow } from "./section-row";
 import { SummaryEditor } from "./summary-editor";
-import { useCurrentBuilderResumeSelector, useUpdateResumeData } from "@/features/resume/builder/draft";
+import { useCurrentBuilderResumeSelector, useResumeStore, useUpdateResumeData } from "@/features/resume/builder/draft";
+import { announce } from "@/libs/announce";
+import { dndContextProps } from "@/libs/dnd";
+import { getSectionTitle } from "@/libs/resume/section";
 
 const ADD_LABELS: Record<CustomSectionType, MessageDescriptor> = {
 	summary: msg`Add text`,
@@ -69,12 +83,31 @@ export function Outline({ locked, page }: OutlineProps) {
 	const activeRows = useMemo(() => rows.filter((row) => !row.hidden), [rows]);
 	const hiddenRows = useMemo(() => rows.filter((row) => row.hidden), [rows]);
 	const multiPage = activeRows.some((row) => row.page > 0);
+	// A one-column template prints sidebar sections after the main ones: no "Sidebar" to name.
+	const twoColumns = useCurrentBuilderResumeSelector(
+		(resume) => templateLayouts[resume.data.metadata.template].columns === 2,
+	);
 	const updateResumeData = useUpdateResumeData();
 	const sensors = useSortSensors();
 
-	const move = (id: string, target: OutlineRow | undefined, direction: "up" | "down") => {
+	const move = (id: string, target: OutlineRow | undefined, direction: "up" | "down", announced = false) => {
 		if (!target) return;
+		const before = useResumeStore.getState().resume?.data;
 		updateResumeData((draft) => moveSection(draft, id, target, direction), { newStep: true });
+		if (!announced) return;
+		// A keyboard move: say where the section is now (a drag has dnd-kit's own announcements). A move that didn't
+		// apply (a locked resume) leaves the data as it was, and says nothing.
+		const data = useResumeStore.getState().resume?.data;
+		if (data === before) return;
+		const section = data ? resolveSection(data, id) : null;
+		if (!data || !section) return;
+		const rows = getOutlineRows(data, new Set(added)).filter((row) => !row.hidden);
+		const position = rows.findIndex((row) => row.id === id) + 1;
+		const title =
+			getSectionObject(data, section)?.title.trim() ||
+			getSectionTitle(section.kind === "custom" ? section.type : (section.id as SectionType | "summary"));
+		if (position > 0)
+			announce(t`${title} moved to position ${ph({ position: i18n.number(position) })} of ${i18n.number(rows.length)}`);
 	};
 
 	const onDragEnd = ({ active, over }: DragEndEvent) => {
@@ -85,24 +118,25 @@ export function Outline({ locked, page }: OutlineProps) {
 	};
 
 	return (
-		<DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+		<DndContext {...dndContextProps(true)} sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
 			<SortableContext items={activeRows.map((row) => row.id)} strategy={verticalListSortingStrategy}>
 				<div className="grid gap-0.5">
 					{activeRows.map((row, index) => {
 						const previous = activeRows[index - 1];
 						const newPage = multiPage && row.page !== previous?.page;
-						const sidebarStarts = row.column === "sidebar" && (previous?.column !== "sidebar" || newPage);
+						const sidebarStarts = twoColumns && row.column === "sidebar" && (previous?.column !== "sidebar" || newPage);
 
 						return (
 							<Fragment key={row.id}>
-								{newPage && <Divider label={<Trans>Page {row.page + 1}</Trans>} />}
+								{newPage && <Divider label={<Trans>Page {i18n.number(row.page + 1)}</Trans>} />}
 								{sidebarStarts && <Divider label={<Trans>Sidebar</Trans>} subtle />}
 								<OutlineSection
 									sectionId={row.id}
 									locked={locked}
 									page={page}
+									dragGroup={dragGroup(row, multiPage, twoColumns)}
 									onMove={(direction) =>
-										move(row.id, activeRows[direction === "up" ? index - 1 : index + 1], direction)
+										move(row.id, activeRows[direction === "up" ? index - 1 : index + 1], direction, true)
 									}
 								/>
 							</Fragment>
@@ -123,6 +157,13 @@ export function Outline({ locked, page }: OutlineProps) {
 	);
 }
 
+/** The page and column a row prints in, as the dividers show it, for drag announcements. */
+function dragGroup(row: OutlineRow, multiPage: boolean, twoColumns: boolean) {
+	if (twoColumns && row.column === "sidebar")
+		return multiPage ? t`Page ${i18n.number(row.page + 1)}, sidebar` : t`Sidebar`;
+	return multiPage ? t`Page ${i18n.number(row.page + 1)}` : undefined;
+}
+
 function Divider({ label, subtle = false }: { label: React.ReactNode; subtle?: boolean }) {
 	return (
 		<div className="flex items-center gap-2 px-1 pt-2 pb-1">
@@ -136,10 +177,11 @@ type OutlineSectionProps = {
 	sectionId: string;
 	locked: boolean;
 	page: PageSettings;
+	dragGroup?: string | undefined;
 	onMove?: ((direction: "up" | "down") => void) | undefined;
 };
 
-function OutlineSection({ sectionId, locked, page, onMove }: OutlineSectionProps) {
+function OutlineSection({ sectionId, locked, page, dragGroup, onMove }: OutlineSectionProps) {
 	const { i18n } = useLingui();
 	// Select the type (a string) rather than a new section object, so the row renders only when it changes.
 	const type = useCurrentBuilderResumeSelector((resume) => getSectionType(resume.data, sectionId) ?? null);
@@ -150,7 +192,7 @@ function OutlineSection({ sectionId, locked, page, onMove }: OutlineSectionProps
 	if (!stableSection) return null;
 
 	return (
-		<SectionRow section={stableSection} locked={locked} onMove={onMove}>
+		<SectionRow section={stableSection} locked={locked} dragGroup={dragGroup} onMove={onMove}>
 			{stableSection.kind === "summary" ? (
 				<SummaryEditor locked={locked} />
 			) : (
@@ -159,6 +201,7 @@ function OutlineSection({ sectionId, locked, page, onMove }: OutlineSectionProps
 					{!locked && (
 						<button
 							type="button"
+							data-add-entry={stableSection.id}
 							onClick={() => addEntryTo(stableSection)}
 							className="flex h-9 items-center gap-1.5 rounded-lg px-2 text-sm text-accent-text hover:bg-hover"
 						>
@@ -185,17 +228,23 @@ function EntryList({ section, locked, page }: EntryListProps) {
 	const updateResumeData = useUpdateResumeData();
 	const sensors = useSortSensors();
 
-	const move = (entryId: string, to: number) => {
+	const move = (entryId: string, to: number, announced = false) => {
 		if (to < 0 || to >= entryIds.length) return;
+		const before = useResumeStore.getState().resume?.data;
+		const entry = before ? getEntries(before, section).find((item) => item.id === entryId) : undefined;
 		updateResumeData(
 			(draft) => {
 				const entries = getEntries(draft, section);
-				const from = entries.findIndex((entry) => entry.id === entryId);
-				const [entry] = entries.splice(from, 1);
-				if (entry) entries.splice(to, 0, entry);
+				const from = entries.findIndex((item) => item.id === entryId);
+				const [moved] = entries.splice(from, 1);
+				if (moved) entries.splice(to, 0, moved);
 			},
 			{ newStep: true },
 		);
+		// Said only when the move applied: a locked resume leaves the data as it was.
+		if (!announced || useResumeStore.getState().resume?.data === before) return;
+		const title = entry ? describeEntry(section.type, entry).title || t`Untitled` : t`Untitled`;
+		announce(t`${title}, entry ${i18n.number(to + 1)} of ${i18n.number(entryIds.length)}`);
 	};
 
 	const onDragEnd = ({ active, over }: DragEndEvent) => {
@@ -204,7 +253,7 @@ function EntryList({ section, locked, page }: EntryListProps) {
 	};
 
 	return (
-		<DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+		<DndContext {...dndContextProps(true)} sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
 			<SortableContext items={entryIds} strategy={verticalListSortingStrategy}>
 				{entryIds.map((entryId, index) => (
 					<EntryCard
@@ -215,7 +264,7 @@ function EntryList({ section, locked, page }: EntryListProps) {
 						count={entryIds.length}
 						page={page}
 						locked={locked}
-						onMove={(id, direction) => move(id, direction === "up" ? index - 1 : index + 1)}
+						onMove={(id, direction) => move(id, direction === "up" ? index - 1 : index + 1, true)}
 					/>
 				))}
 			</SortableContext>

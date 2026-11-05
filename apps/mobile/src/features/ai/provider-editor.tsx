@@ -1,16 +1,13 @@
 import type { AIProvider, SavedProvider } from "./catalog";
 import { useLingui } from "@lingui/react/macro";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
+import { openBrowserAsync } from "expo-web-browser";
 import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
-import {
-	loadModelSuggestions,
-	modelsDevProviderIds,
-	providerDefaults,
-	providerLabel,
-	providerOptions,
-} from "./catalog";
-import { aiSettingsError } from "./error";
+import { AI_PROVIDER_KEY_URLS, getAIProviderSetupProblem } from "@reactive-resume/ai/defaults";
+import { providerDefaults, providerLabel, providerOptions } from "./catalog";
+import { aiSettingsError, providerTestError } from "./error";
+import { ProviderModel } from "./provider-model";
 import { useHasAIProvider } from "./provider-state";
 import { client, orpc } from "@/api/client";
 import { getServer } from "@/auth/session";
@@ -18,12 +15,12 @@ import {
 	Button,
 	ConfirmDialog,
 	IconButton,
-	ListRow,
 	SelectSheet,
 	Sheet,
 	Switch,
 	Text,
 	TextField,
+	showToast,
 	useTheme,
 } from "@/ui";
 
@@ -31,7 +28,7 @@ export type AIProviderSetupSheetProps = {
 	open: boolean;
 	onClose: () => void;
 	/** Called only after a connection test succeeds and the provider list refreshes. */
-	onReady?: (() => void) | undefined;
+	onReady?: ((provider: SavedProvider) => void) | undefined;
 };
 
 /** Inline setup for Improve, Check Writing, Assistant and Practise; keeps the caller's screen mounted. */
@@ -39,6 +36,8 @@ export function AIProviderSetupSheet({ open, onClose, onReady }: AIProviderSetup
 	const { t } = useLingui();
 	const state = useHasAIProvider();
 	const managed = state.providers.some((provider) => provider.managed);
+	const [selected, setSelected] = useState<SavedProvider | null>(null);
+	const [adding, setAdding] = useState(false);
 	return (
 		<Sheet open={open} onClose={onClose} title={t`Set up a provider`} detents={[0.9]}>
 			{open &&
@@ -49,8 +48,20 @@ export function AIProviderSetupSheet({ open, onClose, onReady }: AIProviderSetup
 						</Text>
 						{state.error && <Button label={t`Try again`} onPress={state.retry} />}
 					</>
+				) : state.providers.length && !selected && !adding ? (
+					<View>
+						<Text>{t`Saved AI connections need attention. Choose one to fix, or add another.`}</Text>
+						{state.providers.map((provider) => (
+							<Button
+								key={provider.id}
+								label={`${provider.label} · ${provider.model}`}
+								onPress={() => setSelected(provider)}
+							/>
+						))}
+						<Button label={t`Add AI provider`} onPress={() => setAdding(true)} />
+					</View>
 				) : (
-					<ProviderForm onClose={onClose} onReady={onReady} />
+					<ProviderForm key={selected?.id ?? "new"} saved={selected ?? undefined} onClose={onClose} onReady={onReady} />
 				))}
 		</Sheet>
 	);
@@ -69,7 +80,7 @@ export function ProviderEditorSheet({ open, provider, onClose }: ProviderEditorS
 type ProviderFormProps = {
 	saved?: SavedProvider | undefined;
 	onClose: () => void;
-	onReady?: (() => void) | undefined;
+	onReady?: ((provider: SavedProvider) => void) | undefined;
 };
 
 function ProviderForm({ saved, onClose, onReady }: ProviderFormProps) {
@@ -80,6 +91,8 @@ function ProviderForm({ saved, onClose, onReady }: ProviderFormProps) {
 	const [fields, setFields] = useState({
 		label: saved?.label ?? "",
 		model: saved?.model ?? providerDefaults(provider).model,
+		fastModel: saved?.fastModel ?? "",
+		capableModel: saved?.capableModel ?? "",
 		baseURL: saved?.baseURL ?? providerDefaults(provider).baseURL,
 		apiKey: "",
 	});
@@ -98,16 +111,13 @@ function ProviderForm({ saved, onClose, onReady }: ProviderFormProps) {
 	const [failure, setFailure] = useState<string | null>(null);
 	const [reveal, setReveal] = useState(false);
 	const [confirmDelete, setConfirmDelete] = useState(false);
-	const [modelFocused, setModelFocused] = useState(false);
-	const catalogId = modelsDevProviderIds[provider];
-	const suggestions = useQuery({
-		queryKey: ["models.dev"],
-		queryFn: ({ signal }) => loadModelSuggestions(signal),
-		enabled: catalogId !== null,
-		staleTime: 60 * 60 * 1000,
-		retry: false,
-	});
-	const models = catalogId ? (suggestions.data?.[catalogId] ?? []) : [];
+	const [advanced, setAdvanced] = useState(
+		Boolean(
+			saved?.provider !== "openai-compatible" && saved?.baseURL && saved.baseURL !== providerDefaults(provider).baseURL,
+		),
+	);
+	const [urlTouched, setUrlTouched] = useState(false);
+	const [tasks, setTasks] = useState(Boolean(saved?.fastModel || saved?.capableModel));
 	const invalidate = () => queryClient.invalidateQueries({ queryKey: orpc.aiProviders.list.key() });
 	const set = (patch: Partial<typeof fields>) => setFields((previous) => ({ ...previous, ...patch }));
 	const baseline = saved ?? current;
@@ -117,20 +127,30 @@ function ProviderForm({ saved, onClose, onReady }: ProviderFormProps) {
 	const apiKey = fields.apiKey.trim();
 	// The server won't send the saved key to a new address, so the key comes with it (Ollama may have none).
 	const keyMissing = newURL && provider !== "ollama" && !apiKey;
+	const problem = getAIProviderSetupProblem(provider, fields, Boolean(current && !newURL));
+	const explanation =
+		problem === "baseURL"
+			? t`Enter an http:// or https:// base URL.`
+			: problem === "apiKey"
+				? t`Enter an API key for this provider.`
+				: problem === "model"
+					? t`Enter a model ID.`
+					: null;
+	const keyURL = AI_PROVIDER_KEY_URLS[provider];
+	const compatible = provider === "openai-compatible";
 	const changes = {
 		...(fields.label.trim() && fields.label.trim() !== baseline?.label ? { label: fields.label.trim() } : {}),
 		...(fields.model.trim() && fields.model.trim() !== baseline?.model ? { model: fields.model.trim() } : {}),
+		...(fields.fastModel.trim() !== (baseline?.fastModel ?? "") ? { fastModel: fields.fastModel.trim() } : {}),
+		...(fields.capableModel.trim() !== (baseline?.capableModel ?? "")
+			? { capableModel: fields.capableModel.trim() }
+			: {}),
 		// The provider rides along so validation accepts Ollama's empty key.
 		...(newURL ? { provider, baseURL: fields.baseURL.trim() } : {}),
 		...(newURL || apiKey ? { apiKey } : {}),
 	};
 	const changed = Object.keys(changes).length > 0;
-	const ready = !!(
-		fields.model.trim() &&
-		(current || provider === "ollama" || apiKey) &&
-		!keyMissing &&
-		(!saved || changed)
-	);
+	const ready = !!(problem === null && !keyMissing && (!saved || changed));
 
 	const save = async () => {
 		const server = getServer();
@@ -144,6 +164,8 @@ function ProviderForm({ saved, onClose, onReady }: ProviderFormProps) {
 				provider,
 				label: fields.label.trim() || providerLabel(provider),
 				model: fields.model.trim(),
+				fastModel: fields.fastModel.trim(),
+				capableModel: fields.capableModel.trim(),
 				baseURL: fields.baseURL.trim(),
 			};
 			// Direct calls keep submitted keys out of TanStack's mutation cache.
@@ -163,11 +185,16 @@ function ProviderForm({ saved, onClose, onReady }: ProviderFormProps) {
 			setCurrent(tested);
 			await invalidate();
 			if (!mounted.current || getServer() !== server) return;
-			if (tested.testStatus === "success") {
+			if (tested.testStatus === "success" && tested.enabled) {
 				set({ apiKey: "" });
-				onReady?.();
+				onReady?.(tested);
 				onClose();
-			} else setFailure(tested.testError || t`The provider didn't answer. Check the key, the model and the base URL.`);
+			} else
+				setFailure(
+					tested.testStatus === "success"
+						? t`The connection works. Turn on Use this provider to use it.`
+						: providerTestError(tested.testErrorKind),
+				);
 		} catch (error) {
 			setFailure(aiSettingsError(error, testing));
 		} finally {
@@ -214,9 +241,26 @@ function ProviderForm({ saved, onClose, onReady }: ProviderFormProps) {
 		}
 	};
 
+	const urlField = (
+		<TextField
+			label={compatible ? t`Base URL (required)` : t`Base URL`}
+			value={fields.baseURL}
+			onChangeText={(baseURL) => set({ baseURL })}
+			onBlur={() => setUrlTouched(true)}
+			error={urlTouched && problem === "baseURL" ? t`Enter an http:// or https:// base URL.` : undefined}
+			autoCapitalize="none"
+			autoCorrect={false}
+			keyboardType="url"
+			editable={!pending}
+		/>
+	);
+
 	return (
 		<View style={{ gap: space.s4, padding: space.s4 }}>
 			<Text color="ink2">{t`The key is encrypted on the server and never shown again. Saving tests the connection.`}</Text>
+			{current && (
+				<Text color="ink3">{t`Changing the key, model or address pauses scheduled AI work. Re-enable each schedule to approve its destination.`}</Text>
+			)}
 			<SelectSheet
 				label={t`Provider`}
 				value={provider}
@@ -224,7 +268,9 @@ function ProviderForm({ saved, onClose, onReady }: ProviderFormProps) {
 				disabled={pending || !!current}
 				onChange={(next) => {
 					setProvider(next);
-					set({ ...providerDefaults(next), apiKey: "" });
+					setAdvanced(false);
+					setUrlTouched(false);
+					set({ ...providerDefaults(next), apiKey: "", fastModel: "", capableModel: "" });
 				}}
 			/>
 			<TextField
@@ -260,56 +306,75 @@ function ProviderForm({ saved, onClose, onReady }: ProviderFormProps) {
 					/>
 				}
 			/>
-			<TextField
-				label={t`Model`}
-				value={fields.model}
-				onChangeText={(model) => set({ model })}
-				autoCapitalize="none"
-				autoCorrect={false}
-				editable={!pending}
-				onFocus={() => setModelFocused(true)}
-				onBlur={() => setModelFocused(false)}
-				helper={
-					!catalogId
-						? t`Enter any model ID supported by your endpoint.`
-						: suggestions.isError
-							? t`Model suggestions are unavailable. You can still enter any model ID.`
-							: suggestions.isPending
-								? t`Loading model suggestions… You can also enter any model ID.`
-								: models.length
-									? t`Suggestions from models.dev. You can also enter any model ID.`
-									: t`No suggestions for this provider. Enter any model ID.`
-				}
+			{keyURL ? (
+				<Button
+					variant="link"
+					label={t`Get an API key`}
+					onPress={() =>
+						void openBrowserAsync(keyURL).catch(() => showToast({ message: t`Couldn't open the browser. Try again.` }))
+					}
+				/>
+			) : (
+				<Text color="ink3">{t`Get an API key from your endpoint operator.`}</Text>
+			)}
+			<ProviderModel provider={provider} value={fields.model} onChange={(model) => set({ model })} disabled={pending} />
+			<Button
+				label={t`Task models (optional)`}
+				variant="ghost"
+				icon={tasks ? "caret-down" : "caret-right"}
+				expanded={tasks}
+				onPress={() => setTasks(!tasks)}
+				disabled={pending}
 			/>
-			{modelFocused &&
-				models
-					.filter((model) => model.id.toLowerCase().includes(fields.model.toLowerCase()))
-					.slice(0, 6)
-					.map((model) => (
-						<ListRow
-							key={model.id}
-							title={model.id}
-							subtitle={model.name}
-							onPress={() => set({ model: model.id })}
-							disabled={pending}
-						/>
-					))}
-			<TextField
-				label={t`Name`}
-				value={fields.label}
-				placeholder={providerLabel(provider)}
-				onChangeText={(label) => set({ label })}
-				editable={!pending}
-			/>
-			<TextField
-				label={t`Base URL`}
-				value={fields.baseURL}
-				onChangeText={(baseURL) => set({ baseURL })}
-				autoCapitalize="none"
-				autoCorrect={false}
-				keyboardType="url"
-				editable={!pending}
-			/>
+			{tasks && (
+				<View style={{ gap: space.s3 }}>
+					<Text color="ink3">
+						{t`Leave either field empty to use the model above. Fast handles resume import, Improve and reading job postings; capable handles the assistant and letter drafts.`}
+					</Text>
+					<ProviderModel
+						label={t`Fast model`}
+						hint={false}
+						provider={provider}
+						value={fields.fastModel}
+						onChange={(fastModel) => set({ fastModel })}
+						disabled={pending}
+					/>
+					<ProviderModel
+						label={t`Capable model`}
+						hint={false}
+						provider={provider}
+						value={fields.capableModel}
+						onChange={(capableModel) => set({ capableModel })}
+						disabled={pending}
+					/>
+				</View>
+			)}
+			{compatible && urlField}
+			{!compatible && (
+				<Button
+					label={t`Advanced`}
+					variant="ghost"
+					icon={advanced ? "caret-down" : "caret-right"}
+					expanded={advanced}
+					onPress={() => setAdvanced(!advanced)}
+					disabled={pending}
+				/>
+			)}
+			{(compatible || advanced) && (
+				<View style={{ gap: space.s3 }}>
+					<TextField
+						label={t`Name`}
+						value={fields.label}
+						placeholder={providerLabel(provider)}
+						onChangeText={(label) => set({ label })}
+						editable={!pending}
+					/>
+					{!compatible && urlField}
+				</View>
+			)}
+			{explanation && !(urlTouched && problem === "baseURL" && (compatible || advanced)) && (
+				<Text color="ink3">{explanation}</Text>
+			)}
 			{current && (
 				<>
 					<Text>{t`Use this provider`}</Text>
@@ -346,6 +411,7 @@ function ProviderForm({ saved, onClose, onReady }: ProviderFormProps) {
 				title={t`Delete this provider?`}
 				message={t`Its saved key is deleted. Conversations using it need another provider.`}
 				confirmLabel={t`Delete provider`}
+				cancelLabel={t`Keep provider`}
 				destructive
 				onConfirm={() => void remove()}
 				onCancel={() => setConfirmDelete(false)}

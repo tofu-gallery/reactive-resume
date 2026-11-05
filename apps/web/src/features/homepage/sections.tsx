@@ -1,18 +1,18 @@
-import type { IconName } from "@reactive-resume/ui/components/icon";
 import type { CSSProperties } from "react";
 import { t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
-import { AppleLogoIcon, GooglePlayLogoIcon } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { templateSchema } from "@reactive-resume/schema/templates";
 import { Icon } from "@reactive-resume/ui/components/icon";
-import { localeSchema } from "@reactive-resume/utils/locale";
+import { getLanguageName, isRTL, supportedLocales } from "@reactive-resume/utils/locale";
 import { cn } from "@reactive-resume/utils/style";
 import { prefersReducedMotion, SCENE, useLanding } from "./scroll";
-import { CtaLink, Doodle, labelClass } from "./ui";
+import { CtaLink, SignInLink, Doodle, labelClass } from "./ui";
 import { RollingNumber } from "@/components/ui/rolling-number";
+import { LocaleCombobox } from "@/features/locale/combobox";
+import { localeMap } from "@/libs/locale";
 import { orpc } from "@/libs/orpc/client";
 
 const crowdinUrl = "https://crowdin.com/project/reactive-resume";
@@ -25,16 +25,23 @@ const smallestTotalShown = 100;
 /** 08 Numbers: the live community totals, side by side, each figure over what it counts. */
 export function Numbers() {
 	const inView = useLanding((state) => state.numbersInView);
-	const { data } = useQuery(orpc.statistics.getTotals.queryOptions({ staleTime: statisticsStaleTime }));
-	const { data: stars } = useQuery(
-		orpc.statistics.github.getStarCount.queryOptions({ staleTime: statisticsStaleTime }),
-	);
+	const totals = useQuery(orpc.statistics.getTotals.queryOptions({ staleTime: statisticsStaleTime }));
+	const starCount = useQuery(orpc.statistics.github.getStarCount.queryOptions({ staleTime: statisticsStaleTime }));
+	const { data } = totals;
+	const stars = starCount.data;
+	// A proof section shows proof or nothing: a total that failed to load is dropped, not left as a dash.
 	const rows = [
-		{ label: t`People using it`, detail: t`writing, tailoring and sending`, value: data?.users },
-		{ label: t`Resumes created`, detail: t`and counting`, value: data?.resumes },
-		{ label: t`Stars on GitHub`, detail: t`from developers who back it`, value: stars },
-	].filter((row) => row.value == null || row.value >= smallestTotalShown);
-	if (rows.length === 0) return null;
+		{
+			label: t`People using it`,
+			detail: t`writing, tailoring and sending`,
+			value: data?.users,
+			failed: totals.isError,
+		},
+		{ label: t`Resumes created`, detail: t`and counting`, value: data?.resumes, failed: totals.isError },
+		{ label: t`Stars on GitHub`, detail: t`from developers who back it`, value: stars, failed: starCount.isError },
+	].filter((row) => !row.failed && (row.value == null || row.value >= smallestTotalShown));
+	// One number alone (often the stars the header already shows) isn't company: show none.
+	if (rows.length < 2) return null;
 
 	return (
 		<section
@@ -101,7 +108,7 @@ const words = [
 /** 09 Languages. The word turns over every 1.9s while the section is near; it can be paused. */
 export function Languages() {
 	const { i18n } = useLingui();
-	const languageCount = i18n.number(localeSchema.options.length - 1);
+	const languageCount = i18n.number(supportedLocales.length);
 	const near = useLanding((state) => state.activeScene >= SCENE.numbers && state.activeScene <= SCENE.support);
 	const reducedMotion = useLanding((state) => state.reducedMotion);
 	const [index, setIndex] = useState(0);
@@ -117,6 +124,7 @@ export function Languages() {
 
 	return (
 		<section
+			id="languages"
 			data-scene={SCENE.languages}
 			aria-labelledby="languages-title"
 			className="relative flex flex-col items-center gap-[22px] overflow-hidden px-(--gutter) py-[14vh] text-center"
@@ -124,6 +132,7 @@ export function Languages() {
 			<Doodle
 				name="globe"
 				wipe="clamp(0, (var(--p) - .25) / .2, 1)"
+				sizes="11vw"
 				className="start-[6vw] top-[10vh] w-[11vw] translate-y-[calc(var(--p)*-40px)] rotate-[-6deg] max-[900px]:hidden"
 			/>
 			<h2 id="languages-title" className={cn(labelClass, "text-ink-3")}>
@@ -158,7 +167,7 @@ export function Languages() {
 					type="button"
 					onClick={() => setPaused((value) => !value)}
 					aria-label={paused ? t`Play the list of languages` : t`Pause the list of languages`}
-					className="grid size-6 place-items-center rounded-sm text-ink-3 transition-colors hover:bg-hover hover:text-ink motion-reduce:hidden"
+					className="touch-target relative grid size-6 place-items-center rounded-sm text-ink-3 transition-colors hover:bg-hover hover:text-ink motion-reduce:hidden"
 				>
 					<Icon name={paused ? "play" : "pause"} size={16} filled />
 				</button>
@@ -172,12 +181,108 @@ export function Languages() {
 					{t`Help translate it into yours.`}
 				</a>
 			</p>
+			<LanguageIndex />
 		</section>
 	);
 }
 
-const pillLinkClass =
-	"flex h-10 items-center gap-2 rounded-sm border border-line-2 px-3.5 font-medium font-ui text-ink text-sm transition-colors hover:bg-hover";
+/**
+ * The homepage in `locale`, back at the Languages scene, keeping the rest of the address. English is named too, so
+ * it overrides a saved choice; the server points its canonical address at the plain one.
+ */
+function languageHref(locale: string) {
+	const url = new URL(typeof window === "undefined" ? "/" : window.location.href, "https://localhost");
+	url.searchParams.set("locale", locale);
+	return `/?${url.searchParams}#languages`;
+}
+
+type LanguageDoorwayProps = { className?: string; nameClassName?: string; story?: boolean };
+
+/** Home uses its Languages scene; standalone pages can change language even when a resume replaces the home. */
+export function LanguageDoorway({ className, nameClassName, story = true }: LanguageDoorwayProps) {
+	const { i18n } = useLingui();
+	const name = getLanguageName(i18n.locale, i18n.locale, false);
+	const content = (
+		<>
+			<Icon name="translate" size={16} />
+			<span lang={i18n.locale} className={nameClassName}>
+				{name}
+			</span>
+		</>
+	);
+	if (!story)
+		return (
+			<LocaleCombobox
+				render={(props) => (
+					<button
+						{...props}
+						type="button"
+						aria-label={t`Change language`}
+						title={t`Change language`}
+						className={cn("touch-target relative flex items-center", props.className, className)}
+					>
+						{content}
+					</button>
+				)}
+			/>
+		);
+	return (
+		<a href="#languages" title={t`Change language`} className={cn("flex items-center", className)}>
+			{content}
+		</a>
+	);
+}
+
+/**
+ * Every language the app speaks, each in its own name and script, as plain links to the page in that language. They
+ * work before the app's script runs, and the server stores the choice (`?locale=`) for sign-up and the app.
+ */
+function LanguageIndex() {
+	const { i18n } = useLingui();
+
+	return (
+		<nav aria-labelledby="languages-title" className="max-w-[46em]">
+			<ul className="font-display text-[clamp(17px,1.4vw,21px)] leading-normal text-balance text-ink-2">
+				{supportedLocales.map((locale, index) => {
+					const name = getLanguageName(locale);
+					const dir = isRTL(locale) ? "rtl" : undefined;
+					return (
+						<li key={locale} className="inline">
+							{/* Each name keeps its separator, so a line never starts with one; lines break between names. */}
+							<span className="whitespace-nowrap">
+								{locale === i18n.locale ? (
+									<span lang={locale} dir={dir} aria-current="page" className="text-accent-text italic">
+										{name}
+									</span>
+								) : (
+									<a
+										href={languageHref(locale)}
+										hrefLang={locale}
+										lang={locale}
+										dir={dir}
+										title={i18n._(localeMap[locale])}
+										className="touch-target relative inline-block py-1.5 underline-offset-[3px] transition-colors duration-quick hover:text-ink hover:underline focus-visible:text-ink focus-visible:underline"
+									>
+										{name}
+									</a>
+								)}
+								{index < supportedLocales.length - 1 && (
+									<span aria-hidden="true" className="px-1.5 text-ink-3">
+										·
+									</span>
+								)}
+							</span>{" "}
+						</li>
+					);
+				})}
+			</ul>
+		</nav>
+	);
+}
+
+// The page's own doorway links (the FAQ's "Try the ATS checker →"), not app buttons: text, an arrow, no frame.
+const doorwayLinkClass =
+	"touch-target relative inline-flex items-center gap-1 font-semibold font-ui text-[15px] text-accent-text underline underline-offset-[3px] transition-colors hover:text-ink";
 const receiptButtonClass =
 	"flex h-[42px] items-center justify-between rounded-md px-3.5 font-semibold text-sm transition-colors";
 
@@ -204,10 +309,10 @@ export function Support() {
 		[t`Ads`, none],
 		[t`Tracking`, none],
 	] as const;
-	const pills: { href: string; icon: IconName; label: string }[] = [
-		{ href: crowdinUrl, icon: "translate", label: t`Translate the app` },
-		{ href: `${githubUrl}/issues`, icon: "bug", label: t`Report a bug` },
-		{ href: "https://docs.rxresu.me/contributing/development", icon: "code", label: t`Contribute code` },
+	const doorways: { href: string; label: string }[] = [
+		{ href: crowdinUrl, label: t`Translate the app` },
+		{ href: `${githubUrl}/issues`, label: t`Report a bug` },
+		{ href: "https://docs.rxresu.me/contributing/development", label: t`Contribute code` },
 	];
 
 	return (
@@ -220,6 +325,7 @@ export function Support() {
 			<Doodle
 				name="jar"
 				wipe="clamp(0, (var(--p) - .3) / .2, 1)"
+				sizes="9vw"
 				className="start-[3vw] bottom-[4vh] w-[9vw] translate-y-[calc(var(--p)*-30px)] rotate-[4deg] max-[900px]:hidden"
 			/>
 
@@ -236,12 +342,11 @@ export function Support() {
 				<p className="max-w-[28em] font-display text-[clamp(17px,1.4vw,21px)] leading-normal text-pretty text-ink-2">
 					{t`Reactive Resume is open source under the MIT License. Amruth Pillai and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier.`}
 				</p>
-				<ul className="flex flex-wrap gap-2">
-					{pills.map((pill) => (
-						<li key={pill.href}>
-							<a href={pill.href} className={pillLinkClass}>
-								<Icon name={pill.icon} size={18} className="text-ink-2" />
-								{pill.label}
+				<ul className="grid gap-2.5">
+					{doorways.map((doorway) => (
+						<li key={doorway.href}>
+							<a href={doorway.href} className={doorwayLinkClass}>
+								{doorway.label} <span aria-hidden="true">→</span>
 							</a>
 						</li>
 					))}
@@ -251,10 +356,8 @@ export function Support() {
 					<p className="font-ui text-sm leading-normal text-ink-2">
 						{t`Exchange resume feedback, ask questions, and help shape Reactive Resume with the community.`}
 					</p>
-					<a href="https://discord.gg/jSVSJyWd2k" className={cn(pillLinkClass, "w-fit")}>
-						<Icon name="chat-text" size={18} />
-						{t`Join the Discord community`}
-						<Icon name="arrow-up-right" size={16} />
+					<a href="https://discord.gg/jSVSJyWd2k" className={cn(doorwayLinkClass, "w-fit")}>
+						{t`Join the Discord community`} <span aria-hidden="true">↗</span>
 					</a>
 				</div>
 			</div>
@@ -375,32 +478,26 @@ export function Closing() {
 				{t`Start from scratch or import what you have. It takes a few minutes, and you can come back to it anytime.`}
 			</p>
 			<CtaLink size="closing" />
-			<div className="mt-3 flex flex-col items-center gap-3 border-t border-line pt-7">
-				<p className={cn(labelClass, "text-ink-3")}>{t`Also on mobile`}</p>
-				<div className="flex flex-wrap justify-center gap-3">
+			<SignInLink />
+			{/* One quiet line, so the closing keeps a single action: the store names are the links. */}
+			<p className={cn(labelClass, "mt-1 text-ink-3")}>
+				<Trans>
+					Also on mobile:{" "}
 					<a
 						href="https://play.google.com/store/apps/details?id=me.rxresu"
-						className="inline-flex min-h-14 items-center gap-3 rounded-xl border border-line-2 bg-raised px-5 py-2.5 text-start font-ui text-ink transition-[background-color,transform] duration-[160ms] ease-out-strong hover:bg-hover motion-safe:active:scale-[.97]"
+						className="touch-target relative text-ink-2 underline underline-offset-[3px] hover:text-ink"
 					>
-						<GooglePlayLogoIcon aria-hidden="true" size={28} weight="fill" className="shrink-0" />
-						<span className="flex flex-col gap-0.5">
-							<span className="text-xs leading-tight text-ink-2">{t`Get it on`}</span>
-							<span className="text-lg leading-tight font-semibold">Google Play</span>
-						</span>
+						Google Play
+					</a>{" "}
+					·{" "}
+					<a
+						href="https://testflight.apple.com/join/desWgpRk"
+						className="touch-target relative text-ink-2 underline underline-offset-[3px] hover:text-ink"
+					>
+						iPhone beta on TestFlight
 					</a>
-					<button
-						type="button"
-						disabled
-						className="inline-flex min-h-14 cursor-not-allowed items-center gap-3 rounded-xl border border-line px-5 py-2.5 text-start font-ui text-ink-3"
-					>
-						<AppleLogoIcon aria-hidden="true" size={28} weight="fill" className="shrink-0" />
-						<span className="flex flex-col gap-0.5">
-							<span className="text-xs leading-tight">{t`Coming soon`}</span>
-							<span className="text-lg leading-tight font-semibold">App Store</span>
-						</span>
-					</button>
-				</div>
-			</div>
+				</Trans>
+			</p>
 		</section>
 	);
 }

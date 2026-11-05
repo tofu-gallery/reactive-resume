@@ -1,11 +1,14 @@
-import type { Application } from "../types";
+import type { ApplicationLane } from "../lanes";
+import type { Application, ApplicationSummary } from "../types";
 import type { InterviewTimelineEntry } from "@reactive-resume/schema/applications/data";
 import { t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Plural, Trans } from "@lingui/react/macro";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
+import { applicationSentAt } from "@reactive-resume/schema/applications/outcomes";
+import { postingReadReceipt } from "@reactive-resume/schema/applications/posting-source";
 import { Button } from "@reactive-resume/ui/components/button";
 import {
 	Dialog,
@@ -27,9 +30,12 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@reactive-res
 import { toast } from "@reactive-resume/ui/components/toast";
 import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { cn } from "@reactive-resume/utils/style";
-import { daysInStage } from "../next-step";
-import { getClosedReasonLabel, getNextStage, getStageColor, getStageLabel, PIPELINE } from "../stages";
+import { getCategoryLane, getDisplayLane, getLaneLabel, getNextLane, getStageDisplay, laneMoveInput } from "../lanes";
+import { daysInLane } from "../next-step";
+import { applicationDetailQueryOptions, getInitialApplicationDetail } from "../queries";
+import { getClosedReasonLabel } from "../stages";
 import { useApplicationActions, useInvalidateApplications } from "../use-application-actions";
+import { useApplicationLanes } from "../use-application-lanes";
 import { ApplicationNotes } from "./application-notes";
 import { Activity } from "./detail/activity";
 import { CloseDialog } from "./detail/close-dialog";
@@ -37,6 +43,8 @@ import { Contacts } from "./detail/contacts";
 import { NextStepCard } from "./detail/next-step-card";
 import { SentDocuments } from "./detail/sent-documents";
 import { InterviewDialog } from "./interview-dialog";
+import { PriorNoResponseNotice } from "./prior-no-response-notice";
+import { useNow } from "@/features/career/shared";
 import { useClosingValue } from "@/hooks/use-closing-value";
 import { useConfirm } from "@/hooks/use-confirm";
 import { getOrpcErrorMessage } from "@/libs/error-message";
@@ -44,7 +52,8 @@ import { isImeComposing } from "@/libs/keyboard";
 import { orpc } from "@/libs/orpc/client";
 
 type DetailSheetProps = {
-	application: Application | null;
+	application: ApplicationSummary | null;
+	returnFocus: (id: string) => HTMLElement | null;
 	onOpenChange: (open: boolean) => void;
 	onEditDetails: (application: Application) => void;
 };
@@ -53,32 +62,56 @@ type DetailSheetProps = {
  * One application, 480px from the right (full screen on phones): the stage stepper with Move to next, the next
  * step, what was sent, the key facts, notes and activity. Close application… takes a reason; Delete is in ⋯.
  */
-export function ApplicationDetailSheet({ application, onOpenChange, onEditDetails }: DetailSheetProps) {
+export function ApplicationDetailSheet({ application, onOpenChange, onEditDetails, returnFocus }: DetailSheetProps) {
+	const contentRef = useRef<HTMLDivElement>(null);
 	const phone = useBreakpoint() === "mobile";
 	// Closing keeps the last application on screen until the sheet has slid away.
 	const [shown, onOpenChangeComplete] = useClosingValue(application);
-	const { data } = useQuery({
-		...orpc.applications.getById.queryOptions({ input: { id: shown?.id ?? "" } }),
+	const initialDetail = getInitialApplicationDetail(shown);
+	const { data, isError, isFetching, isPending, refetch } = useQuery({
+		...applicationDetailQueryOptions(shown?.id ?? ""),
 		// Fetch only while open; while closing, the cached copy keeps showing.
 		enabled: Boolean(application),
-		...(shown ? { placeholderData: shown } : {}),
+		initialData: initialDetail,
+		initialDataUpdatedAt: 0,
 	});
-	const current = data ?? shown;
+	const current = data;
 
 	return (
 		<Sheet open={Boolean(application)} onOpenChange={onOpenChange} onOpenChangeComplete={onOpenChangeComplete}>
 			<SheetContent
+				ref={contentRef}
+				initialFocus={() =>
+					contentRef.current?.querySelector<HTMLElement>(
+						current ? '[data-slot="sheet-title"]' : '[data-slot="sheet-close"]',
+					) ?? false
+				}
+				finalFocus={() => (shown ? returnFocus(shown.id) : null) ?? false}
 				side={phone ? "bottom" : "right"}
 				closeLabel={t`Close`}
 				className={cn("gap-0", phone ? "h-svh" : "data-[side=right]:sm:max-w-[480px]")}
 			>
-				{current && (
+				{current ? (
 					<Detail
 						key={current.id}
 						application={current}
 						onEditDetails={onEditDetails}
 						onDeleted={() => onOpenChange(false)}
 					/>
+				) : (
+					<div className="grid gap-2 p-5">
+						<SheetTitle tabIndex={-1} dir="auto">
+							{shown?.role}
+						</SheetTitle>
+						<SheetDescription aria-live="polite">
+							{isError ? t`Couldn't load this. Your saved data hasn't changed.` : t`Loading…`}
+						</SheetDescription>
+						{isError && (
+							<Button variant="secondary" disabled={isFetching || isPending} onClick={() => void refetch()}>
+								<Trans>Try again</Trans>
+							</Button>
+						)}
+					</div>
 				)}
 			</SheetContent>
 		</Sheet>
@@ -94,24 +127,60 @@ type DetailProps = {
 function Detail({ application, onEditDetails, onDeleted }: DetailProps) {
 	const { i18n } = useLingui();
 	const confirm = useConfirm();
-	const { moveTo, close, remove } = useApplicationActions();
+	const { moveTo, close, remove, logFollowUp } = useApplicationActions();
+	const { lanes, active } = useApplicationLanes();
 	const [interview, setInterview] = useState<{ open: boolean; entry: InterviewTimelineEntry | null }>({
 		open: false,
 		entry: null,
 	});
 	const [closing, setClosing] = useState(false);
 	const [postingOpen, setPostingOpen] = useState(false);
-	const [applying, setApplying] = useState(false);
+	const [applying, setApplying] = useState<ApplicationLane | null>(null);
 
-	const next = getNextStage(application.status);
-	const reached = PIPELINE.indexOf(application.status);
-	const since = daysInStage(application);
+	const current = getDisplayLane(lanes, application);
+	const steps = active.filter((lane) => lane.category !== "closed");
+	const next = getNextLane(lanes, current);
+	const stage = getStageDisplay(lanes, application);
 	const closed = application.status === "closed";
+	// An accepted offer keeps its pipeline filled through Offer: it was won, not lost.
+	const reached = stage.accepted
+		? steps.findLastIndex((lane) => lane.category === "offer")
+		: steps.findIndex((lane) => lane.id === current.id);
+	const since = daysInLane(application);
+	// Leaving Saved for Applied records the submission first.
+	const goTo = (lane: ApplicationLane) => {
+		if (lane.id === current.id) return;
+		if (application.status === "saved" && lane.category === "applied") setApplying(lane);
+		else {
+			// Moving to Interview usually means one is being set up: once the move is saved, offer to schedule it, unless
+			// one already is.
+			const scheduled = application.activity.some(
+				(entry) => entry.type === "interview" && new Date(entry.at).getTime() > Date.now(),
+			);
+			moveTo(
+				application,
+				lane,
+				undefined,
+				lane.category === "interview" && !scheduled
+					? () =>
+							toast.add({
+								description: t`Moved to ${getLaneLabel(lane)}.`,
+								actionProps: {
+									children: t`Schedule it`,
+									onClick: () => setInterview({ open: true, entry: null }),
+								},
+							})
+					: undefined,
+			);
+		}
+	};
 
 	const onDelete = async () => {
-		const confirmed = await confirm(t`Delete this application?`, {
-			description: t`“${application.role} · ${application.company}” and its timeline are deleted permanently. This can't be undone.`,
-			confirmText: t`Delete application`,
+		const confirmed = await confirm(t`Move to Trash`, {
+			description: t`Applications and their timelines can be restored from Trash.`,
+			confirmText: t`Move to Trash`,
+			cancelText: t`Keep application`,
+			variant: "danger",
 		});
 		if (!confirmed) return;
 		remove.mutate({ id: application.id }, { onSuccess: onDeleted });
@@ -120,7 +189,7 @@ function Detail({ application, onEditDetails, onDeleted }: DetailProps) {
 	return (
 		<>
 			<div className="min-h-0 flex-1 overflow-y-auto">
-				<header className="grid gap-4 border-b border-line px-5 pt-5 pb-4">
+				<header className="sticky top-0 z-10 grid gap-4 border-b border-line bg-raised px-5 pt-5 pb-4 [@media(max-height:500px)]:static">
 					<div className="flex items-start gap-3 pe-8">
 						<span
 							aria-hidden="true"
@@ -129,9 +198,11 @@ function Detail({ application, onEditDetails, onDeleted }: DetailProps) {
 							{application.company.slice(0, 1).toUpperCase()}
 						</span>
 						<div className="grid min-w-0 flex-1 gap-0.5">
-							<SheetTitle className="font-display text-[22px] leading-7 font-medium">{application.role}</SheetTitle>
+							<SheetTitle tabIndex={-1} dir="auto" className="font-display text-[22px] leading-7">
+								{application.role}
+							</SheetTitle>
 							<SheetDescription className="flex flex-wrap items-center gap-x-1.5 text-sm text-ink-2">
-								<span>{[application.company, application.location].filter(Boolean).join(" · ")}</span>
+								<bdi>{[application.company, application.location].filter(Boolean).join(" · ")}</bdi>
 								{(application.sourceUrl || application.jobDescription) && (
 									<>
 										<span aria-hidden="true">·</span>
@@ -173,56 +244,57 @@ function Detail({ application, onEditDetails, onDeleted }: DetailProps) {
 								<DropdownMenuSeparator />
 								<DropdownMenuItem variant="destructive" onClick={onDelete}>
 									<Icon name="trash" size={18} />
-									<Trans>Delete…</Trans>
+									<Trans>Move to Trash</Trans>
 								</DropdownMenuItem>
 							</DropdownMenuContent>
 						</DropdownMenu>
 					</div>
 
 					<div className="grid gap-2.5">
-						<ol aria-label={t`Stages`} className="grid grid-cols-5 gap-1.5">
-							{PIPELINE.map((stage, index) => (
-								<li key={stage}>
-									<button
-										type="button"
-										aria-current={stage === application.status ? "step" : undefined}
-										onClick={() => {
-											if (stage === application.status) return;
-											if (application.status === "saved" && stage === "applied") setApplying(true);
-											else moveTo(application, stage);
-										}}
-										className="grid w-full gap-1.5 text-start"
-									>
-										<span
-											className="h-1.5 rounded-sm transition-colors duration-standard"
-											style={{
-												background: !closed && index <= reached ? getStageColor(stage) : "var(--line)",
-											}}
-										/>
-										<span
-											className={cn(
-												"truncate text-[11px]",
-												stage === application.status ? "font-semibold text-ink" : "text-ink-3",
-											)}
+						{/* Equal columns while they fit (five by default); more lanes scroll sideways. */}
+						<ol
+							aria-label={t`Stages`}
+							className="-mx-1 grid auto-cols-[minmax(64px,1fr)] grid-flow-col gap-1.5 overflow-x-auto px-1 pb-1"
+						>
+							{steps.map((lane, index) => {
+								const label = getLaneLabel(lane);
+								return (
+									<li key={lane.id} className="min-w-0">
+										<button
+											type="button"
+											title={label}
+											aria-current={lane.id === current.id ? "step" : undefined}
+											onClick={() => goTo(lane)}
+											className="grid w-full gap-1.5 text-start"
 										>
-											{getStageLabel(stage)}
-										</span>
-									</button>
-								</li>
-							))}
+											<span
+												className="h-1.5 rounded-sm transition-colors duration-standard"
+												style={{
+													background: (!closed || stage.accepted) && index <= reached ? lane.color : "var(--line)",
+												}}
+											/>
+											<span
+												className={cn(
+													"truncate text-xs",
+													lane.id === current.id ? "font-semibold text-ink" : "text-ink-3",
+												)}
+											>
+												{label}
+											</span>
+										</button>
+									</li>
+								);
+							})}
 						</ol>
 						<div className="flex flex-wrap items-center justify-between gap-2">
-							<span className="flex items-center gap-1.5 text-sm">
-								<span
-									aria-hidden="true"
-									className="size-2 rounded-sm"
-									style={{ background: getStageColor(application.status) }}
-								/>
-								<strong className="font-semibold">{getStageLabel(application.status)}</strong>
-								<span className="text-ink-3">
-									{closed && application.closedReason ? (
+							<span className="flex min-w-0 items-center gap-1.5 text-sm">
+								<span aria-hidden="true" className="size-2 shrink-0 rounded-sm" style={{ background: stage.color }} />
+								{stage.accepted && <Icon name="check" size={16} className="shrink-0 text-accent-text" />}
+								<strong className="truncate font-semibold">{stage.label}</strong>
+								<span className="shrink-0 text-ink-3">
+									{stage.accepted ? null : closed && application.closedReason ? (
 										<>· {getClosedReasonLabel(application.closedReason)}</>
-									) : (
+									) : since === null ? null : (
 										<>
 											· <Plural value={since} _0="since today" one="for # day" other="for # days" />
 										</>
@@ -230,15 +302,11 @@ function Detail({ application, onEditDetails, onDeleted }: DetailProps) {
 								</span>
 							</span>
 							{next && !closed && (
-								<Button
-									size="sm"
-									variant="secondary"
-									onClick={() => (application.status === "saved" ? setApplying(true) : moveTo(application, next))}
-								>
-									{application.status === "saved" ? (
+								<Button size="sm" variant="secondary" onClick={() => goTo(next)}>
+									{application.status === "saved" && next.category === "applied" ? (
 										<Trans>Mark as applied</Trans>
 									) : (
-										<Trans>Move to {getStageLabel(next)}</Trans>
+										<Trans>Move to {getLaneLabel(next)}</Trans>
 									)}
 									<Icon name="arrow-right" size={16} />
 								</Button>
@@ -252,6 +320,15 @@ function Detail({ application, onEditDetails, onDeleted }: DetailProps) {
 						application={application}
 						onScheduleInterview={(entry) => setInterview({ open: true, entry })}
 					/>
+					{!closed && application.status !== "saved" && (
+						<Button
+							variant="secondary"
+							disabled={logFollowUp.isPending}
+							onClick={() => logFollowUp.mutate({ id: application.id })}
+						>
+							<Trans>Followed up</Trans>
+						</Button>
+					)}
 					<SentDocuments application={application} disabled={remove.isPending} />
 					<Facts application={application} locale={i18n.locale} />
 					<Tags application={application} />
@@ -264,7 +341,7 @@ function Detail({ application, onEditDetails, onDeleted }: DetailProps) {
 				{!closed ? (
 					<>
 						<Button variant="secondary" onClick={() => setClosing(true)}>
-							<Trans>Close application…</Trans>
+							<Trans>Mark as closed…</Trans>
 						</Button>
 						{application.sourceUrl && (
 							<Button
@@ -280,13 +357,19 @@ function Detail({ application, onEditDetails, onDeleted }: DetailProps) {
 						<OpenWorkspaceButton application={application} />
 					</>
 				) : (
-					<Button variant="secondary" onClick={() => moveTo(application, "applied")}>
+					<Button variant="secondary" onClick={() => moveTo(application, getCategoryLane(lanes, "applied"))}>
 						<Trans>Reopen</Trans>
 					</Button>
 				)}
 			</footer>
 
-			<CloseDialog open={closing} onOpenChange={setClosing} onClose={(reason) => close(application, reason)} />
+			<CloseDialog
+				open={closing}
+				status={application.status}
+				onOpenChange={setClosing}
+				lanes={active}
+				onClose={(lane, reason) => (lane ? moveTo(application, lane, reason) : reason && close(application, reason))}
+			/>
 			<InterviewDialog
 				application={application}
 				interview={interview.entry}
@@ -294,7 +377,7 @@ function Detail({ application, onEditDetails, onDeleted }: DetailProps) {
 				onOpenChange={(open) => setInterview((currentValue) => ({ ...currentValue, open }))}
 			/>
 			<PostingDialog application={application} open={postingOpen} onOpenChange={setPostingOpen} />
-			{applying && <MarkAppliedDialog application={application} onClose={() => setApplying(false)} />}
+			{applying && <MarkAppliedDialog application={application} lane={applying} onClose={() => setApplying(null)} />}
 		</>
 	);
 }
@@ -307,11 +390,13 @@ function Facts({ application, locale }: { application: Application; locale: stri
 		onSuccess: () => invalidate(application.id),
 		onError: () => toast.add({ type: "error", description: t`Couldn't save the change. Try again.` }),
 	});
-	const applied = new Date(application.appliedAt).toLocaleDateString(locale, {
-		month: "short",
-		day: "numeric",
-		year: "numeric",
-	});
+	const applied = applicationSentAt(application)
+		? new Date(application.appliedAt).toLocaleDateString(locale, {
+				month: "short",
+				day: "numeric",
+				year: "numeric",
+			})
+		: t`Not recorded`;
 
 	return (
 		<dl className="grid grid-cols-2 gap-x-4 gap-y-3">
@@ -337,7 +422,7 @@ function Facts({ application, locale }: { application: Application; locale: stri
 				</dt>
 				<dd className="min-w-0">
 					<Contacts
-						contacts={application.contacts}
+						application={application}
 						disabled={update.isPending}
 						onChange={(contacts) => update.mutate({ id: application.id, contacts })}
 					/>
@@ -372,6 +457,7 @@ function InlineFact({ label, value, onSave }: InlineFactProps) {
 						id={id}
 						type="button"
 						onClick={() => setDraft(value ?? "")}
+						dir="auto"
 						className="w-full truncate rounded-md text-start text-sm font-medium hover:bg-hover"
 					>
 						{value || "—"}
@@ -452,11 +538,12 @@ function Tags({ application }: { application: Application }) {
 
 type PostingDialogProps = { application: Application; open: boolean; onOpenChange: (open: boolean) => void };
 
-type MarkAppliedDialogProps = { application: Application; onClose: () => void };
+type MarkAppliedDialogProps = { application: Application; lane: ApplicationLane; onClose: () => void };
 
-function MarkAppliedDialog({ application, onClose }: MarkAppliedDialogProps) {
+function MarkAppliedDialog({ application, lane, onClose }: MarkAppliedDialogProps) {
 	const id = useId();
 	const invalidate = useInvalidateApplications();
+	const { mode } = useApplicationLanes();
 	const [date, setDate] = useState(() => new Date().toLocaleDateString("en-CA"));
 	const [resumeId, setResumeId] = useState(application.resumeId ?? "");
 	const [coverLetterId, setCoverLetterId] = useState(application.coverLetterId ?? "");
@@ -477,14 +564,14 @@ function MarkAppliedDialog({ application, onClose }: MarkAppliedDialogProps) {
 				if (!open) onClose();
 			}}
 		>
-			<DialogContent>
+			<DialogContent closeLabel={t`Close`}>
 				<form
 					className="grid gap-4"
 					onSubmit={(event) => {
 						event.preventDefault();
 						update.mutate({
 							id: application.id,
-							status: "applied",
+							...laneMoveInput(lane, mode),
 							stageEnteredAt: date,
 							resumeId: resumeId || null,
 							coverLetterId: coverLetterId || null,
@@ -503,6 +590,7 @@ function MarkAppliedDialog({ application, onClose }: MarkAppliedDialogProps) {
 							</Trans>
 						</DialogDescription>
 					</DialogHeader>
+					<PriorNoResponseNotice company={application.company} excludeId={application.id} />
 					<div className="grid gap-1.5">
 						<label htmlFor={`${id}-date`}>
 							<Trans>Application date</Trans>
@@ -523,9 +611,9 @@ function MarkAppliedDialog({ application, onClose }: MarkAppliedDialogProps) {
 							id={`${id}-resume`}
 							value={resumeId}
 							onChange={(event) => setResumeId(event.target.value)}
-							className="h-9 rounded-md border border-line bg-surface px-2 text-sm"
+							className="h-9 rounded-md border border-control-border bg-surface px-2 text-sm"
 						>
-							<option value="">{t`None`}</option>
+							<option value="">{t`No resume selected`}</option>
 							{documents
 								?.filter((document) => document.type === "resume")
 								.map((document) => (
@@ -543,9 +631,9 @@ function MarkAppliedDialog({ application, onClose }: MarkAppliedDialogProps) {
 							id={`${id}-letter`}
 							value={coverLetterId}
 							onChange={(event) => setCoverLetterId(event.target.value)}
-							className="h-9 rounded-md border border-line bg-surface px-2 text-sm"
+							className="h-9 rounded-md border border-control-border bg-surface px-2 text-sm"
 						>
-							<option value="">{t`None`}</option>
+							<option value="">{t`No cover letter selected`}</option>
 							{documents
 								?.filter((document) => document.type === "letter")
 								.map((document) => (
@@ -591,9 +679,14 @@ function MarkAppliedDialog({ application, onClose }: MarkAppliedDialogProps) {
 
 /** The saved posting: its link, what it asks for, and its text. */
 function PostingDialog({ application, open, onOpenChange }: PostingDialogProps) {
+	const now = useNow();
+	const { i18n } = useLingui();
+	const receipt = postingReadReceipt(application.postingSource, i18n.locale, now.getTime());
+	const readAt = receipt?.readAt;
+	const sourceHost = receipt?.sourceHost ?? t`the posting page`;
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent className="max-h-[85svh] overflow-y-auto sm:max-w-xl">
+			<DialogContent closeLabel={t`Close`} className="max-h-[85svh] overflow-y-auto sm:max-w-xl">
 				<DialogHeader>
 					<DialogTitle>
 						{application.role} · {application.company}
@@ -617,11 +710,12 @@ function PostingDialog({ application, open, onOpenChange }: PostingDialogProps) 
 					<p className="text-xs text-ink-3">
 						{application.postingSource.method === "paste" ? (
 							<Trans>Pasted description</Trans>
-						) : (
+						) : readAt ? (
 							<Trans>
-								Retrieved {application.postingSource.retrievedAt} using {application.postingSource.method}. Retrieval
-								time does not establish origin freshness.
+								Read {readAt} from {sourceHost}. The employer may have changed it since.
 							</Trans>
+						) : (
+							<Trans>The employer may have changed it since.</Trans>
 						)}
 					</p>
 				)}

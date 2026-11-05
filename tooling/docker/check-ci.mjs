@@ -2,7 +2,7 @@ export async function requireSuccessfulCI({ github, repo, sha }) {
 	if (!/^[a-f0-9]{40}$/.test(sha ?? "")) throw new Error("Promotion requires a full commit SHA");
 	const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
 		...repo,
-		workflow_id: "e2e.yml",
+		workflow_id: "ci.yml",
 		head_sha: sha,
 		event: "push",
 		branch: "main",

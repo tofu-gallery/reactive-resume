@@ -1,11 +1,14 @@
 import type { RouterOutput } from "@/api/client";
+import type { PreparedRequest } from "@reactive-resume/utils/deferred-request";
+import type { QueryKey } from "@tanstack/react-query";
 import { useLingui } from "@lingui/react/macro";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ORPCError } from "@orpc/client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { withUndo } from "./undo";
-import { client, orpc } from "@/api/client";
-import { getServer, useSession } from "@/auth/session";
+import { client, orpc, prepareRpc } from "@/api/client";
+import { getAccountScope, getServer, useSession } from "@/auth/session";
 import { useProfile } from "@/features/settings/queries";
 import { showToast } from "@/ui";
 
@@ -36,6 +39,16 @@ export function useCareerQueries() {
 	return { facts, stories, profile };
 }
 
+/** Roles discovery found, shared by Today and the coach's starters. */
+export function useOpportunities() {
+	const session = useSession();
+	return useQuery({
+		...orpc.career.opportunities.queryOptions({ input: {} }),
+		enabled: session.status === "signed-in",
+		queryKey: [...orpc.career.opportunities.key(), session.server],
+	});
+}
+
 export function useTodayQueries() {
 	const session = useSession();
 	const options = { enabled: session.status === "signed-in", retry: false };
@@ -44,11 +57,7 @@ export function useTodayQueries() {
 		...options,
 		queryKey: [...orpc.career.notifications.key(), session.server],
 	});
-	const opportunities = useQuery({
-		...orpc.career.opportunities.queryOptions({ input: {} }),
-		...options,
-		queryKey: [...orpc.career.opportunities.key(), session.server],
-	});
+	const opportunities = useOpportunities();
 	const schedules = useQuery({
 		...orpc.career.schedules.queryOptions({ input: {} }),
 		...options,
@@ -76,15 +85,46 @@ export function useCareerTime() {
 	const profile = useProfile();
 	const { i18n } = useLingui();
 	const timeZone = profile.data?.timezone ?? "UTC";
+	const device = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+	// When the account's timezone isn't this device's, times say which zone they're in ("16:56 UTC").
+	const labelled = !!device && device !== timeZone;
 	return {
 		profile,
 		timeZone,
+		/** This device's timezone, when it differs from the account's. */
+		deviceTimeZone: labelled ? device : undefined,
 		locale: i18n.locale,
 		when: (value: Date | string) =>
-			new Intl.DateTimeFormat(i18n.locale, { timeZone, dateStyle: "medium", timeStyle: "short" }).format(
+			new Intl.DateTimeFormat(i18n.locale, {
+				timeZone,
+				month: "short",
+				day: "numeric",
+				year: "numeric",
+				hour: "numeric",
+				minute: "2-digit",
+				...(labelled ? { timeZoneName: "short" as const } : {}),
+			}).format(new Date(value)),
+		/** A whole day, such as an offer's start date. */
+		date: (value: Date | string) =>
+			new Intl.DateTimeFormat(i18n.locale, { timeZone, day: "numeric", month: "short", year: "numeric" }).format(
 				new Date(value),
 			),
 	};
+}
+
+/** Saves the account's timezone, as Settings → Preferences does. */
+export function useSaveTimezone() {
+	const { t } = useLingui();
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationKey: ["settings", "timezone"],
+		mutationFn: async (value: string) => {
+			const result = await client.auth.updateProfile({ timezone: value });
+			if (!result.status) throw new Error("Timezone update rejected");
+		},
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: orpc.auth.getProfile.key() }),
+		onError: () => showToast({ message: t`Couldn't save the timezone. Try again.` }),
+	});
 }
 
 export function useNow() {
@@ -113,7 +153,7 @@ export function useCareerAction() {
 		Promise.all([
 			queryClient.invalidateQueries({ queryKey: orpc.career.key() }),
 			queryClient.invalidateQueries({ queryKey: orpc.applications.key() }),
-			queryClient.invalidateQueries({ queryKey: orpc.documents.list.key() }),
+			queryClient.invalidateQueries({ queryKey: orpc.documents.key() }),
 		]);
 	const run = async <T>(operation: () => Promise<T>, success?: (result: T) => void) => {
 		if (busy.current || session.status !== "signed-in" || getServer() !== session.server) return;
@@ -124,8 +164,14 @@ export function useCareerAction() {
 		try {
 			const result = await operation();
 			if (getServer() === server) success?.(result);
-		} catch {
-			if (getServer() === server) setError(t`Couldn't save that change. Check your connection and try again.`);
+		} catch (error) {
+			// This server's own reason (a change made elsewhere, a limit) says more than a generic retry.
+			if (getServer() === server)
+				setError(
+					error instanceof ORPCError && error.message
+						? error.message
+						: t`Couldn't save that change. Check your connection and try again.`,
+				);
 		} finally {
 			busy.current = false;
 			setPending(false);
@@ -137,8 +183,15 @@ export function useCareerAction() {
 
 export function useUndoRows() {
 	const { t } = useLingui();
+	const queryClient = useQueryClient();
 	const session = useSession();
 	const [hidden, setHidden] = useState<string[]>([]);
+	const accountScope = getAccountScope();
+	const [hiddenScope, setHiddenScope] = useState(accountScope);
+	if (hiddenScope !== accountScope) {
+		setHiddenScope(accountScope);
+		setHidden([]);
+	}
 	const pending = useRef(new Map<string, ReturnType<typeof withUndo>>());
 	const active = useRef(session);
 	useLayoutEffect(() => {
@@ -154,32 +207,56 @@ export function useUndoRows() {
 			}
 			operations.clear();
 		};
-	}, [session.server]);
-	const remove = (id: string, message: string, commit: () => Promise<unknown>) => {
+	}, [session.server, accountScope]);
+	const remove = (
+		id: string,
+		message: string,
+		prepare: () => Promise<PreparedRequest<unknown>>,
+		queryKey: QueryKey,
+	) => {
 		if (pending.current.has(id)) return;
 		const server = session.server;
-		setHidden((rows) => [...rows, id]);
-		const restore = () => {
-			setHidden((rows) => rows.filter((value) => value !== id));
-			pending.current.delete(id);
+		const scope = getAccountScope();
+		const current = () =>
+			getAccountScope() === scope && getServer() === server && active.current.status === "signed-in";
+		const reconcile = async () => {
+			try {
+				if (!current()) return;
+				await queryClient.cancelQueries({ queryKey });
+				if (!current()) return;
+				await queryClient.invalidateQueries({ queryKey, refetchType: "all" }, { throwOnError: true });
+				if (current()) {
+					setHidden((rows) => rows.filter((value) => value !== id));
+					void action.refresh();
+				}
+			} finally {
+				pending.current.delete(id);
+			}
+		};
+		const failed = () => {
+			if (!current()) return;
+			showToast({
+				message: t`Couldn't save that change. Check your connection and try again.`,
+				action: {
+					label: t`Retry`,
+					onPress: () => {
+						void reconcile().catch(failed);
+					},
+				},
+			});
 		};
 		const operation = withUndo({
 			message,
-			restore,
-			failed: () => showToast({ message: t`Couldn't save that change. The item is restored; try again.` }),
-			commit: async () => {
-				try {
-					if (getServer() === server && active.current.status === "signed-in") await commit();
-					else restore();
-				} finally {
-					void action.refresh();
-					pending.current.delete(id);
-				}
-			},
+			prepare,
+			onReady: () => setHidden((rows) => [...rows, id]),
+			restore: reconcile,
+			failed,
+			commit: (result) => result.then(reconcile),
 		});
 		pending.current.set(id, operation);
 	};
+
 	return { hidden, remove };
 }
 
-export { client };
+export { client, prepareRpc };

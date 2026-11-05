@@ -1,5 +1,6 @@
 import type { ThreadSummary } from "./chat";
 import type { ReactNode } from "react";
+import { i18n } from "@lingui/core";
 import { plural } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { useQueryClient } from "@tanstack/react-query";
@@ -86,13 +87,24 @@ export function PastConversations({ threads, isMine, currentId, onOpen, onDelete
 		<ListRow
 			key={thread.id}
 			title={title(thread)}
-			subtitle={[
-				time(thread.lastMessageAt),
-				outcome(thread),
-				...(other ? [thread.coverLetterName ?? thread.resumeName ?? ""] : []),
-			]
-				.filter(Boolean)
-				.join(" · ")}
+			subtitle={
+				<View style={{ gap: 1 }}>
+					{thread.firstMessage ? (
+						<Text variant="callout" color="ink2" numberOfLines={1} ellipsizeMode="tail">
+							{thread.firstMessage}
+						</Text>
+					) : null}
+					<Text variant="callout" color={thread.id === currentId ? "ink2" : "ink3"}>
+						{[
+							time(thread.lastMessageAt),
+							outcome(thread),
+							...(other ? [thread.coverLetterName ?? thread.resumeName ?? ""] : []),
+						]
+							.filter(Boolean)
+							.join(" · ")}
+					</Text>
+				</View>
+			}
 			selected={thread.id === currentId}
 			onPress={() => onOpen(thread)}
 			trailing={<IconButton icon="dots-three" label={t`Delete ${title(thread)}`} onPress={() => remove.ask(thread)} />}
@@ -111,7 +123,9 @@ export function PastConversations({ threads, isMine, currentId, onOpen, onDelete
 				)}
 			</Section>
 			{others.length > 0 ? (
-				<Section title={t`Other documents · ${others.length}`}>{others.map((thread) => row(thread, true))}</Section>
+				<Section title={t`Other documents · ${i18n.number(others.length)}`}>
+					{others.map((thread) => row(thread, true))}
+				</Section>
 			) : null}
 			{remove.dialog}
 		</ScrollView>

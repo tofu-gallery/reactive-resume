@@ -8,10 +8,11 @@ import type {
 } from "@reactive-resume/schema/cover-letter/data";
 import type { Template } from "@reactive-resume/schema/templates";
 import { ORPCError } from "@orpc/client";
-import { and, asc, count, desc, eq, ilike, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { db } from "@reactive-resume/db/client";
 import * as schema from "@reactive-resume/db/schema";
-import { copyCoverLetterStyle } from "@reactive-resume/resume/cover-letter";
+import { copyCoverLetterStyle, initialCoverLetterLocale } from "@reactive-resume/resume/cover-letter";
+import { SUBMITTED_DOCUMENT_LOCKED } from "@reactive-resume/schema/applications/errors";
 import {
 	coverLetterContentSchema,
 	coverLetterDocumentSchema,
@@ -19,6 +20,15 @@ import {
 } from "@reactive-resume/schema/cover-letter/data";
 import { resumeDataSchema } from "@reactive-resume/schema/resume/data";
 import { defaultResumeData } from "@reactive-resume/schema/resume/default";
+import { coverLetterDto } from "../../dto/cover-letter";
+import {
+	assertCurrentClientWrite,
+	CurrentClientRequired,
+	saveProposalApplications,
+} from "../agent/proposal-applications";
+import { assertAiOperations, readAiUsage } from "../ai/usage";
+import { activeApplications } from "../applications/access";
+import { suggestDuplicateName } from "../documents/naming";
 import { lockUser } from "../documents/ownership";
 import { resumeService } from "../resume/service";
 import { sanitizeCoverLetterHtml } from "./html";
@@ -26,6 +36,7 @@ import { getLetterVersion, saveLetterSessionVersion, writeLetterVersion } from "
 
 type OwnedId = { userId: string; id: string };
 type RevisionInput = OwnedId & { expectedRevision: number };
+const LETTER_AI_ACTIONS = ["draft-letter", "draft-message", "improve", "assistant", "career-chat"] as const;
 type CreateInput = {
 	userId: string;
 	name: string;
@@ -35,6 +46,7 @@ type CreateInput = {
 	signOff?: string | null | undefined;
 	resumeId?: string | undefined;
 	applicationId?: string | undefined;
+	sourceLetterId?: string | undefined;
 	template?: Template | undefined;
 	layout?: CoverLetterLayout | undefined;
 	recipientName?: string | undefined;
@@ -49,8 +61,8 @@ function toLetter(row: typeof schema.coverLetter.$inferSelect): CoverLetter {
 }
 
 /** The stored letter, with the copies in `style` as they are. */
-async function getRow(input: OwnedId): Promise<CoverLetter> {
-	const [row] = await db
+async function getRow(input: OwnedId, reader: DbOrTx = db): Promise<CoverLetter> {
+	const [row] = await reader
 		.select()
 		.from(schema.coverLetter)
 		.where(and(eq(schema.coverLetter.id, input.id), eq(schema.coverLetter.userId, input.userId)));
@@ -62,12 +74,13 @@ async function getRow(input: OwnedId): Promise<CoverLetter> {
  * A letter as it reads now: linked sender details and design come from its source resume as the resume is today.
  * If the resume is gone, the copies the letter keeps stand in.
  */
-async function resolveLinks(letter: CoverLetter, userId: string): Promise<CoverLetter> {
+async function resolveLinks(stored: CoverLetter, userId: string, reader: DbOrTx = db): Promise<CoverLetter> {
+	const letter = { ...stored, aiUsage: await readAiUsage(userId, stored.aiOperationIds ?? [], reader) };
 	if (!(letter.senderLinked || letter.designLinked) || !letter.sourceResumeId) return letter;
 
 	let linked: CoverLetterStyle;
 	try {
-		linked = await getResumeStyle(userId, letter.sourceResumeId, letter.style.sectionId, letter.style.itemId);
+		linked = await getResumeStyle(userId, letter.sourceResumeId, letter.style.sectionId, letter.style.itemId, reader);
 	} catch {
 		return letter;
 	}
@@ -77,21 +90,35 @@ async function resolveLinks(letter: CoverLetter, userId: string): Promise<CoverL
 		style: {
 			...letter.style,
 			...(letter.senderLinked ? { basics: linked.basics, picture: linked.picture } : {}),
-			...(letter.designLinked ? { metadata: linked.metadata } : {}),
+			// Language belongs to the letter, not its design: a German letter keeps German framing on a shared template.
+			...(letter.designLinked
+				? {
+						metadata: {
+							...linked.metadata,
+							page: { ...linked.metadata.page, locale: letter.style.metadata.page.locale },
+						},
+					}
+				: {}),
 		},
 	};
 }
 
-async function getById(input: OwnedId): Promise<CoverLetter> {
-	return resolveLinks(await getRow(input), input.userId);
+async function getById(input: OwnedId, reader: DbOrTx = db): Promise<CoverLetter> {
+	return resolveLinks(await getRow(input, reader), input.userId, reader);
 }
 
 /** Today as YYYY-MM-DD, the date a new letter starts with. */
 const today = () => new Date().toISOString().slice(0, 10);
 
-async function getResumeStyle(userId: string, resumeId?: string, sectionId?: string, itemId?: string) {
+async function getResumeStyle(
+	userId: string,
+	resumeId?: string,
+	sectionId?: string,
+	itemId?: string,
+	reader: DbOrTx = db,
+) {
 	const data = resumeId
-		? resumeDataSchema.parse((await resumeService.getById({ userId, id: resumeId })).data)
+		? resumeDataSchema.parse((await resumeService.getById({ userId, id: resumeId }, reader)).data)
 		: defaultResumeData;
 	return copyCoverLetterStyle(data, sectionId, itemId);
 }
@@ -99,9 +126,14 @@ async function getResumeStyle(userId: string, resumeId?: string, sectionId?: str
 async function getOwnedApplication(userId: string, id?: string) {
 	if (!id) return null;
 	const [application] = await db
-		.select({ id: schema.application.id, company: schema.application.company, contacts: schema.application.contacts })
+		.select({
+			id: schema.application.id,
+			company: schema.application.company,
+			contacts: schema.application.contacts,
+			postingSource: schema.application.postingSource,
+		})
 		.from(schema.application)
-		.where(and(eq(schema.application.id, id), eq(schema.application.userId, userId)));
+		.where(and(eq(schema.application.id, id), activeApplications(userId)));
 	if (!application) throw new ORPCError("NOT_FOUND");
 	return application;
 }
@@ -111,56 +143,283 @@ async function assertOwnedApplication(userId: string, id?: string) {
 }
 
 /**
- * A letter for an application is the letter that application sends: a new one becomes its letter if it has none, and
- * moving a letter to another application takes it along.
+ * The body of an earlier letter to start from. The source stays untouched: its text and request sources are read, and the new
+ * letter's own "created" version records what was copied.
  */
-async function linkLetterApplication(
+async function getOwnedLetterBody(userId: string, id: string, reader: DbOrTx) {
+	const [row] = await reader
+		.select({ content: schema.coverLetter.content, aiOperationIds: schema.coverLetter.aiOperationIds })
+		.from(schema.coverLetter)
+		.where(
+			and(eq(schema.coverLetter.id, id), eq(schema.coverLetter.userId, userId), isNull(schema.coverLetter.trashedAt)),
+		);
+	if (!row) throw new ORPCError("NOT_FOUND");
+	return row;
+}
+
+type LinkLetterApplicationInput = {
+	userId: string;
+	letterId: string;
+	from?: string | null | undefined;
+} & ({ to: string; replace: boolean } | { to: null; clearFrom: string } | { to: null; unlinkAll: true });
+
+const submittedDocumentLocked = () =>
+	new ORPCError("BAD_REQUEST", {
+		message: "Recorded submitted documents cannot be replaced. Prepare a copy to keep the submitted versions intact.",
+		data: { reason: SUBMITTED_DOCUMENT_LOCKED },
+	});
+
+type ReverseAliasUpdate = { id: string; sourceApplicationId: string | null };
+
+/**
+ * Plans the reverse side of a link change. It locks the letter actually being displaced (even when its reverse is
+ * null) and every letter that still points at an application being detached or cleared. A claiming application keeps
+ * its reverse link; a reverse-only alias loses it. Any locked affected letter refuses before an application or letter
+ * write. The caller applies the plan after its application writes.
+ */
+async function planReverseAliases(
 	client: DbOrTx,
 	input: {
 		userId: string;
 		letterId: string;
-		from?: string | null | undefined;
-		to?: string | null | undefined;
-		replace: boolean;
+		detachedApplicationIds: (string | null | undefined)[];
+		displacedLetterId?: string | null;
 	},
-) {
-	if (input.from === input.to) return;
+): Promise<ReverseAliasUpdate[]> {
+	const detached = [...new Set(input.detachedApplicationIds.filter((id): id is string => Boolean(id)))];
+	const displaced =
+		input.displacedLetterId && input.displacedLetterId !== input.letterId ? input.displacedLetterId : null;
+	if (!detached.length && !displaced) return [];
+	const scope = or(
+		...(displaced ? [eq(schema.coverLetter.id, displaced)] : []),
+		...(detached.length
+			? [and(inArray(schema.coverLetter.sourceApplicationId, detached), ne(schema.coverLetter.id, input.letterId))]
+			: []),
+	);
+	const letters = await client
+		.select({
+			id: schema.coverLetter.id,
+			sourceApplicationId: schema.coverLetter.sourceApplicationId,
+			isLocked: schema.coverLetter.isLocked,
+		})
+		.from(schema.coverLetter)
+		.where(and(eq(schema.coverLetter.userId, input.userId), scope))
+		.orderBy(asc(schema.coverLetter.id))
+		.for("update");
+	if (letters.some((row) => row.isLocked))
+		throw new ORPCError("DOCUMENT_LOCKED", { status: 400, message: "Unlock the letter first." });
+
+	const reverseIds = letters
+		.filter(
+			(row) =>
+				row.id !== input.letterId && row.sourceApplicationId !== null && detached.includes(row.sourceApplicationId),
+		)
+		.map((row) => row.id);
+	if (!reverseIds.length) return [];
+	const claimed = await client
+		.select({ id: schema.application.id, coverLetterId: schema.application.coverLetterId })
+		.from(schema.application)
+		.where(and(eq(schema.application.userId, input.userId), inArray(schema.application.coverLetterId, reverseIds)))
+		.orderBy(asc(schema.application.id))
+		.for("update");
+	const owners = claimed.filter((row) => !detached.includes(row.id));
+	return reverseIds.map((id) => {
+		const found = owners.filter((row) => row.coverLetterId === id);
+		if (found.length > 1)
+			throw new ORPCError("CONFLICT", {
+				message: "This letter is linked to more than one application. Review the documents before changing the link.",
+			});
+		return { id, sourceApplicationId: found[0]?.id ?? null };
+	});
+}
+
+async function applyReverseAliases(client: DbOrTx, userId: string, updates: ReverseAliasUpdate[]) {
+	for (const update of updates)
+		await client
+			.update(schema.coverLetter)
+			.set({ sourceApplicationId: update.sourceApplicationId, revision: sql`${schema.coverLetter.revision} + 1` })
+			.where(and(eq(schema.coverLetter.userId, userId), eq(schema.coverLetter.id, update.id)));
+}
+
+/**
+ * The one owner of the application ↔ letter pointer. A move takes the letter from every application that names it
+ * (including legacy aliases that `sourceApplicationId` does not know about), sets the target and clears the letter it
+ * displaced. A clear removes only the application it is told to clear, and the reverse link only when it names that
+ * same application. An unlink removes every application that still names the letter. Every change is refused when the
+ * application holds a submitted version.
+ */
+async function linkLetterApplication(client: DbOrTx, input: LinkLetterApplicationInput) {
 	const table = schema.application;
-	const ids = [input.from, input.to].filter((id): id is string => Boolean(id));
-	if (!ids.length) return;
+	const identityIds = [input.from, input.to, "clearFrom" in input ? input.clearFrom : undefined].filter(
+		(id): id is string => Boolean(id),
+	);
+	const namesLetter = eq(table.coverLetterId, input.letterId);
+	const identity = identityIds.length ? or(namesLetter, inArray(table.id, identityIds)) : namesLetter;
 	const applications = await client
-		.select({ id: table.id, coverLetterId: table.coverLetterId, sentVersion: table.sentCoverLetterVersionId })
+		.select({
+			id: table.id,
+			coverLetterId: table.coverLetterId,
+			sentVersion: table.sentCoverLetterVersionId,
+			trashedAt: table.trashedAt,
+		})
 		.from(table)
-		.where(and(eq(table.userId, input.userId), inArray(table.id, ids)))
+		.where(and(eq(table.userId, input.userId), identity))
 		.orderBy(asc(table.id))
 		.for("update");
-	if (input.to && !applications.some((application) => application.id === input.to)) throw new ORPCError("NOT_FOUND");
-	for (const application of applications) {
-		const next =
-			application.id === input.from && application.coverLetterId === input.letterId
-				? null
-				: application.id === input.to && (input.replace || !application.coverLetterId)
-					? input.letterId
-					: application.coverLetterId;
-		if (next === application.coverLetterId) continue;
-		if (application.sentVersion)
-			throw new ORPCError("BAD_REQUEST", {
-				message:
-					"Recorded submitted documents cannot be replaced. Prepare a copy to keep the submitted versions intact.",
-			});
+
+	const clear = async (application: (typeof applications)[number]) => {
+		if (application.sentVersion) throw submittedDocumentLocked();
 		await client
 			.update(table)
-			.set({ coverLetterId: next })
+			.set({ coverLetterId: null })
 			.where(and(eq(table.id, application.id), eq(table.userId, input.userId)));
+	};
+
+	if (input.to !== null) {
+		const target = applications.find((application) => application.id === input.to);
+		if (!target || target.trashedAt) throw new ORPCError("NOT_FOUND");
+		const cleared = applications.filter(
+			(application) => application.coverLetterId === input.letterId && application.id !== input.to,
+		);
+		// Both directions: forward aliases naming the incoming letter, the letter displaced from the target, and
+		// reverse aliases of every application actually being cleared. A stale source identity is not authority.
+		const reverseUpdates = await planReverseAliases(client, {
+			userId: input.userId,
+			letterId: input.letterId,
+			detachedApplicationIds: [input.to, ...cleared.map((application) => application.id)],
+			displacedLetterId: target.coverLetterId && target.coverLetterId !== input.letterId ? target.coverLetterId : null,
+		});
+		for (const application of applications) {
+			if (application.id === input.to) {
+				if (application.coverLetterId === input.letterId) continue;
+				if (application.sentVersion) throw submittedDocumentLocked();
+				await client
+					.update(table)
+					.set({ coverLetterId: input.letterId })
+					.where(and(eq(table.id, application.id), eq(table.userId, input.userId)));
+				continue;
+			}
+			// Every other application that still names this letter is a legacy alias, or the previous owner.
+			if (application.coverLetterId === input.letterId) await clear(application);
+		}
+		await applyReverseAliases(client, input.userId, reverseUpdates);
+		return;
 	}
+
+	if ("clearFrom" in input) {
+		const application = applications.find((candidate) => candidate.id === input.clearFrom);
+		if (application?.coverLetterId === input.letterId) await clear(application);
+		return;
+	}
+
+	// Letter-side unlink: every application that still names the letter lets it go, and reverse aliases of those
+	// cleared applications are detached or repaired to their actual forward owner.
+	const cleared = applications.filter((application) => application.coverLetterId === input.letterId);
+	const reverseUpdates = await planReverseAliases(client, {
+		userId: input.userId,
+		letterId: input.letterId,
+		detachedApplicationIds: cleared.map((application) => application.id),
+	});
+	for (const application of cleared) await clear(application);
+	await applyReverseAliases(client, input.userId, reverseUpdates);
+}
+
+/**
+ * Points a letter at an application (or clears it) from the application side. Reuses linkLetterApplication so legacy
+ * aliases, the new job, any displaced letter and submitted locks move exactly as they do from the letter side, then
+ * keeps the letter's sourceApplicationId in step in the same transaction. The caller owns the transaction and has
+ * locked the user. A clear carries the application being cleared so an unrelated canonical owner is never detached.
+ */
+export async function linkLetterToApplication(
+	client: DbOrTx,
+	input: { userId: string; letterId: string; applicationId: string | null; clearApplicationId?: string | null },
+) {
+	const [stored] = await client
+		.select({
+			revision: schema.coverLetter.revision,
+			sourceApplicationId: schema.coverLetter.sourceApplicationId,
+			isLocked: schema.coverLetter.isLocked,
+		})
+		.from(schema.coverLetter)
+		.where(and(eq(schema.coverLetter.id, input.letterId), eq(schema.coverLetter.userId, input.userId)))
+		.for("update");
+	if (!stored) throw new ORPCError("NOT_FOUND");
+	if (input.applicationId !== null) {
+		// A no-op equal-ID save may still reconcile aliases, but it must not need to write a locked letter.
+		const writeLetter = stored.sourceApplicationId !== input.applicationId;
+		if (stored.isLocked && writeLetter)
+			throw new ORPCError("DOCUMENT_LOCKED", { status: 400, message: "Unlock the letter first." });
+		await linkLetterApplication(client, {
+			userId: input.userId,
+			letterId: input.letterId,
+			from: stored.sourceApplicationId,
+			to: input.applicationId,
+			replace: true,
+		});
+		if (writeLetter)
+			await updateRevision(
+				{ userId: input.userId, id: input.letterId, expectedRevision: stored.revision },
+				{ sourceApplicationId: input.applicationId },
+				client,
+			);
+		return;
+	}
+
+	const clearFrom = input.clearApplicationId ?? stored.sourceApplicationId;
+	if (!clearFrom) return;
+	// Every application actually cleared inventories its reverse aliases, even when the incoming letter's reverse is
+	// stale or null. A locked alias that would need changing refuses before any application write.
+	const reverseUpdates = await planReverseAliases(client, {
+		userId: input.userId,
+		letterId: input.letterId,
+		detachedApplicationIds: [clearFrom],
+	});
+	// The cleared application was a forward owner of this letter. Resolve the surviving forward owners; at most one
+	// may remain. The letter's reverse follows that owner instead of being blindly nulled.
+	const survivors = await client
+		.select({ id: schema.application.id })
+		.from(schema.application)
+		.where(
+			and(
+				eq(schema.application.userId, input.userId),
+				eq(schema.application.coverLetterId, input.letterId),
+				ne(schema.application.id, clearFrom),
+			),
+		)
+		.orderBy(asc(schema.application.id))
+		.for("update");
+	if (survivors.length > 1)
+		throw new ORPCError("CONFLICT", {
+			message: "This letter is linked to more than one application. Review the documents before changing the link.",
+		});
+	const nextSource = survivors[0]?.id ?? null;
+	const changesSource = nextSource !== stored.sourceApplicationId;
+	if (changesSource && stored.isLocked)
+		throw new ORPCError("DOCUMENT_LOCKED", { status: 400, message: "Unlock the letter first." });
+	await linkLetterApplication(client, {
+		userId: input.userId,
+		letterId: input.letterId,
+		from: stored.sourceApplicationId,
+		to: null,
+		clearFrom,
+	});
+	await applyReverseAliases(client, input.userId, reverseUpdates);
+	if (changesSource)
+		await updateRevision(
+			{ userId: input.userId, id: input.letterId, expectedRevision: stored.revision },
+			{ sourceApplicationId: nextSource },
+			client,
+		);
 }
 
 async function insert(
 	input: {
 		userId: string;
 		name: string;
+		tags?: string[];
 		recipient: string;
 		content: string;
+		aiOperationIds?: string[] | undefined;
 		greeting?: string | null | undefined;
 		signOff?: string | null | undefined;
 		style: CoverLetterStyle;
@@ -181,13 +440,16 @@ async function insert(
 			return insert(input, tx);
 		});
 	const content = coverLetterContentSchema.parse(input);
+	await assertAiOperations(input.userId, input.aiOperationIds ?? [], LETTER_AI_ACTIONS, client);
 	const [row] = await client
 		.insert(schema.coverLetter)
 		.values({
 			...content,
+			tags: input.tags ?? [],
 			userId: input.userId,
 			recipient: sanitizeCoverLetterHtml(content.recipient),
 			content: sanitizeCoverLetterHtml(content.content),
+			aiOperationIds: input.aiOperationIds ?? [],
 			sourceResumeId: input.sourceResumeId ?? null,
 			sourceApplicationId: input.sourceApplicationId ?? null,
 			senderLinked: input.senderLinked ?? false,
@@ -200,15 +462,29 @@ async function insert(
 	return letter;
 }
 
+const letterConflict = () =>
+	new ORPCError("CONFLICT", { message: "This cover letter changed elsewhere. Reload it before saving again." });
+
+/**
+ * `guard`: a client's content change, refused before anything is written when the letter holds assistant edits an
+ * older app could apply wrongly (see assertCurrentClientWrite).
+ */
 async function updateRevision(
 	input: RevisionInput,
 	changes: Partial<typeof schema.coverLetter.$inferInsert>,
 	client: DbOrTx = db,
+	guard?: { proposalSafety: "v1" | undefined },
 ): Promise<CoverLetter> {
 	if (client === db)
 		return db.transaction(async (tx) => {
 			await lockUser(tx, input.userId);
-			return updateRevision(input, changes, tx);
+			return updateRevision(input, changes, tx, guard);
+		});
+	if (guard && changes.content !== undefined)
+		await assertCurrentClientWrite(client, {
+			userId: input.userId,
+			document: { kind: "letter", id: input.id },
+			proposalSafety: guard.proposalSafety,
 		});
 	const [row] = await client
 		.update(schema.coverLetter)
@@ -224,7 +500,23 @@ async function updateRevision(
 		.returning();
 	if (row) return toLetter(row);
 	await assertUnlocked(input, client);
-	throw new ORPCError("CONFLICT", { message: "This cover letter changed elsewhere. Reload it before saving again." });
+	throw letterConflict();
+}
+
+/**
+ * An older app tried to change a letter holding assistant edits it could apply wrongly. Nothing it sent is written;
+ * the revision moves on so a draft it kept conflicts too, and it reloads the letter as for any other conflict.
+ */
+async function refuseOlderClient(input: OwnedId) {
+	await db
+		.update(schema.coverLetter)
+		.set({ revision: sql`${schema.coverLetter.revision} + 1` })
+		.where(and(eq(schema.coverLetter.id, input.id), eq(schema.coverLetter.userId, input.userId)));
+	return new ORPCError("CONFLICT", {
+		message:
+			"This cover letter has assistant edits this version of the app can't check. Refresh or update the app, then make the change again.",
+		data: { reason: "CURRENT_CLIENT_REQUIRED" },
+	});
 }
 
 /** Locked letters, like locked resumes, can't be edited or moved to Trash. */
@@ -266,15 +558,25 @@ export const coverLetterService = {
 		const application = await getOwnedApplication(input.userId, input.applicationId);
 		const style = await getResumeStyle(input.userId, input.resumeId);
 		if (input.template) style.metadata.template = input.template;
+		// The letter is for an employer whose posting declared a language: start in it, so the body, greeting,
+		// sign-off and date all match. The user can change it in Design; existing letters are never rewritten.
+		style.metadata.page.locale = initialCoverLetterLocale(
+			application?.postingSource?.language,
+			style.metadata.page.locale,
+		);
 		const linked = Boolean(input.resumeId) && !input.template;
 		const letter = await db.transaction(async (tx) => {
 			await lockUser(tx, input.userId);
+			const sourceBody = input.sourceLetterId ? await getOwnedLetterBody(input.userId, input.sourceLetterId, tx) : null;
 			const letter = await insert(
 				{
 					userId: input.userId,
 					name: input.name,
 					recipient: input.recipient ?? "",
-					content: input.content ?? "",
+					// The body is the reused part; recipient, date, resume and application come from this request so an
+					// earlier job's company never leaks into the new letter.
+					content: sourceBody?.content ?? input.content ?? "",
+					aiOperationIds: sourceBody?.aiOperationIds ?? [],
 					greeting: input.greeting ?? null,
 					signOff: input.signOff ?? null,
 					style,
@@ -289,12 +591,14 @@ export const coverLetterService = {
 				},
 				tx,
 			);
-			await linkLetterApplication(tx, {
-				userId: input.userId,
-				letterId: letter.id,
-				to: input.applicationId,
-				replace: false,
-			});
+			// A new letter written for an application becomes that application's letter; an older letter is displaced.
+			if (input.applicationId)
+				await linkLetterApplication(tx, {
+					userId: input.userId,
+					letterId: letter.id,
+					to: input.applicationId,
+					replace: true,
+				});
 			return letter;
 		});
 		return resolveLinks(letter, input.userId);
@@ -329,6 +633,19 @@ export const coverLetterService = {
 		changes.senderLinked = senderLinked;
 		changes.designLinked = designLinked;
 
+		if (input.sender !== undefined) {
+			if (senderLinked)
+				throw new ORPCError("BAD_REQUEST", { message: "Turn off the sender link before editing sender details." });
+			const style = changes.style ?? stored.style;
+			const { picture, ...sender } = coverLetterDto.update.input.shape.sender.unwrap().parse(input.sender);
+			const fields = Object.fromEntries(Object.entries(sender).filter(([, value]) => value !== undefined));
+			changes.style = {
+				...style,
+				basics: { ...style.basics, ...fields },
+				picture: picture ? { ...style.picture, ...picture } : style.picture,
+			};
+		}
+
 		if (input.template) {
 			const style = changes.style ?? stored.style;
 			changes.style = { ...style, metadata: { ...style.metadata, template: input.template } };
@@ -337,6 +654,21 @@ export const coverLetterService = {
 			const style = changes.style ?? stored.style;
 			const set = Object.fromEntries(Object.entries(input.metadata).filter(([, value]) => value !== undefined));
 			changes.style = { ...style, metadata: { ...style.metadata, ...(set as Partial<typeof style.metadata>) } };
+		}
+		if (input.locale !== undefined) {
+			const canonical = (() => {
+				try {
+					return Intl.getCanonicalLocales(input.locale)[0];
+				} catch {
+					return undefined;
+				}
+			})();
+			if (!canonical) throw new ORPCError("BAD_REQUEST", { message: "Choose a language for the letter." });
+			const style = changes.style ?? stored.style;
+			changes.style = {
+				...style,
+				metadata: { ...style.metadata, page: { ...style.metadata.page, locale: canonical } },
+			};
 		}
 		if (input.name !== undefined) changes.name = coverLetterContentSchema.shape.name.parse(input.name);
 		if (input.recipient !== undefined)
@@ -350,8 +682,27 @@ export const coverLetterService = {
 		if (input.letterDate !== undefined) changes.letterDate = input.letterDate;
 
 		const persist = async (client: DbOrTx) => {
-			const updated = await updateRevision(input, changes, client);
-			if (input.applicationId !== undefined) {
+			if (input.aiOperationIds !== undefined) {
+				await assertAiOperations(input.userId, input.aiOperationIds, LETTER_AI_ACTIONS, client);
+				changes.aiOperationIds = [...new Set(input.aiOperationIds)];
+			}
+			const updated = await updateRevision(input, changes, client, { proposalSafety: input.proposalSafety });
+			const sourceIds = await saveProposalApplications(client, {
+				userId: input.userId,
+				document: { kind: "letter", id: input.id },
+				applications: input.proposalApplications,
+				conflict: letterConflict,
+			});
+			if (sourceIds !== undefined) updated.aiOperationIds = sourceIds;
+			if (input.applicationId === null) {
+				await linkLetterApplication(client, {
+					userId: input.userId,
+					letterId: input.id,
+					from: stored.sourceApplicationId,
+					to: null,
+					unlinkAll: true,
+				});
+			} else if (input.applicationId !== undefined) {
 				await linkLetterApplication(client, {
 					userId: input.userId,
 					letterId: input.id,
@@ -363,12 +714,16 @@ export const coverLetterService = {
 			return updated;
 		};
 		const updated = await resolveLinks(
-			await (input.applicationId === undefined
-				? persist(db)
-				: db.transaction(async (tx) => {
-						await lockUser(tx, input.userId);
-						return persist(tx);
-					})),
+			await (
+				input.applicationId === undefined && !input.proposalApplications && input.aiOperationIds === undefined
+					? persist(db)
+					: db.transaction(async (tx) => {
+							await lockUser(tx, input.userId);
+							return persist(tx);
+						})
+			).catch(async (error: unknown) => {
+				throw error instanceof CurrentClientRequired ? await refuseOlderClient(input) : error;
+			}),
 			input.userId,
 		);
 		await saveLetterSessionVersion({
@@ -381,15 +736,29 @@ export const coverLetterService = {
 	refreshStyle: async (input: RevisionInput & { resumeId: string }) => {
 		const letter = await getById(input);
 		const style = await getResumeStyle(input.userId, input.resumeId, letter.style.sectionId, letter.style.itemId);
+		if (!letter.senderLinked) {
+			style.basics = letter.style.basics;
+			style.picture = letter.style.picture;
+		}
 		style.metadata.template = letter.style.metadata.template;
 		return resolveLinks(await updateRevision(input, { style, sourceResumeId: input.resumeId }), input.userId);
 	},
 	duplicate: async (input: OwnedId & { name?: string | undefined }) => {
-		const letter = await getRow(input);
+		const [row] = await db
+			.select()
+			.from(schema.coverLetter)
+			.where(and(eq(schema.coverLetter.id, input.id), eq(schema.coverLetter.userId, input.userId)));
+		if (!row) throw new ORPCError("NOT_FOUND");
+		const letter = toLetter(row);
 		const copy = await insert({
 			...letter,
+			tags: row.tags,
 			userId: input.userId,
-			name: input.name ?? `${letter.name} (copy)`.slice(0, 100),
+			name: input.name ?? (await suggestDuplicateName({ ...input, type: "letter" })),
+			// A copy is a new document, not a second owner of the original's application.
+			sourceApplicationId: null,
+			// A letter reused weeks later is dated the day it's made, not the original's day (a cleared date stays cleared).
+			letterDate: letter.letterDate === null ? null : today(),
 		});
 		return resolveLinks(copy, input.userId);
 	},
@@ -424,14 +793,21 @@ export const coverLetterService = {
 	 * Restores a version: the current state is kept as "Before restore" first, then the letter reads as it did. Its
 	 * links stay as they are, so linked details and design keep coming from the resume.
 	 */
-	restoreVersion: async (input: OwnedId & { versionId: string }) => {
+	restoreVersion: async (input: OwnedId & { versionId: string; proposalSafety?: "v1" | undefined }) => {
 		const version = await getLetterVersion({
 			coverLetterId: input.id,
 			userId: input.userId,
 			versionId: input.versionId,
 		});
 		const current = await getById(input);
-		await writeLetterVersion(db, { letter: current, userId: input.userId, kind: "before-restore" });
+		// A named version's name goes with both snapshots, so History reads "Restored “Version A”", not two identical rows.
+		const restoredName = version.name || null;
+		await writeLetterVersion(db, {
+			letter: current,
+			userId: input.userId,
+			kind: "before-restore",
+			name: restoredName,
+		});
 
 		const { data } = version;
 		const restored = await updateRevision(
@@ -440,6 +816,7 @@ export const coverLetterService = {
 				name: data.name,
 				recipient: data.recipient,
 				content: data.content,
+				aiOperationIds: data.aiOperationIds ?? [],
 				greeting: data.greeting ?? null,
 				signOff: data.signOff ?? null,
 				style: data.style,
@@ -448,9 +825,13 @@ export const coverLetterService = {
 				recipientCompany: data.recipientCompany,
 				letterDate: data.letterDate,
 			},
-		);
+			db,
+			{ proposalSafety: input.proposalSafety },
+		).catch(async (error: unknown) => {
+			throw error instanceof CurrentClientRequired ? await refuseOlderClient(input) : error;
+		});
 		const resolved = await resolveLinks(restored, input.userId);
-		await writeLetterVersion(db, { letter: resolved, userId: input.userId, kind: "restored" });
+		await writeLetterVersion(db, { letter: resolved, userId: input.userId, kind: "restored", name: restoredName });
 		return resolved;
 	},
 	/** The version an application was sent with ("sent", named after the company). */
@@ -458,8 +839,11 @@ export const coverLetterService = {
 		const letter = await getById(input);
 		return writeLetterVersion(db, { letter, userId: input.userId, kind: "sent", name: input.company });
 	},
-	import: (input: { userId: string; document: CoverLetterDocument }) => {
+	import: async (input: { userId: string; document: CoverLetterDocument; aiOperationIds?: string[] | undefined }) => {
 		const document = coverLetterDocumentSchema.parse(input.document);
-		return insert({ ...document, userId: input.userId });
+		return resolveLinks(
+			await insert({ ...document, userId: input.userId, aiOperationIds: input.aiOperationIds }),
+			input.userId,
+		);
 	},
 };

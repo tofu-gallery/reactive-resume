@@ -4,28 +4,42 @@
 import type { ChatAttachment, MessageContext } from "./chat";
 import type { AssistantDocument } from "./document";
 import type { EditStatus, ProposalHandlers } from "./messages";
-import type { ToolPart } from "./proposals";
+import type { Receipt, ToolPart } from "./proposals";
 import type { SavedThread } from "./recovery";
 import type { IconName } from "@/ui";
 import type { LegendListRef } from "@legendapp/list/react-native";
 import type { Proposal } from "@reactive-resume/resume/proposals";
+import type { CareerStoryData } from "@reactive-resume/schema/career";
 import type { UIMessage } from "ai";
 import type { ReactNode } from "react";
 import { LegendList } from "@legendapp/list/react-native";
+import { i18n } from "@lingui/core";
+import { plural } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { ORPCError } from "@orpc/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { lastAssistantMessageIsCompleteWithToolCalls } from "ai";
+import { lastAssistantMessageIsCompleteWithApprovalResponses, lastAssistantMessageIsCompleteWithToolCalls } from "ai";
 import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
-import { File } from "expo-file-system";
-import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { File, Paths } from "expo-file-system";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { RefreshControl, ActivityIndicator, AppState, Pressable, ScrollView, TextInput, View } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
+import {
+	AGENT_ATTACHMENT_TYPES,
+	agentReplyError,
+	citesKnowledge,
+	tailoringAllows,
+} from "@reactive-resume/ai/tools/agent-tool-contracts";
+import { withEditedText } from "@reactive-resume/resume/proposals";
+import { aiOperationIds } from "@reactive-resume/schema/ai-usage";
+import { isNetworkError } from "@reactive-resume/utils/http";
 import { attachmentPart, refreshThreads, transcriptOf, useAssistantChat } from "./chat";
 import { FileChip, MessageView, Status } from "./messages";
-import { isProposeEdits, publishProposals, toProposals } from "./proposals";
+import { isProposeEdits, publishProposals, supersededIn, toProposals } from "./proposals";
 import { createRequestLane, recoverRun } from "./recovery";
+import { sentLines, type SentContext } from "./sent";
+import { ToolApprovals, type StoryEditorRender } from "./tool-approvals";
 import { client, orpc, SessionChangedError } from "@/api/client";
 import { getAccountScope, useSession } from "@/auth/session";
 import { Button, Icon, Text, showToast, useTheme } from "@/ui";
@@ -35,6 +49,7 @@ export type { ChatAttachment, MessageContext } from "./chat";
 export type { AssistantDocument } from "./document";
 
 export type ChatViewProps = {
+	onPostingSaved?: ((posting: { id: string; company: string; role: string }) => void) | undefined;
 	onRefresh?: (() => Promise<unknown>) | undefined;
 	/** The conversation, or null for a new one: the first message (or attachment) creates it through `createThread`. */
 	threadId: string | null;
@@ -47,8 +62,20 @@ export type ChatViewProps = {
 	document: AssistantDocument | null;
 	/** The provider, named in the error line: "OpenAI". */
 	connection: string;
-	/** Says what a send shares, under the composer. */
-	privacy: string;
+	/** Says what a send shares, under the composer; given how many earlier messages still go and how many don't. */
+	privacy: string | ((history: ChatHistory) => string);
+	/** Above the composer: what needs a decision before the next message (a connection that went away). */
+	notice?: ReactNode;
+	/** The coach: each of the user's messages can be remembered in Knowledge, for this application or all. */
+	remember?: { applicationId: string | null } | undefined;
+	/** The user's facts, to show which ones a proposed story rests on. */
+	facts?: readonly { id: string; text: string; status: string }[] | undefined;
+	/** The user's stories, so a proposed update shows what it changes. */
+	stories?: readonly { id: string; data: Omit<CareerStoryData, "applicationId"> }[] | undefined;
+	/** The story editor a proposal's Edit first opens, in the conversation's scope. */
+	storyEditor?: StoryEditorRender | undefined;
+	/** Text the message box starts with, handed over from another screen; the user still taps Send. */
+	draft?: string | undefined;
 	placeholder: string;
 	/** How a copied transcript names the other side: "Assistant" or "Coach". */
 	assistantName: string;
@@ -65,9 +92,33 @@ export type ChatViewProps = {
 	onSwitchModel?: () => void;
 	/** After each reply, for example to refresh Knowledge. */
 	onFinish?: () => void;
+	/** The coach: what this message sends, recorded on it and shown as "Sent" under the answer. */
+	sent?: (() => SentContext) | undefined;
 };
 
 type Prompt = { threadId: string; text: string; attachments: ChatAttachment[] };
+
+export type ChatHistory = { earlier: number; withheld: number };
+
+/** Why a reply failed, in the reader's language: a lost connection, the provider, or this server's own reason. */
+function replyFailure(error: unknown, fallback: string, t: ReturnType<typeof useLingui>["t"]) {
+	if (isNetworkError(error)) return t`Couldn't reach Reactive Resume. Check your internet connection, then try again.`;
+	const key = error instanceof Error && !(error instanceof ORPCError) ? agentReplyError(error.message) : null;
+	if (key)
+		return {
+			providerKey: t`The AI provider rejected the saved key. Check the key in Settings, or change the connection.`,
+			providerModel: t`The AI provider doesn't offer this model. Choose another model, or change the connection.`,
+			providerLimit: t`The AI provider is limiting requests (rate limit or quota). Wait a minute and try again, or change the connection.`,
+			providerDown: t`The AI provider is unavailable right now. Try again in a moment, or change the connection.`,
+			provider: t`The AI provider couldn't finish this reply. Try again, or change the connection.`,
+			failed: t`This reply couldn't finish. Try again.`,
+		}[key];
+	return error instanceof ORPCError && error.message ? error.message : fallback;
+}
+
+/** A failure another AI connection could fix; never a lost network or this server's refusal. */
+const providerFailure = (error: unknown) =>
+	error instanceof Error && agentReplyError(error.message)?.startsWith("provider") === true;
 
 const MAX_FILES = 10;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
@@ -164,6 +215,7 @@ function ScopedChatView(props: ScopedChatViewProps) {
 				</ScrollView>
 				<Composer
 					{...props}
+					privacy={typeof props.privacy === "string" ? props.privacy : props.privacy({ earlier: 0, withheld: 0 })}
 					streaming={starting}
 					disabled={props.disabled ?? false}
 					ensureThread={ensureThread}
@@ -219,6 +271,7 @@ function Session(props: SessionProps) {
 			<Conversation
 				{...props}
 				initialMessages={thread.data.messages as UIMessage[]}
+				initialAttachments={(thread.data.attachments ?? []).filter((file) => !file.messageId)}
 				activeRun={Boolean(thread.data.thread.activeRunId)}
 				readOnly={thread.data.isReadOnly}
 			/>
@@ -236,7 +289,12 @@ function Session(props: SessionProps) {
 	);
 }
 
-type ConversationProps = SessionProps & { initialMessages: UIMessage[]; activeRun: boolean; readOnly: boolean };
+type ConversationProps = SessionProps & {
+	initialMessages: UIMessage[];
+	initialAttachments?: Upload[];
+	activeRun: boolean;
+	readOnly: boolean;
+};
 
 function Conversation(props: ConversationProps) {
 	const pull = usePullRefresh(...(props.onRefresh ? [props.onRefresh] : []));
@@ -244,8 +302,11 @@ function Conversation(props: ConversationProps) {
 	const { t } = useLingui();
 	const { colors, radius, space } = useTheme();
 	const queryClient = useQueryClient();
-	const [statuses, setStatuses] = useState<ReadonlyMap<string, EditStatus>>(new Map());
+	const [rejections, setStatuses] = useState<ReadonlyMap<string, EditStatus>>(new Map());
+	const writes = useRef(0);
+	const owners = useRef(new Map<string, { write: number; previous: EditStatus | undefined }>());
 	const [stopped, setStopped] = useState(false);
+	const [recovering, setRecovering] = useState(props.activeRun);
 
 	const refresh = () => {
 		refreshThreads(queryClient);
@@ -259,9 +320,21 @@ function Conversation(props: ConversationProps) {
 		scope: props.scope,
 		beforeSend: props.context.document ? document?.flush : undefined,
 	});
-	const { messages, sendMessage, setMessages, status, error, clearError, regenerate, addToolOutput, resumeStream } =
-		chat;
+	const {
+		messages,
+		sendMessage,
+		setMessages,
+		status,
+		error: chatError,
+		clearError,
+		regenerate,
+		addToolOutput,
+		addToolApprovalResponse,
+		resumeStream,
+	} = chat;
 	const streaming = status === "submitted" || status === "streaming";
+	// A resume or recovery in flight keeps the SDK at "ready" until the stream starts; lock every input until it settles.
+	const busy = streaming || recovering;
 	const readOnly = props.readOnly || props.disabled === true;
 
 	// One request at a time: sends, retries, the automatic continuation after an answer and recovery share a lane, so
@@ -280,19 +353,28 @@ function Conversation(props: ConversationProps) {
 	const deliver = (text: string, attachments: ChatAttachment[]) => {
 		const files = attachments.map(attachmentPart);
 		void lane.run(() =>
-			sendMessage(files.length > 0 ? { text, files } : { text }, {
-				body: { attachmentIds: attachments.map((attachment) => attachment.id) },
-			}),
+			sendMessage(
+				{
+					text,
+					...(files.length > 0 ? { files } : {}),
+					...(props.sent ? { metadata: { context: props.sent() } } : {}),
+				},
+				{
+					body: { attachmentIds: attachments.map((attachment) => attachment.id) },
+				},
+			),
 		);
 		// The server titles the conversation from its first message.
 		setTimeout(() => refreshThreads(queryClient), 1500);
 	};
 
 	const send = (text: string, attachments: ChatAttachment[] = []) => {
-		if (streaming || readOnly) return false;
+		if (busy || readOnly) return false;
 		clearError();
 		setStopped(false);
 		deliver(text, attachments);
+		// The new question and its reply come into view even when the reader had scrolled up.
+		requestAnimationFrame(() => void list.current?.scrollToEnd({ animated: true }));
 		return true;
 	};
 
@@ -310,8 +392,19 @@ function Conversation(props: ConversationProps) {
 
 	const stopReply = () => {
 		setStopped(true);
-		void client.agent.messages.stop({ threadId }, { context: { scope: props.scope } }).catch(() => undefined);
-		void lane.cancel();
+		void Promise.all([
+			client.agent.messages.stop({ threadId }, { context: { scope: props.scope } }).catch(() => undefined),
+			lane.cancel(),
+		]).then(async () => {
+			// The server keeps what it wrote before the stop reached it, which can differ from what arrived here. Show its
+			// copy once the run is settled, so Continue and Try again act on what was actually saved.
+			for (let attempt = 0; attempt < 10; attempt++) {
+				const saved = await reloadThread();
+				if (!saved) return;
+				if (!saved.active) return setMessages(saved.messages);
+				await new Promise((resolve) => setTimeout(resolve, 300));
+			}
+		});
 	};
 
 	const reloadThread = async (): Promise<SavedThread | null> => {
@@ -339,24 +432,35 @@ function Conversation(props: ConversationProps) {
 		}).finally(() => {
 			if (isCurrent()) refreshThreads(queryClient);
 		});
-	const recover = useEffectEvent(() => void lane.runIfIdle(followRun));
+	const recover = useEffectEvent(() => {
+		void lane.runIfIdle(followRun).finally(() => setRecovering(false));
+	});
 
-	// Leaving the document or posting out makes every send start fresh (the server takes only a new message then), so an
-	// answer can't continue the reply, nor can Retry send such a continuation again. The coach's chips don't do that.
+	// Continue only the reply generated with the current context choices; the server checks its stored metadata too.
 	const fresh = document !== null && (!props.context.document || !props.context.posting);
-	const continuationBlocked = fresh && lastAssistantMessageIsCompleteWithToolCalls({ messages });
+	const continuationBlocked =
+		fresh &&
+		(messages.at(-1)?.metadata as { contextScope?: string } | undefined)?.contextScope !==
+			JSON.stringify([props.context.document !== false, props.context.posting !== false]);
 
 	// A reply the connection lost may still run on the server, which refuses a second one: Retry follows it as recovery
 	// does. Only with no run left is the message sent again: a failed continuation (after an answer) as it was,
 	// since regenerating would drop the answer.
 	const retry = () => {
+		if (busy) return;
+		if (receipts.error) {
+			void receipts.refetch();
+			return;
+		}
 		if (readOnly || continuationBlocked) return;
 		clearError();
 		void lane.run(async (isCurrent) => {
 			const latest = await reloadThread();
 			if (!isCurrent()) return;
 			if (latest?.active) return followRun(isCurrent);
-			const continuation = lastAssistantMessageIsCompleteWithToolCalls({ messages });
+			const continuation =
+				lastAssistantMessageIsCompleteWithToolCalls({ messages }) ||
+				lastAssistantMessageIsCompleteWithApprovalResponses({ messages });
 			await (continuation ? sendMessage() : regenerate());
 		});
 	};
@@ -390,16 +494,72 @@ function Conversation(props: ConversationProps) {
 		return () => subscription.remove();
 	}, []);
 
+	// Refresh receipts on document revisions without replacing a live streamed transcript.
+	const receiptOptions = orpc.agent.threads.get.queryOptions({
+		input: { id: threadId },
+		context: { scope: props.scope },
+	});
+	const receipts = useQuery({
+		...receiptOptions,
+		gcTime: 0,
+		queryKey: [...receiptOptions.queryKey, props.scope, document?.proposalRevision],
+		enabled: !!document?.proposalRevision,
+	});
+	const receiptsReady = !document?.proposalRevision || !!receipts.data;
+	const error = chatError ?? receipts.error;
+	// A new id, not every streamed chunk, changes the receipts.
+	const supersededIds = [...supersededIn(messages)].join(" ");
+	// What the server no longer sends (Knowledge changed) and which replies ended early, read again after each reply.
+	const history = useQuery({
+		...receiptOptions,
+		queryKey: [...receiptOptions.queryKey, props.scope, "history", messages.length, status],
+		select: (data) => ({
+			withheld: new Set(data.history?.withheld ?? []),
+			cutoffAt: data.history?.cutoffAt ?? null,
+			interrupted: data.interrupted ?? [],
+		}),
+		enabled: status === "ready" || status === "error",
+		placeholderData: (previous) => previous,
+	});
+	const withheld = messages.filter((message) => history.data?.withheld.has(message.id)).length;
+	const lastReply = messages.at(-1)?.role === "assistant" ? messages.at(-1) : undefined;
+	const endedEarly =
+		!busy &&
+		!error &&
+		(stopped || (lastReply !== undefined && (history.data?.interrupted ?? []).includes(lastReply.id)));
+	const saidSomething = lastReply?.parts.some((part) => part.type === "text" && part.text.trim() !== "") === true;
+	const statuses = useMemo(() => {
+		const map = new Map<string, Receipt>(
+			((receipts.data?.messages ?? []) as UIMessage[]).flatMap((message) =>
+				message.parts.flatMap((part) =>
+					isProposeEdits(part)
+						? toProposals(part, new Map()).map(
+								({ id, status, after, unsupported, edited }) =>
+									[id, edited ? { status, after, unsupported, edited } : { status }] as const,
+							)
+						: [],
+				),
+			),
+		);
+		for (const [id, status] of rejections) map.set(id, { ...map.get(id), status });
+		// Only an undecided edit reads as replaced: one accepted or rejected (here or on another device) keeps its outcome.
+		for (const id of supersededIds.split(" ").filter(Boolean))
+			if ((map.get(id)?.status ?? "pending") === "pending") map.set(id, { status: "rejected", superseded: true });
+		return map;
+	}, [receipts.data, rejections, supersededIds]);
+
 	// ---- Proposed edits ----
 
 	const proposals = useMemo(
 		() =>
-			document
+			document && receiptsReady
 				? messages.flatMap((message) =>
-						message.parts.flatMap((part) => (isProposeEdits(part) ? toProposals(part, statuses) : [])),
+						message.parts.flatMap((part) =>
+							isProposeEdits(part) ? toProposals(part, statuses, aiOperationIds(message.metadata)) : [],
+						),
 					)
 				: [],
-		[messages, statuses, document],
+		[messages, statuses, document, receiptsReady],
 	);
 	// Kept after the assistant closes: Page marks them while they're pending.
 	const documentId = document?.id;
@@ -407,72 +567,132 @@ function Conversation(props: ConversationProps) {
 		if (documentId && document?.kind === "resume") publishProposals(documentId, proposals);
 	}, [documentId, document?.kind, proposals]);
 
+	// Rejections and their Undo are recorded here; an acceptance travels with the document save that applies it.
 	const record = (message: UIMessage, part: ToolPart, changed: readonly Proposal[], next: EditStatus) => {
-		setStatuses((current) => new Map([...current, ...changed.map((proposal) => [proposal.id, next] as const)]));
-		if (!part.toolCallId) return;
+		if (!part.toolCallId || next === "accepted") return;
+		// Each id remembers which write set it and what it showed before, so a failed write puts back only what it
+		// still owns: a later Reject or Undo of the same edit keeps its own value (web conversation.tsx).
+		const write = ++writes.current;
+		const ids = changed.map((proposal) => proposal.id);
+		for (const id of ids) owners.current.set(id, { write, previous: rejections.get(id) });
+		setStatuses((current) => new Map([...current, ...ids.map((id) => [id, next] as const)]));
 		void client.agent.messages
 			.setEditStatus(
 				{
 					threadId,
 					messageId: message.id,
 					toolCallId: part.toolCallId,
-					edits: changed.map((proposal) => ({ id: proposal.id, status: next })),
+					edits: ids.map((id) => ({ id, status: next })),
 				},
 				{ context: { scope: props.scope } },
 			)
 			.then(() => refreshThreads(queryClient))
-			.catch(() => undefined);
+			.catch(() => {
+				const mine = ids.flatMap((id) => {
+					const owner = owners.current.get(id);
+					return owner?.write === write ? [[id, owner.previous] as const] : [];
+				});
+				for (const [id] of mine) owners.current.delete(id);
+				setStatuses((current) => {
+					const restored = new Map(current);
+					for (const [id, previous] of mine) {
+						if (previous === undefined) restored.delete(id);
+						else restored.set(id, previous);
+					}
+					return restored;
+				});
+				showToast({ message: t`Couldn't save that decision. Try again.` });
+			});
 	};
+	// The user's wording shows (and Accept uses it) only once the server has it and a fresh read of the receipts shows
+	// it (web conversation.tsx); until then their draft stays open and out of Accept. The reviewed text binds the save.
+	const saveWording = async (message: UIMessage, part: ToolPart, proposal: Proposal, text: string) => {
+		if (!part.toolCallId) throw new Error("This edit can't be saved.");
+		await client.agent.messages.setEditStatus(
+			{
+				threadId,
+				messageId: message.id,
+				toolCallId: part.toolCallId,
+				edits: [{ id: proposal.id, status: "pending", text, after: proposal.after }],
+			},
+			{ context: { scope: props.scope } },
+		);
+		const read = await receipts.refetch();
+		const wording = withEditedText(proposal, text).after;
+		const saved = ((read.data?.messages ?? []) as UIMessage[]).some((stored) =>
+			stored.parts.some(
+				(candidate) =>
+					isProposeEdits(candidate) &&
+					toProposals(candidate, new Map()).some((edit) => edit.id === proposal.id && edit.after === wording),
+			),
+		);
+		if (read.isError || !saved) throw new Error("The saved wording couldn't be read back.");
+		void refreshThreads(queryClient);
+	};
+	const saveWordingRef = useRef(saveWording);
+	useLayoutEffect(() => {
+		saveWordingRef.current = saveWording;
+	});
 	// Kept current for the memoized handlers below, so the message rows keep their props while a reply streams.
 	const recordRef = useRef(record);
 	useLayoutEffect(() => {
 		recordRef.current = record;
 	});
 
-	// Undoing an accepted edit (the toast's Undo, or undo in the editor) makes it pending again. Only an undo (the
-	// document) or a status change can cause one, so streamed chunks don't re-check every edit.
-	const recordUndone = useEffectEvent(() => {
-		if (!document) return;
-		for (const message of messages)
-			for (const part of message.parts) {
-				if (!isProposeEdits(part)) continue;
-				const undone = toProposals(part, statuses).filter(
-					(proposal) => proposal.status === "accepted" && document.stateOf(proposal) === "pending",
-				);
-				if (undone.length > 0) record(message, part, undone, "pending");
-			}
+	// Cited Knowledge facts are stored by id; their text shows only while they're still switched on (web conversation.tsx).
+	const citesFacts = messages.some((message) =>
+		message.parts.some((part) => isProposeEdits(part) && citesKnowledge(part.output)),
+	);
+	const session = useSession();
+	const facts = useQuery({
+		...orpc.career.facts.queryOptions({ input: { applicationId: null, all: true } }),
+		queryKey: [...orpc.career.facts.key(), session.server, "all"],
+		enabled: citesFacts && session.status === "signed-in",
 	});
-	// oxlint-disable-next-line react/set-state-in-effect -- an undo happens in the draft store; the new status is also saved to the thread
-	useEffect(() => recordUndone(), [statuses, document]);
+	const factText = useCallback(
+		(id: string) => facts.data?.find((fact) => fact.id === id && fact.status === "active")?.text ?? null,
+		[facts.data],
+	);
 
 	const handlers = useMemo<ProposalHandlers | null>(
 		() =>
 			document
 				? {
+						resumeId: document.kind === "resume" ? document.id : undefined,
 						statuses,
 						stateOf: document.stateOf,
-						locked: document.locked,
+						locked: document.locked || !receiptsReady,
+						// Synchronous with the tap: the draft is checked and changed in the same turn (document.ts), and the
+						// decision travels with the document save.
 						onAccept: (message, part, chosen) => {
-							document.accept(chosen);
-							recordRef.current(message, part, chosen, "accepted");
+							if (!receiptsReady || forJobCopy(document, message, part)) return;
+							const { applied } = document.accept(chosen);
+							if (applied.length > 0) recordRef.current(message, part, applied, "accepted");
 						},
+						forJobCopy: (message, part) => forJobCopy(document, message, part),
 						onReject: (message, part, chosen) => recordRef.current(message, part, chosen, "rejected"),
+						onRestore: (message, part, chosen) => recordRef.current(message, part, chosen, "pending"),
+						onEdit: (message, part, proposal, text) => saveWordingRef.current(message, part, proposal, text),
+						factText,
 					}
 				: null,
-		[document, statuses],
+		[document, statuses, receiptsReady, factText],
 	);
 	const answer = useMemo(
 		() =>
-			fresh
+			continuationBlocked
 				? null
 				: (toolCallId: string, output: string) =>
 						// The answer's automatic continuation is a request too: it waits for anything open to end.
 						void lane.run(async () => {
 							await addToolOutput({ tool: "ask_user_question", toolCallId, output } as never);
 						}),
-		[fresh, lane, addToolOutput],
+		[continuationBlocked, lane, addToolOutput],
 	);
-	const extraData = useMemo(() => ({ streaming, readOnly, handlers, answer }), [streaming, readOnly, handlers, answer]);
+	const extraData = useMemo(
+		() => ({ streaming: busy, readOnly, handlers, answer, onPostingSaved: props.onPostingSaved }),
+		[busy, readOnly, handlers, answer, props.onPostingSaved],
+	);
 
 	const last = messages.at(-1);
 	const proposedInLast = last?.role === "assistant" && last.parts.some(isProposeEdits);
@@ -484,7 +704,11 @@ function Conversation(props: ConversationProps) {
 	const copyTranscript = async () => {
 		try {
 			await Clipboard.setStringAsync(
-				transcriptOf(messages, { user: t`You`, assistant: props.assistantName, sources: t`Sources` }),
+				transcriptOf(
+					messages,
+					{ user: t`You`, assistant: props.assistantName, sources: t`Sources` },
+					(id) => statuses.get(id)?.status,
+				),
 			);
 			showToast({ message: t`Transcript copied` });
 		} catch {
@@ -492,6 +716,7 @@ function Conversation(props: ConversationProps) {
 		}
 	};
 
+	const sent = sentLines(messages);
 	return (
 		<KeyboardAvoidingView behavior="padding" style={{ flex: 1 }}>
 			<View style={{ flex: 1 }}>
@@ -522,35 +747,79 @@ function Conversation(props: ConversationProps) {
 					ItemSeparatorComponent={() => <View style={{ height: space.s4 }} />}
 					keyboardDismissMode="interactive"
 					keyboardShouldPersistTaps="handled"
-					ListEmptyComponent={!streaming ? <Empty render={props.empty} send={(text) => void send(text)} /> : null}
+					ListEmptyComponent={!busy ? <Empty render={props.empty} send={(text) => void send(text)} /> : null}
 					renderItem={({ item: message, index }) => (
-						<MessageView
-							message={message}
-							streaming={streaming && index === messages.length - 1}
-							readOnly={readOnly}
-							proposals={handlers}
-							onAnswer={answer}
-						/>
+						<View>
+							<MessageView
+								message={message}
+								sent={props.sent ? (sent[index] ?? null) : null}
+								streaming={busy && index === messages.length - 1}
+								readOnly={readOnly}
+								answerable={index === messages.length - 1}
+								proposals={handlers}
+								onAnswer={answer}
+								remember={props.remember ?? null}
+								answerApplicationId={props.context.applicationId ?? props.remember?.applicationId ?? null}
+								onPostingSaved={props.onPostingSaved}
+							/>
+							<ToolApprovals
+								message={message}
+								facts={props.facts ?? []}
+								stories={props.stories}
+								applicationId={props.remember?.applicationId ?? null}
+								storyEditor={props.storyEditor}
+								disabled={readOnly || busy || index !== messages.length - 1}
+								onDecision={(decision) => {
+									void lane.run(async () => {
+										await addToolApprovalResponse(decision);
+									});
+								}}
+							/>
+						</View>
 					)}
 					ListFooterComponent={
 						<View style={{ gap: space.s4, paddingTop: space.s4 }}>
-							{status === "submitted" ? (
+							{status === "submitted" || recovering ? (
 								<Status status="running">
 									<Trans>Thinking…</Trans>
 								</Status>
 							) : null}
 
-							{stopped && !streaming && !proposedInLast ? (
-								<View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.s2 }}>
-									<Icon name="stop-circle" size={18} color={colors.ink3} />
-									<Text variant="callout" color="ink2">
-										{document ? <Trans>Stopped. No edits were proposed.</Trans> : <Trans>Stopped</Trans>}
+							{withheld > 0 ? (
+								<View style={{ flexDirection: "row", gap: space.s2 }}>
+									<Icon name="eye-slash" size={16} color={colors.ink3} />
+									<Text variant="caption" color="ink2" style={{ flex: 1 }}>
+										<Trans>
+											Messages from before Knowledge changed aren't sent to the AI anymore, so it won't remember them.
+											Start a new conversation to keep context together.
+										</Trans>
 									</Text>
-									<Button variant="link" label={t`Continue`} disabled={readOnly} onPress={() => send(t`Continue`)} />
 								</View>
 							) : null}
 
-							{error && !streaming ? (
+							{endedEarly && !proposedInLast ? (
+								<View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.s2 }}>
+									<Icon name="stop-circle" size={18} color={colors.ink3} />
+									<Text variant="callout" color="ink2">
+										{document ? (
+											<Trans>Stopped. No edits were proposed.</Trans>
+										) : saidSomething ? (
+											<Trans>Stopped before the answer finished.</Trans>
+										) : (
+											<Trans>Stopped before answering.</Trans>
+										)}
+									</Text>
+									{/* A reply that said something is continued; one that said nothing is asked again. */}
+									<Button
+										variant="link"
+										label={saidSomething || document ? t`Continue` : t`Try again`}
+										disabled={readOnly}
+										onPress={() => (saidSomething || document ? send(t`Continue`) : retry())}
+									/>
+								</View>
+							) : null}
+
+							{error && !busy ? (
 								<View
 									accessibilityRole="alert"
 									style={{
@@ -563,9 +832,11 @@ function Conversation(props: ConversationProps) {
 									<View style={{ flexDirection: "row", gap: space.s2 }}>
 										<Icon name="warning-circle" size={18} color={colors.dangerText} />
 										<Text variant="callout" color="dangerText" style={{ flex: 1 }}>
-											<Trans>
-												{props.connection} returned “{errorText(error, t`an error`)}”. Your message is kept.
-											</Trans>
+											{receipts.error ? (
+												<Trans>This conversation couldn't be opened.</Trans>
+											) : (
+												`${replyFailure(error, t`${props.connection} didn't respond.`, t)} ${t`Your message is kept.`}`
+											)}
 										</Text>
 									</View>
 									{continuationBlocked ? (
@@ -579,17 +850,17 @@ function Conversation(props: ConversationProps) {
 											variant="secondary"
 											icon="arrow-clockwise"
 											label={t`Retry`}
-											disabled={readOnly || continuationBlocked}
+											disabled={busy || (!receipts.error && (readOnly || continuationBlocked))}
 											onPress={retry}
 										/>
-										{props.onSwitchModel ? (
+										{props.onSwitchModel && providerFailure(error) ? (
 											<Button size="sm" variant="ghost" label={t`Switch model`} onPress={props.onSwitchModel} />
 										) : null}
 									</View>
 								</View>
 							) : null}
 
-							{!streaming && messages.length > 0 ? (
+							{!busy && messages.length > 0 ? (
 								<Button variant="ghost" size="sm" icon="copy" label={t`Copy transcript`} onPress={copyTranscript} />
 							) : null}
 						</View>
@@ -613,7 +884,12 @@ function Conversation(props: ConversationProps) {
 
 			<Composer
 				{...props}
-				streaming={streaming}
+				privacy={
+					typeof props.privacy === "string"
+						? props.privacy
+						: props.privacy({ earlier: messages.length - withheld, withheld })
+				}
+				streaming={busy}
 				disabled={readOnly}
 				ensureThread={() => Promise.resolve(threadId)}
 				onSend={send}
@@ -632,7 +908,9 @@ function errorText(error: unknown, fallback: string) {
 
 type Upload = ChatAttachment & { size: number; busy?: boolean };
 
-type ComposerProps = Pick<ScopedChatViewProps, "chips" | "privacy" | "placeholder" | "scope"> & {
+type ComposerProps = Pick<ScopedChatViewProps, "chips" | "notice" | "placeholder" | "scope" | "draft"> & {
+	privacy: string;
+	initialAttachments?: Upload[];
 	streaming: boolean;
 	disabled: boolean;
 	ensureThread: () => Promise<string>;
@@ -645,9 +923,20 @@ type ComposerProps = Pick<ScopedChatViewProps, "chips" | "privacy" | "placeholde
 function Composer(props: ComposerProps) {
 	const { t } = useLingui();
 	const { colors, radius, size, space, type } = useTheme();
-	const [text, setText] = useState("");
-	const [attachments, setAttachments] = useState<Upload[]>([]);
+	const [text, setText] = useState(props.draft ?? "");
+	const [attachments, setAttachments] = useState<Upload[]>(props.initialAttachments ?? []);
+	// Chips removed while their upload was still running: the finished upload is deleted, not kept.
+	const removedUploads = useRef(new Set<string>());
 	const uploading = attachments.some((attachment) => attachment.busy);
+	// Attached files go with the next message: named, so the user sees exactly what leaves (web conversation.tsx).
+	const names = attachments.map((attachment) => attachment.filename);
+	const files =
+		names.length === 0
+			? ""
+			: plural(names.length, {
+					one: `Also sends ${listFormat(names)}.`,
+					other: `Also sends # files: ${listFormat(names)}.`,
+				});
 	const hasText = text.trim().length > 0;
 
 	const submit = async () => {
@@ -662,8 +951,14 @@ function Composer(props: ComposerProps) {
 		setAttachments([]);
 	};
 
-	const attach = async () => {
-		const picked = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true });
+	const attach = async (provided?: DocumentPicker.DocumentPickerAsset[]) => {
+		const picked = provided
+			? { canceled: false, assets: provided }
+			: await DocumentPicker.getDocumentAsync({
+					multiple: true,
+					copyToCacheDirectory: true,
+					type: [...AGENT_ATTACHMENT_TYPES],
+				});
 		if (picked.canceled) return;
 		// Sizes are checked before any file is read: 25 MB a file and 100 MB in all, the server's limits.
 		let budget = MAX_TOTAL_BYTES - attachments.reduce((total, item) => total + item.size, 0);
@@ -676,7 +971,7 @@ function Composer(props: ComposerProps) {
 			else if (size > MAX_FILE_BYTES) skipped.big = true;
 			else if (size > budget) skipped.total = true;
 			else {
-				files.push({ asset, key: `upload-${Date.now()}-${index}`, size });
+				files.push({ asset, key: `upload-${index}-${asset.uri}`, size });
 				budget -= size;
 				room--;
 			}
@@ -684,7 +979,7 @@ function Composer(props: ComposerProps) {
 		if (skipped.count > 0) showToast({ message: t`Attach up to 10 files to a message.` });
 		if (skipped.big) showToast({ message: t`Files can be up to 25 MB each.` });
 		if (skipped.total) showToast({ message: t`Attachments can be up to 100 MB in all.` });
-		if (files.length === 0) return;
+		if (files.length === 0) return false;
 		setAttachments((current) => [
 			...current,
 			...files.map(({ asset, key, size }) => ({
@@ -704,8 +999,13 @@ function Composer(props: ComposerProps) {
 			showToast({ message: errorText(error, t`Couldn't attach the file. Try again.`) });
 			return;
 		}
+		let complete = true;
 		// One file at a time: only one base64 copy is in memory at once.
 		for (const { asset, key } of files) {
+			if (removedUploads.current.delete(key)) {
+				complete = false;
+				continue;
+			}
 			try {
 				const attachment = await client.agent.attachments.create(
 					{
@@ -716,6 +1016,14 @@ function Composer(props: ComposerProps) {
 					},
 					{ context: { scope: props.scope } },
 				);
+				if (removedUploads.current.delete(key)) {
+					complete = false;
+					// Removed while uploading.
+					void client.agent.attachments
+						.delete({ id: attachment.id }, { context: { scope: props.scope } })
+						.catch(() => undefined);
+					continue;
+				}
 				setAttachments((current) =>
 					current.map((item) =>
 						item.id === key
@@ -724,9 +1032,31 @@ function Composer(props: ComposerProps) {
 					),
 				);
 			} catch (error) {
+				complete = false;
 				drop(key);
 				showToast({ message: errorText(error, t`Couldn't attach the file. Try again.`) });
 			}
+		}
+		return complete;
+	};
+
+	const attachPaste = async () => {
+		if (props.disabled || props.streaming || uploading) return;
+		const pasted = text;
+		const file = new File(Paths.cache, `message-${Date.now()}.txt`);
+		try {
+			file.write(pasted);
+			if (
+				await attach([
+					{ name: "message.txt", uri: file.uri, size: file.size, mimeType: "text/plain", lastModified: Date.now() },
+				])
+			) {
+				setText((current) => (current === pasted ? t`Read the attachment` : current));
+			}
+		} catch (error) {
+			showToast({ message: errorText(error, t`Couldn't attach the file. Try again.`) });
+		} finally {
+			if (file.exists) file.delete();
 		}
 	};
 
@@ -744,18 +1074,43 @@ function Composer(props: ComposerProps) {
 				backgroundColor: colors.surface,
 			}}
 		>
+			{props.notice}
+			{text.length >= 4000 ? (
+				<Button
+					size="sm"
+					variant="ghost"
+					label={t`Attach a file instead`}
+					disabled={props.disabled || props.streaming || uploading}
+					onPress={() => void attachPaste()}
+				/>
+			) : null}
 			{props.chips || attachments.length > 0 ? (
-				<View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.s2 }} accessibilityLabel={t`Context`}>
+				// One row that scrolls sideways, so the chips never push the message box down the screen.
+				<ScrollView
+					horizontal
+					showsHorizontalScrollIndicator={false}
+					keyboardShouldPersistTaps="handled"
+					contentContainerStyle={{ flexDirection: "row", gap: space.s2 }}
+					accessibilityLabel={t`Context`}
+				>
 					{props.chips}
 					{attachments.map((attachment) => (
 						<FileChip
 							key={attachment.id}
 							name={attachment.filename}
 							busy={attachment.busy}
-							onRemove={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+							onRemove={() => {
+								setAttachments((current) => current.filter((item) => item.id !== attachment.id));
+								// An uploaded but unsent file counts toward the message's limit until it's deleted.
+								if (attachment.busy) removedUploads.current.add(attachment.id);
+								else
+									void client.agent.attachments
+										.delete({ id: attachment.id }, { context: { scope: props.scope } })
+										.catch(() => undefined);
+							}}
 						/>
 					))}
-				</View>
+				</ScrollView>
 			) : null}
 
 			<View
@@ -828,6 +1183,7 @@ function Composer(props: ComposerProps) {
 
 			<Text variant="caption" color="ink3" style={{ paddingHorizontal: space.s1 }}>
 				{props.privacy}
+				{files ? ` ${files}` : ""}
 			</Text>
 		</View>
 	);
@@ -894,3 +1250,20 @@ export function ContextChip({ icon, label, onRemove, removeLabel, pressed, onPre
 		</Pressable>
 	);
 }
+
+/**
+ * Tailored edits land only on the copy made for their job (web conversation.tsx); older sets that may have used a
+ * posting are asked again.
+ */
+function forJobCopy(document: AssistantDocument, message: UIMessage, part: ToolPart) {
+	return document.kind === "resume" && !tailoringAllows(message, part.output, document.madeFor);
+}
+
+/** "a, b and c" in the reader's language. */
+const listFormat = (items: readonly string[]) => {
+	try {
+		return new Intl.ListFormat(i18n.locale, { type: "conjunction" }).format(items);
+	} catch {
+		return items.join(", ");
+	}
+};

@@ -37,13 +37,36 @@ it("matches the complete unmodified SDK tools/list response and server-card sche
 	try {
 		await server.connect(serverTransport);
 		await client.connect(clientTransport);
-		const baseline = JSON.parse(JSON.stringify(await client.listTools()));
+		const baseline: Awaited<ReturnType<typeof client.listTools>> = JSON.parse(JSON.stringify(await client.listTools()));
 		registerToolDiscovery(server);
 		const optimized = JSON.parse(JSON.stringify(await client.listTools()));
 		expect(optimized).toEqual(baseline);
+		// The card is built from the same metadata as the optimized list, so compare it with the SDK's own listing.
 		expect(buildMcpServerCard("1.0.0").tools).toEqual(
-			(await client.listTools()).tools.map(({ execution: _execution, _meta, ...tool }) => tool),
+			baseline.tools.map(({ execution: _execution, _meta, ...tool }) => tool),
 		);
+	} finally {
+		await client.close();
+		await server.close();
+	}
+}, 30_000);
+
+it("lists only read-only tools to a credential that can't write", async () => {
+	const server = new McpServer({ name: "discovery-test", version: "1.0.0" });
+	// The SDK installs tool handling with the first registered tool.
+	server.registerTool("placeholder", { description: "Placeholder." }, () => ({ content: [] }));
+	registerToolDiscovery(server, { canWrite: false });
+	const client = new Client({ name: "discovery-client", version: "1.0.0" });
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	try {
+		await server.connect(serverTransport);
+		await client.connect(clientTransport);
+		const { tools } = await client.listTools();
+		const all = buildMcpServerCard("1.0.0").tools;
+		expect(tools.length).toBeGreaterThan(0);
+		expect(tools.length).toBeLessThan(all.length);
+		expect(tools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
+		expect(tools.map((tool) => tool.name)).not.toContain("apply_resume_patch");
 	} finally {
 		await client.close();
 		await server.close();

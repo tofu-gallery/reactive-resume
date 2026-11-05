@@ -1,11 +1,18 @@
 import type { CSSProperties } from "react";
 import { t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
-import { useEffect, useRef } from "react";
+import { Trans } from "@lingui/react/macro";
+import { useQueryClient } from "@tanstack/react-query";
+import { useNavigate, useRouteContext } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
+import { useIsClient } from "usehooks-ts";
+import { toast } from "@reactive-resume/ui/components/toast";
 import { cn } from "@reactive-resume/utils/style";
 import { prefersReducedMotion, SCENE } from "./scroll";
 import { Sheet } from "./sheet";
 import { CtaLink, Doodle } from "./ui";
+import { authClient } from "@/libs/auth/client";
+import { sessionQueryKey } from "@/libs/root-context";
 
 const fragmentKind = {
 	display: "font-anybody leading-none",
@@ -164,7 +171,7 @@ export function Hero() {
 			data-scene={SCENE.hero}
 			data-pin
 			aria-labelledby="hero-title"
-			className="relative h-[170vh] motion-reduce:h-svh min-[900px]:h-[220vh]"
+			className="relative h-[170vh] min-[900px]:h-[220vh]"
 		>
 			{/* --pt is the page's centre. Below 900px it sits under the stacked headline (128px + three 10vw lines). */}
 			<div className="min-[900px]:short:[--pw:min(24vw,40vh)] sticky top-0 h-svh overflow-clip [--e2:clamp(0,(var(--p)-.16)/.6,1)] [--e:clamp(0,(var(--p)-.03)/.5,1)] [--pt:calc(144px+30vw+var(--pw)*.647)] [--pw:min(46vw,30vh)] motion-reduce:[--ld:1] min-[900px]:[--pt:50%] min-[900px]:[--pw:min(24vw,46vh)]">
@@ -199,13 +206,16 @@ export function Hero() {
 					name="pencil"
 					eager
 					wipe="var(--ld, 0)"
-					className="start-[74vw] top-[max(15vh,110px)] w-[12vw] [transform:translate(calc(var(--mx,0)*-22px),calc(var(--my,0)*-14px))_rotate(calc(-22deg+var(--mx,0)*3deg))_translateY(calc(var(--p)*-20px))] [transition:mask-position_1.8s_var(--ease)_.9s,transform_.9s_var(--ease)]"
+					sizes="12vw"
+					// Physical, like the floating words (left: 50% plus an offset): mirrored, it would land on a word in RTL.
+					className="top-[max(15vh,110px)] left-[74vw] w-[12vw] [transform:translate(calc(var(--mx,0)*-22px),calc(var(--my,0)*-14px))_rotate(calc(-22deg+var(--mx,0)*3deg))_translateY(calc(var(--p)*-20px))] [transition:mask-position_1.8s_var(--ease)_.9s,transform_.9s_var(--ease)]"
 				/>
 				<Doodle
 					name="paperclip"
 					eager
 					wipe="var(--ld, 0)"
-					className="start-[4vw] top-[61%] w-[6vw] [transform:translate(calc(var(--mx,0)*22px),calc(var(--my,0)*16px))_rotate(calc(16deg+var(--mx,0)*-4deg))_translateY(calc(var(--p)*-30px))] [transition:mask-position_1.4s_var(--ease)_1.3s,transform_1.1s_var(--ease)] max-[900px]:hidden"
+					sizes="(min-width: 900px) 6vw, 1px"
+					className="top-[61%] left-[4vw] w-[6vw] [transform:translate(calc(var(--mx,0)*22px),calc(var(--my,0)*16px))_rotate(calc(16deg+var(--mx,0)*-4deg))_translateY(calc(var(--p)*-30px))] [transition:mask-position_1.4s_var(--ease)_1.3s,transform_1.1s_var(--ease)] max-[900px]:hidden"
 				/>
 
 				<div
@@ -215,6 +225,8 @@ export function Hero() {
 					{getFragments().map(({ text, at: [x, y, tx, ty, r, s, z], className }) => (
 						<span
 							key={text}
+							// Each word sets its own direction, so "Parcel & Co." keeps its full stop at the end in Arabic.
+							dir="auto"
 							className={cn("hero-fragment", className)}
 							style={{ "--x": x, "--y": y, "--tx": tx, "--ty": ty, "--r": r, "--s": s, "--z": z } as CSSProperties}
 						>
@@ -259,9 +271,56 @@ export function Hero() {
 					<p className="max-w-full font-display text-base leading-[1.45] text-pretty text-ink-2 min-[900px]:max-w-[min(25em,calc(50vw-var(--pw)/2-5vw))] min-[900px]:text-[clamp(17px,1.3vw,20px)]">
 						{t`Build a professional resume, download it as PDF or Word, and manage your job search in one place. Free templates, no ads, no paywall.`}
 					</p>
-					<CtaLink size="hero" />
+					<div className="flex flex-col items-end gap-2">
+						<CtaLink size="hero" />
+						<GuestLink />
+					</div>
 				</div>
 			</div>
 		</section>
+	);
+}
+
+/**
+ * "Try it without an account", under the hero's call to action, where the server allows guests: a guest session opens
+ * Documents, and signing up later keeps the work. The build's prerendered page has no route to read flags from, so
+ * the link appears once the live page has loaded.
+ */
+function GuestLink() {
+	return useIsClient() ? <GuestLinkButton /> : null;
+}
+
+function GuestLinkButton() {
+	const { flags, session } = useRouteContext({ strict: false });
+	const navigate = useNavigate();
+	const queryClient = useQueryClient();
+	const [pending, setPending] = useState(false);
+	if (!flags?.allowGuestLogin || session) return null;
+
+	const failed = (message?: string) => {
+		setPending(false);
+		toast.add({ type: "error", description: message || t`Couldn't continue as a guest. Try again.` });
+	};
+	const start = async () => {
+		setPending(true);
+		try {
+			const { error } = await authClient.signIn.anonymous();
+			if (error) return failed(error.message);
+			await queryClient.invalidateQueries({ queryKey: sessionQueryKey });
+			void navigate({ to: "/dashboard" });
+		} catch {
+			failed();
+		}
+	};
+
+	return (
+		<button
+			type="button"
+			disabled={pending}
+			onClick={() => void start()}
+			className="font-ui text-sm text-ink-2 underline underline-offset-3 transition-colors hover:text-ink disabled:opacity-60"
+		>
+			<Trans>Try it without an account</Trans>
+		</button>
 	);
 }

@@ -2,22 +2,27 @@ import type { SavedItem } from "../hooks";
 import type { WorkspaceTabProps } from "./shell";
 import type { SavedItemKind, WorkspaceTab } from "@reactive-resume/schema/career";
 import type { IconName } from "@reactive-resume/ui/components/icon";
+import { i18n } from "@lingui/core";
 import { plural, t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { AnimatePresence } from "motion/react";
 import { useState } from "react";
 import { Button, buttonVariants } from "@reactive-resume/ui/components/button";
+import { EmptyState } from "@reactive-resume/ui/components/empty-state";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { IconButton } from "@reactive-resume/ui/components/icon-button";
 import { Skeleton } from "@reactive-resume/ui/components/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@reactive-resume/ui/components/tooltip";
 import { useSavedItems } from "../hooks";
+import { CareerLoadError } from "../load-state";
 import { formatMoney } from "../offer-compare";
-import { CollapseRow, FilterChip, tabLabel, useCareerTime, withUndo } from "../shared";
-import { orpc } from "@/libs/orpc/client";
+import { useRemoving } from "../removing";
+import { CollapseRow, FilterChip, tabLabel, useCareerTime, withQueryUndo } from "../shared";
+import { AiResultUsage } from "@/features/ai/usage";
+import { client, orpc, prepareRpc } from "@/libs/orpc/client";
 
 const KINDS: { kind: SavedItemKind; icon: IconName; tab: WorkspaceTab | null }[] = [
 	{ kind: "fit", icon: "list-checks", tab: "fit" },
@@ -40,13 +45,13 @@ const kindLabel = (kind: SavedItemKind) =>
 		offer: t`Offer`,
 	})[kind];
 
-/** W18: everything the coach wrote for this job, newest first, each opening read-only in the tab that made it. */
+/** W18: saved records for this job, newest first, each opening read-only in the tab that made it. */
 export function SavedTab({ application, go }: WorkspaceTabProps) {
+	const company = application.company;
 	const queryClient = useQueryClient();
 	const saved = useSavedItems(application.id);
-	const remove = useMutation(orpc.career.deleteSavedItem.mutationOptions());
 	const [filter, setFilter] = useState<SavedItemKind | null>(null);
-	const [hidden, setHidden] = useState<string[]>([]);
+	const { add: hide, drop: unhide } = useRemoving.getState();
 	const [expanded, setExpanded] = useState<string | null>(null);
 
 	if (saved.isPending)
@@ -57,36 +62,37 @@ export function SavedTab({ application, go }: WorkspaceTabProps) {
 			</div>
 		);
 
-	const items = (saved.data ?? []).filter((item) => !hidden.includes(item.id));
+	// A failed load isn't "nothing saved": it says so, with Retry.
+	if (saved.isError && !saved.data) return <CareerLoadError onRetry={() => void saved.refetch()} />;
+
+	// useSavedItems already leaves out items whose Undo is still showing.
+	const items = saved.data ?? [];
 	const present = KINDS.filter(({ kind }) => items.some((item) => item.data.kind === kind));
 	const shown = items.filter((item) => filter === null || item.data.kind === filter);
 
 	if (items.length === 0)
 		return (
-			<div className="grid justify-items-center gap-2 rounded-xl border border-dashed border-line-2 p-7 text-center">
-				<h2 className="font-display text-[22px] leading-7 font-medium">
-					<Trans>Nothing saved yet</Trans>
-				</h2>
-				<p className="max-w-[340px] text-sm text-ink-2">
+			<EmptyState
+				title={<Trans>Nothing in your library yet</Trans>}
+				description={
 					<Trans>
-						Fit checks, briefings, practice feedback, debriefs, answers and replies land here as the other tabs create
-						them.
+						Fit checks, briefings, practice feedback, debriefs, answers, replies and offers land here as you save them.
 					</Trans>
-				</p>
-			</div>
+				}
+			/>
 		);
 
 	const onDelete = (item: SavedItem) => {
 		if (filter === item.data.kind && shown.length === 1) setFilter(null);
-		setHidden((ids) => [...ids, item.id]);
-		withUndo({
-			description: t`Deleted from Saved`,
-			onUndo: () => setHidden((ids) => ids.filter((id) => id !== item.id)),
-			commit: () =>
-				remove
-					.mutateAsync({ id: item.id })
-					.then(() => queryClient.invalidateQueries({ queryKey: orpc.career.savedItems.key() }))
-					.catch(() => setHidden((ids) => ids.filter((id) => id !== item.id))),
+		hide(item.id);
+		withQueryUndo({
+			queryClient,
+			queryKey: orpc.career.savedItems.key(),
+			description: t`Deleted from Library`,
+			errorMessage: t`Couldn't save that change. Check your connection and try again.`,
+			prepare: () => prepareRpc(client.career.deleteSavedItem, { id: item.id }),
+			hide: () => hide(item.id),
+			restore: () => unhide(item.id),
 		});
 	};
 
@@ -103,7 +109,7 @@ export function SavedTab({ application, go }: WorkspaceTabProps) {
 						</FilterChip>
 					))}
 				</div>
-				<p className="text-xs text-ink-3">{t`Everything the coach wrote for ${application.company}, newest first.`}</p>
+				<p className="text-xs text-ink-3">{t`Library items for ${company}, newest first.`}</p>
 			</div>
 
 			<div role="list" className="overflow-hidden rounded-xl border border-line bg-surface">
@@ -183,6 +189,7 @@ function SavedRow({ item, applicationId, expanded, onToggle, onOpen, onDelete }:
 						</>
 					)}
 				</p>
+				<AiResultUsage usage={item.aiUsage} />
 			</div>
 			<div className="col-start-2 mt-2 flex items-center gap-1 sm:col-start-3 sm:row-start-1 sm:mt-0">
 				{meta?.tab ? (
@@ -228,7 +235,7 @@ function sourcesOf(item: SavedItem) {
 	const kind = item.data.kind;
 	if (kind === "fit" || kind === "briefing") parts.push(t`posting`);
 	if (kind === "debrief") parts.push(t`your notes`);
-	if (kind === "reply" || kind === "offer") parts.push(t`the message`);
+	if (kind === "reply") parts.push(t`the message`);
 	return parts.join(", ");
 }
 
@@ -238,7 +245,7 @@ function summaryOf(item: SavedItem, locale: string): string {
 	switch (data.kind) {
 		case "fit": {
 			const count = (status: string) => data.requirements.filter((requirement) => requirement.status === status).length;
-			return t`${count("supported")} supported, ${count("partial")} partly supported, ${count("missing")} with no evidence yet. ${data.summary}`;
+			return t`${i18n.number(count("supported"))} supported, ${i18n.number(count("partial"))} partly supported, ${i18n.number(count("missing"))} with no evidence yet. ${data.summary}`;
 		}
 		case "briefing":
 			return [data.focus, data.honesty].filter(Boolean).join(" ");

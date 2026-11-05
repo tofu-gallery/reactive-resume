@@ -5,6 +5,7 @@ import type { CSSProperties } from "react";
 import { Radio } from "@base-ui/react/radio";
 import { RadioGroup } from "@base-ui/react/radio-group";
 import { t } from "@lingui/core/macro";
+import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
 import { createContext, useContext, useId, useState } from "react";
 import { Button } from "@reactive-resume/ui/components/button";
@@ -24,7 +25,7 @@ import {
 	darkenForWhite,
 	FONT_PAIRINGS,
 	hexToRgba,
-	isValidHex,
+	normalizeHex,
 	matchDensity,
 	matchFontPairing,
 	matchMargins,
@@ -47,7 +48,7 @@ const DesignSourceContext = createContext<DesignSource | null>(null);
 /** Points the Type, Color and Page groups at another design than the open resume's (a letter's own). */
 export const DesignSourceProvider = DesignSourceContext.Provider;
 
-function useDesign(): DesignSource {
+export function useDesign(): DesignSource {
 	const source = useContext(DesignSourceContext);
 	const data = useResumeData();
 	const updateResumeData = useUpdateResumeData();
@@ -71,6 +72,7 @@ type TypeGroupProps = {
 
 /** Type: five font pairings (or any font, in Advanced), the text size (9–12.5 pt) and density. */
 export function TypeGroup({ onCustomFonts }: TypeGroupProps) {
+	const { i18n } = useLingui();
 	const { metadata, write } = useDesign();
 	const sizeLabelId = useId();
 	if (!metadata) return null;
@@ -95,7 +97,7 @@ export function TypeGroup({ onCustomFonts }: TypeGroupProps) {
 							value={option.id}
 							className="flex h-12 cursor-pointer items-center gap-3 rounded-lg border border-line px-3 text-start transition-colors duration-quick hover:bg-hover data-checked:border-accent data-checked:bg-accent-soft data-checked:hover:bg-accent-soft"
 						>
-							<span className="text-sm font-medium">{option.label}</span>
+							<span className="text-sm font-medium">{i18n._(option.label)}</span>
 							<span className="truncate text-xs text-ink-3">{familiesLabel(option.heading, option.body)}</span>
 							{pairing === option.id && <Icon name="check" size={18} className="ms-auto text-accent-text" />}
 						</Radio.Root>
@@ -124,7 +126,7 @@ export function TypeGroup({ onCustomFonts }: TypeGroupProps) {
 					<span id={sizeLabelId} className="font-medium">
 						<Trans>Text size</Trans>
 					</span>
-					<span className="font-mono text-xs text-ink-2">{size} pt</span>
+					<span className="font-mono text-xs text-ink-2">{i18n.number(size)} pt</span>
 				</div>
 				<Slider
 					aria-labelledby={sizeLabelId}
@@ -168,14 +170,17 @@ export function TypeGroup({ onCustomFonts }: TypeGroupProps) {
 
 /** Color: eight accents or a custom hex, with its contrast on white and a darker shade when it's too light. */
 export function ColorGroup() {
+	const { i18n } = useLingui();
 	const { metadata, write } = useDesign();
 	const current = metadata ? (rgbaToHex(metadata.design.colors.primary) ?? "#000000") : "#000000";
 	const [typed, setTyped] = useState<string | null>(null);
+	const hexId = useId();
 	if (!metadata) return null;
 
 	const hex = typed ?? current;
-	const valid = isValidHex(hex);
-	const normalized = valid ? `#${hex.replace("#", "").toUpperCase()}` : current;
+	const typedHex = normalizeHex(hex);
+	const valid = typedHex !== null;
+	const normalized = typedHex ?? current;
 	const ratio = contrastOnWhite(normalized);
 	const tooLight = valid && ratio < 4.5;
 
@@ -204,8 +209,8 @@ export function ColorGroup() {
 					<Radio.Root
 						key={accent.hex}
 						value={accent.hex}
-						aria-label={accent.label}
-						title={accent.label}
+						aria-label={i18n._(accent.label)}
+						title={i18n._(accent.label)}
 						className="aspect-square cursor-pointer rounded-sm transition-[box-shadow,scale] duration-quick ease-enter active:scale-[0.97] data-checked:shadow-[0_0_0_2px_var(--surface),0_0_0_4px_var(--swatch)]"
 						style={{ backgroundColor: accent.hex, "--swatch": accent.hex } as CSSProperties}
 					/>
@@ -219,16 +224,27 @@ export function ColorGroup() {
 					value={hex}
 					spellCheck={false}
 					className="font-mono"
+					aria-invalid={!valid}
+					aria-describedby={valid ? undefined : `${hexId}-error`}
 					onChange={(event) => {
 						setTyped(event.target.value);
-						if (isValidHex(event.target.value)) setAccent(`#${event.target.value.replace("#", "")}`, false);
+						const next = normalizeHex(event.target.value);
+						if (next) setAccent(next, false);
 					}}
 					onBlur={() => setTyped(null)}
 				/>
-				<span className={cn("shrink-0 font-mono text-xs", tooLight ? "text-warn-text" : "text-ink-3")}>
-					{ratio.toFixed(1)}:1
-				</span>
+				{/* An unreadable value has no ratio: the one shown would be the old colour's. */}
+				{valid && (
+					<span className={cn("shrink-0 font-mono text-xs", tooLight ? "text-warn-text" : "text-ink-3")}>
+						{i18n.number(ratio, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}:{i18n.number(1)}
+					</span>
+				)}
 			</div>
+			{!valid && (
+				<p id={`${hexId}-error`} className="text-xs text-danger-text">
+					<Trans>Use a hex color such as #2F5A8A.</Trans>
+				</p>
+			)}
 
 			{tooLight && (
 				<div className="grid gap-2 rounded-lg bg-warn-soft p-3 text-[13px] leading-[19px] text-warn-text" role="status">
@@ -260,7 +276,7 @@ export function ColorGroup() {
 }
 
 /** Page: paper, language (section titles and date words), margins, icons and link underlines. */
-export function PageGroup() {
+export function PageGroup({ showLanguage = true }: { showLanguage?: boolean } = {}) {
 	const { metadata, write } = useDesign();
 	const languageId = useId();
 	if (!metadata) return null;
@@ -298,28 +314,30 @@ export function PageGroup() {
 				</SegmentedControl>
 			</div>
 
-			<div className="grid gap-2">
-				<label htmlFor={languageId} className="text-[13px] font-medium">
-					<Trans>Language</Trans>
-				</label>
-				<Combobox
-					id={languageId}
-					options={getLocaleOptions()}
-					value={page.locale}
-					onValueChange={(locale) =>
-						write(
-							"locale",
-							(draft) => {
-								draft.page.locale = (locale ?? "en-US") as string;
-							},
-							true,
-						)
-					}
-				/>
-				<span className="text-xs text-ink-3">
-					<Trans>Changes section titles and date words only, not your content.</Trans>
-				</span>
-			</div>
+			{showLanguage && (
+				<div className="grid gap-2">
+					<label htmlFor={languageId} className="text-[13px] font-medium">
+						<Trans>Language</Trans>
+					</label>
+					<Combobox
+						id={languageId}
+						options={getLocaleOptions()}
+						value={page.locale}
+						onValueChange={(locale) =>
+							write(
+								"locale",
+								(draft) => {
+									draft.page.locale = (locale ?? "en-US") as string;
+								},
+								true,
+							)
+						}
+					/>
+					<span className="text-xs text-ink-3">
+						<Trans>Sets section titles, date words and text direction. Your content isn't translated.</Trans>
+					</span>
+				</div>
+			)}
 
 			<div className="grid gap-2">
 				<span className="text-[13px] font-medium">

@@ -154,9 +154,12 @@ export type {
 	TextLine,
 } from "./types";
 export type { PdfRuleCode };
+
+export { pdfVerdict } from "./verdict";
+export type { PdfVerdict } from "./verdict";
 export { buildResumeSemantics } from "./analyze/semantics";
 export { PDF_ATS_RULE_CODES } from "./catalog";
-export { buildExtractedDocument } from "./extract";
+export { buildExtractedDocument, columnSegments } from "./extract";
 export { HARVEST_DEFAULTS, harvestPdfDocument } from "./harvest";
 export { surfaceFormsOf } from "./jd/aliases";
 export { matchJobDescription } from "./jd/match";

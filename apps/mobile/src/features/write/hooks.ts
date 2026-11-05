@@ -1,4 +1,5 @@
 import type { Entry, WriteSection } from "./model";
+import type { UpdateOptions } from "@/draft";
 import type { ResumeData } from "@reactive-resume/schema/resume/data";
 import type { WritableDraft } from "immer";
 import { useLingui } from "@lingui/react/macro";
@@ -7,6 +8,7 @@ import { sortSectionItemsByPeriod } from "@reactive-resume/resume/section-sort";
 import { SECTION_TITLES } from "./fields";
 import { createEntry, findEntry, getEntries, getSectionObject, readData } from "./model";
 import { useResumeStore } from "@/draft";
+import { confirmUndone } from "@/lib/undone";
 import { showToast } from "@/ui";
 
 /** Reads from the open resume's data. Return stable values (data sub-objects or primitives). */
@@ -18,21 +20,29 @@ export function useWriteData<T>(select: (data: ResumeData) => T, fallback: T): T
 export const useEntry = (sectionId: string, entryId: string) =>
 	useWriteData((data) => findEntry(data, sectionId, entryId) ?? null, null);
 
-export type EntryWriter = (key: string, mutate: (entry: Record<string, unknown>) => void) => void;
+export type EntryWriter = (
+	key: string,
+	mutate: (entry: Record<string, unknown>) => void,
+	options?: Pick<UpdateOptions, "newStep" | "aiOperationIds">,
+) => void;
 
 /** Writes one field of an entry. Typing in one field folds into one undo step; another field starts a new one. */
 export function useEntryWriter(sectionId: string, entryId: string): EntryWriter {
 	const update = useResumeStore((state) => state.update);
+	const documentId = useResumeStore((state) => state.document?.id);
 	return useCallback(
-		(key, mutate) =>
+		(key, mutate, options) => {
+			const current = useResumeStore.getState().document;
+			if (!current || current.id !== documentId || !findEntry(current.data, sectionId, entryId)) return;
 			update(
 				(draft) => {
 					const entry = findEntry(draft, sectionId, entryId);
 					if (entry) mutate(entry as Entry & Record<string, unknown>);
 				},
-				{ coalesceKey: `${entryId}:${key}` },
-			),
-		[update, sectionId, entryId],
+				{ coalesceKey: `${entryId}:${key}`, ...options },
+			);
+		},
+		[update, documentId, sectionId, entryId],
 	);
 }
 
@@ -47,11 +57,44 @@ export function useSectionTitle(section: WriteSection | null) {
 	return title.trim() || (section ? i18n._(SECTION_TITLES[section.type]) : "");
 }
 
-/** A toast with Undo, for destructive edits that don't ask first. */
+/**
+ * A toast with Undo, for destructive edits that don't ask first. Undo takes back this edit only: while it's still the
+ * latest step it's the resume's Undo; after another edit it puts the change back with `restore` when there is one,
+ * or says to use Undo.
+ */
 export function useUndoToast() {
 	const { t } = useLingui();
-	return (message: string) =>
-		showToast({ message, action: { label: t`Undo`, onPress: () => useResumeStore.getState().undo() } });
+	/** `restore` returns whether it put the change back; when it can't, the toast says to use Undo instead. */
+	return (message: string, restore?: (draft: WritableDraft<ResumeData>) => boolean) => {
+		const { data: changed, document } = useResumeStore.getState();
+		const resumeId = document?.id;
+		showToast({
+			message,
+			action: {
+				label: t`Undo`,
+				onPress: () => {
+					const current = useResumeStore.getState();
+					// The toast can outlive the resume it was about: another one open here is left alone.
+					if (!current.document || current.document.id !== resumeId) return;
+					// Locked since: nothing can change until it's unlocked, so say that rather than "use Undo".
+					if (current.locked) return showToast({ message: t`This resume is locked. Unlock it to make changes.` });
+					// "Restored" for a moment shows the press did something, and only when the resume changed back.
+					if (changed && current.data === changed && current.canUndo && !current.locked) {
+						current.undo();
+						if (useResumeStore.getState().data !== changed) return confirmUndone();
+					}
+					if (restore && !current.locked) {
+						let restored = false;
+						edit((draft) => {
+							restored = restore(draft);
+						});
+						if (restored) return confirmUndone();
+					}
+					showToast({ message: t`You've made changes since. Use Undo to step back through them.` });
+				},
+			},
+		});
+	};
 }
 
 /** "+ Add {type}": a draft entry at the end of the section. Returns its id. */
@@ -67,12 +110,25 @@ export function useDeleteEntry() {
 	const { t } = useLingui();
 	const undoToast = useUndoToast();
 	return (section: WriteSection, entryId: string) => {
+		const data = useResumeStore.getState().data;
+		const entries = data ? getEntries(data as WritableDraft<ResumeData>, section) : [];
+		const index = entries.findIndex((entry) => entry.id === entryId);
+		const deleted = entries[index];
+		if (!deleted) return;
 		edit((draft) => {
-			const entries = getEntries(draft, section);
-			const index = entries.findIndex((entry) => entry.id === entryId);
-			if (index !== -1) entries.splice(index, 1);
+			const items = getEntries(draft, section);
+			const at = items.findIndex((entry) => entry.id === entryId);
+			if (at !== -1) items.splice(at, 1);
 		});
-		undoToast(t`Entry deleted`);
+		// After later edits, Undo puts the entry back where it was.
+		undoToast(t`Entry deleted`, (draft) => {
+			// Its section was deleted since: there's nowhere to put it back.
+			if (!getSectionObject(draft, section)) return false;
+			const items = getEntries(draft, section);
+			if (items.some((entry) => entry.id === entryId)) return false;
+			items.splice(Math.min(index, items.length), 0, structuredClone(deleted));
+			return true;
+		});
 	};
 }
 

@@ -15,7 +15,8 @@ import { init } from "@formepdf/core/worker";
 import { Pool } from "pg";
 import { configureAgentStreamLifetime } from "@reactive-resume/api/features/agent/streams";
 import { runCareerJobs } from "@reactive-resume/api/features/career/jobs";
-import { configureStorageService, getStorageService } from "@reactive-resume/api/features/storage";
+import { configureStorageService, getStorageService, isPublicUploadOwner } from "@reactive-resume/api/features/storage";
+import { reportStorageCleanupSummary, runStorageCleanup } from "@reactive-resume/api/features/storage/cleanup";
 import { initializeAuth } from "@reactive-resume/auth/config";
 import { withDatabasePool } from "@reactive-resume/db/client";
 import { configureCoordination } from "@reactive-resume/db/coordination";
@@ -43,6 +44,8 @@ configureAgentStreamLifetime((promise) => {
 	store?.ctx.waitUntil(promise);
 });
 configureOwnPictureReader(async (key) => {
+	const owner = /^uploads\/([^/]+)\/pictures\//.exec(key)?.[1];
+	if (!owner || !(await isPublicUploadOwner(owner))) throw new Error("Picture unavailable");
 	const file = await getStorageService().read(key);
 	if (!file || file.size > 12_000_000) throw new Error("Picture unavailable or exceeds 12 MB");
 	return file.data;
@@ -218,6 +221,14 @@ export default {
 	},
 	scheduled(_controller: ScheduledController, bindings: CloudflareBindings, ctx: ExecutionContext): void {
 		const { pool, store, run } = createInvocation(bindings, ctx);
-		ctx.waitUntil(run(runCareerJobs).finally(() => closePool(pool, store)));
+		ctx.waitUntil(
+			run(async () => {
+				const [career, cleanup] = await Promise.allSettled([runCareerJobs(), runStorageCleanup({ limit: 100 })]);
+				if (cleanup.status === "fulfilled") reportStorageCleanupSummary(cleanup.value);
+				else console.error("[storage-cleanup] Scheduled work failed. Pending jobs will retry on a later tick.");
+				if (career.status === "rejected")
+					console.error("[career] Scheduled work failed. Eligible jobs will retry on a later tick.");
+			}).finally(() => closePool(pool, store)),
+		);
 	},
 };

@@ -7,6 +7,7 @@ import worker from "./index";
 
 const mocks = vi.hoisted(() => ({
 	run: vi.fn<() => Promise<{ processed: number }>>(),
+	cleanup: vi.fn<() => Promise<unknown>>(),
 	auth: vi.fn<() => Promise<void>>(),
 	wasm: vi.fn<() => Promise<void>>(),
 	fetch: vi.fn<(request: Request) => Promise<Response>>(),
@@ -15,6 +16,9 @@ const mocks = vi.hoisted(() => ({
 		throw new Error("Agent lifetime handler was not configured");
 	}) as (promise: Promise<unknown>) => void,
 	coordination: undefined as CoordinationService | undefined,
+	publicOwner: vi.fn(),
+	readPicture: vi.fn(),
+	pictureReader: undefined as ((key: string) => Promise<Uint8Array>) | undefined,
 }));
 
 vi.mock("pg", () => ({
@@ -44,6 +48,10 @@ vi.mock("@formepdf/core/pkg-web/forme_bg.wasm", () => ({ default: new Uint8Array
 vi.mock("@formepdf/core/worker", () => ({ init: mocks.wasm }));
 vi.mock("@reactive-resume/auth/config", () => ({ initializeAuth: mocks.auth }));
 vi.mock("@reactive-resume/api/features/career/jobs", () => ({ runCareerJobs: mocks.run }));
+vi.mock("@reactive-resume/api/features/storage/cleanup", () => ({
+	runStorageCleanup: mocks.cleanup,
+	reportStorageCleanupSummary: vi.fn(),
+}));
 vi.mock("@reactive-resume/api/features/agent/streams", () => ({
 	configureAgentStreamLifetime: (lifetime: (promise: Promise<unknown>) => void) => {
 		mocks.lifetime = lifetime;
@@ -56,9 +64,14 @@ vi.mock("@reactive-resume/db/coordination", () => ({
 }));
 vi.mock("@reactive-resume/api/features/storage", () => ({
 	configureStorageService: vi.fn(),
-	getStorageService: vi.fn(),
+	getStorageService: () => ({ read: mocks.readPicture }),
+	isPublicUploadOwner: mocks.publicOwner,
 }));
-vi.mock("@reactive-resume/pdf/server", () => ({ configureOwnPictureReader: vi.fn() }));
+vi.mock("@reactive-resume/pdf/server", () => ({
+	configureOwnPictureReader: (reader: typeof mocks.pictureReader) => {
+		mocks.pictureReader = reader;
+	},
+}));
 vi.mock("@reactive-resume/utils/rate-limit", () => ({ TRUSTED_IP_HEADERS: ["x-real-ip", "x-forwarded-for"] }));
 vi.mock("../http/app", () => ({ createApp: () => ({ fetch: mocks.fetch }) }));
 vi.mock("./coordination", () => ({ Coordination: class {} }));
@@ -94,12 +107,19 @@ function invocationPool() {
 beforeEach(() => {
 	mocks.pools.length = 0;
 	mocks.run.mockReset().mockResolvedValue({ processed: 0 });
+	mocks.cleanup.mockReset().mockResolvedValue({ completed: 0, missing: 0, failed: 0, partial: 0, abandoned: 0 });
 	mocks.auth.mockReset().mockResolvedValue();
 	mocks.wasm.mockReset().mockResolvedValue();
 	mocks.fetch.mockReset().mockResolvedValue(new Response("ok"));
 });
 
 describe("Cloudflare invocation lifetime", () => {
+	it("rejects a banned owner's picture before reading storage", async () => {
+		mocks.publicOwner.mockResolvedValue(false);
+		await expect(mocks.pictureReader?.("uploads/banned/pictures/photo.png")).rejects.toThrow("Picture unavailable");
+		expect(mocks.publicOwner).toHaveBeenCalledWith("banned");
+		expect(mocks.readPicture).not.toHaveBeenCalled();
+	});
 	it("runs scheduled work in its request context and drains nested background work before closing its pool", async () => {
 		const fixture = invocation();
 		const job = Promise.withResolvers<void>();
@@ -155,22 +175,26 @@ describe("Cloudflare invocation lifetime", () => {
 		expect(pool.end).toHaveBeenCalledOnce();
 	});
 
-	it("retains the pool for background work when the scheduled runner rejects", async () => {
+	it("waits for the career runner before closing the pool when cleanup rejects", async () => {
 		const fixture = invocation();
-		const background = Promise.withResolvers<void>();
-		const failure = new Error("Synthetic scheduled failure");
+		const career = Promise.withResolvers<void>();
+		const log = vi.spyOn(console, "error").mockImplementation(() => {});
 		mocks.run.mockImplementation(async () => {
-			mocks.lifetime(background.promise);
-			throw failure;
+			await career.promise;
+			return { processed: 1 };
 		});
+		mocks.cleanup.mockRejectedValueOnce(new Error("cleanup failed"));
+
 		worker.scheduled(fixture.controller, fixture.bindings, fixture.ctx);
 		await nextTurn();
 		const pool = invocationPool();
-		expect(mocks.run).toHaveBeenCalledOnce();
+		expect(mocks.cleanup).toHaveBeenCalledOnce();
 		expect(pool.end).not.toHaveBeenCalled();
-		background.resolve();
-		await expect(fixture.pending[0]).rejects.toBe(failure);
+
+		career.resolve();
+		await Promise.all(fixture.pending);
 		expect(pool.end).toHaveBeenCalledOnce();
+		expect(log).toHaveBeenCalledWith(expect.stringContaining("storage-cleanup"));
 	});
 
 	it("closes the invocation pool when initialization fails before scheduled work starts", async () => {

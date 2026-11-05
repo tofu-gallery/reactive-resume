@@ -73,13 +73,15 @@ export const accountRateLimit = createRatelimitMiddleware<ContextWithHeaders, un
 	key: ({ context }) => `account:${getUserKey(context)}`,
 });
 
-export const resumePasswordRateLimit = createRatelimitMiddleware<
-	ContextWithHeaders,
-	{ username: string; slug: string }
->({
-	limiter: productionLimiter(resumePasswordLimiter),
-	key: ({ context }, input) => `resume-password:${input.username}:${input.slug}:${getClientKey(context.trustedClient)}`,
-});
+type ResumePasswordAttempt = { resumeId: string; trustedClient?: string | undefined };
+
+const resumePasswordKey = (input: ResumePasswordAttempt) =>
+	`resume-password:${input.resumeId}:${getClientKey(input.trustedClient)}`;
+
+/** Spends a try from the budget the API's verify call uses, so a web page's password form gets no extra guesses. */
+export async function consumeResumePasswordLimit(input: ResumePasswordAttempt): Promise<boolean> {
+	return (await productionLimiter(resumePasswordLimiter).limit(resumePasswordKey(input))).success;
+}
 
 export const pdfExportRateLimit = createRatelimitMiddleware<ContextWithHeaders, { id: string }>({
 	limiter: productionLimiter(pdfLimiter),
@@ -155,4 +157,18 @@ export const resumeUpdatesRateLimit = createRatelimitMiddleware<ContextWithHeade
 export const resumeUpdatesUserRateLimit = createRatelimitMiddleware<ContextWithHeaders, unknown>({
 	limiter: productionLimiter(resumeUpdatesUserLimiter),
 	key: ({ context }) => `resume-updates-user:${getUserKey(context)}`,
+});
+
+// Feedback pages are public: each visitor gets a budget for reading them and a smaller one for leaving comments.
+const feedbackViewLimiter = createRateLimiter("feedbackViewLimiter", { maxRequests: 60, window: 60 * 1000 });
+const feedbackCommentLimiter = createRateLimiter("feedbackCommentLimiter", { maxRequests: 10, window: 10 * 60 * 1000 });
+
+export const feedbackViewRateLimit = createRatelimitMiddleware<ContextWithHeaders, unknown>({
+	limiter: productionLimiter(feedbackViewLimiter),
+	key: ({ context }) => `feedback-view:${getClientKey(context.trustedClient)}`,
+});
+
+export const feedbackCommentRateLimit = createRatelimitMiddleware<ContextWithHeaders, unknown>({
+	limiter: productionLimiter(feedbackCommentLimiter),
+	key: ({ context }) => `feedback-comment:${getClientKey(context.trustedClient)}`,
 });

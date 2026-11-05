@@ -1,12 +1,14 @@
-import type { Application } from "@/features/applications/types";
+import type { Application, ApplicationSummary } from "@/features/applications/types";
 import type { InterviewKind, InterviewTimelineEntry } from "@reactive-resume/schema/applications/data";
+import { i18n } from "@lingui/core";
 import { useLingui } from "@lingui/react/macro";
 import { useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Linking, View } from "react-native";
-import { interviewDetailsSchema } from "@reactive-resume/schema/applications/data";
+import { interviewDetailsSchema, nextInterviewKind } from "@reactive-resume/schema/applications/data";
 import { generateId } from "@reactive-resume/utils/string";
 import { fromZonedDateTime } from "@reactive-resume/utils/timezone";
+import { interviewCalendarAction, showInterviewCancellation } from "./calendar";
 import { WallClockField } from "./date-field";
 import {
 	interviewReminder,
@@ -16,8 +18,14 @@ import {
 	useDetailMutations,
 	useUserTime,
 } from "./hooks";
-import { client } from "@/api/client";
-import { applicationDetailQueryKey, useInvalidateApplications } from "@/features/applications/queries";
+import { client, prepareRpc } from "@/api/client";
+import { getAccountScope } from "@/auth/session";
+import {
+	applicationDetailQueryKey,
+	applicationDetailQueryOptions,
+	useInvalidateApplications,
+} from "@/features/applications/queries";
+import { withUndo } from "@/features/career/undo";
 import {
 	DEFAULT_LEAD,
 	holdReminder,
@@ -36,7 +44,6 @@ import {
 	ListRow,
 	Segmented,
 	showToast,
-	toastLifetime,
 	Switch,
 	Text,
 	TextArea,
@@ -46,7 +53,6 @@ import {
 
 const KINDS: InterviewKind[] = ["screening", "technical", "behavioral", "onsite", "other"];
 const LENGTHS = [30, 45, 60, 90];
-const UNDO_MS = 6000;
 
 type Participant = { id: string; name: string; role: string; profileUrl: string };
 
@@ -66,14 +72,14 @@ type Draft = {
 const pad = (value: number) => String(value).padStart(2, "0");
 
 // New interviews default to tomorrow at 09:00 in the timezone, or the next full hour if that has passed.
-function emptyDraft(timezone: string): Draft {
+function emptyDraft(timezone: string, kind: InterviewKind = "screening"): Draft {
 	const now = new Date();
 	const tomorrow = new Date(now.getTime() + 86_400_000);
 	const day = `${tomorrow.getFullYear()}-${pad(tomorrow.getMonth() + 1)}-${pad(tomorrow.getDate())}`;
 	let at = fromZonedDateTime(day, "09:00", timezone) ?? now;
 	if (at <= now) at = new Date(Math.ceil(now.getTime() / 3_600_000) * 3_600_000);
 	return {
-		kind: "screening",
+		kind,
 		...zonedParts(at, timezone),
 		durationMinutes: 60,
 		location: "",
@@ -104,7 +110,7 @@ function draftFrom(interview: InterviewTimelineEntry, fallbackZone: string): Dra
 }
 
 type InterviewSheetProps = {
-	application: Application;
+	application: ApplicationSummary;
 	/** The interview to edit, or null to schedule a new one. */
 	interview: InterviewTimelineEntry | null;
 	open: boolean;
@@ -126,9 +132,28 @@ function InterviewForm({ application, interview, onClose }: InterviewFormProps) 
 	const mutations = useDetailMutations(application.id);
 	const invalidate = useInvalidateApplications();
 	const reminders = useReminders(application.id);
-	const [initial] = useState(() => (interview ? draftFrom(interview, userZone) : emptyDraft(userZone)));
+	// A new interview starts as the likely next type: after a screening, a technical round, and so on (web too).
+	const [initial] = useState(() =>
+		interview
+			? draftFrom(interview, userZone)
+			: emptyDraft(
+					userZone,
+					nextInterviewKind(
+						application.activity.flatMap((entry) => (entry.type === "interview" ? [entry.kind] : [])),
+						application.status === "interview" || application.status === "offer",
+					),
+				),
+	);
 	const [draft, setDraft] = useState(initial);
 	const saving = useRef(false);
+	const activeForm = useRef<symbol | null>(null);
+	useLayoutEffect(() => {
+		activeForm.current = Symbol();
+		return () => {
+			activeForm.current = null;
+		};
+	}, [application.id, interview?.id]);
+
 	const [zonePicker, setZonePicker] = useState(false);
 	const [zoneLimit, setZoneLimit] = useState(40);
 	const [zoneQuery, setZoneQuery] = useState("");
@@ -177,21 +202,16 @@ function InterviewForm({ application, interview, onClose }: InterviewFormProps) 
 	const matchingZones = allZones.filter((zone) => zone.toLowerCase().includes(query));
 	const zones = matchingZones.slice(0, zoneLimit);
 
-	const applyReminder = async (saved: Application, entryId: string) => {
+	const applyReminder = (saved: Application, entryId: string) => {
 		const entry = saved.activity.filter(isInterview).find((item) => item.id === entryId);
 		if (!entry) return;
 		const target = interviewReminder(saved, entry);
 		if (!reminder.on) return existingLead !== null ? reminders.turnOff(target) : undefined;
-		const result = await reminders.turnOn(target, reminder.lead);
-		if (result === "denied")
-			showToast({
-				message: t`The interview is saved. To get a reminder, allow notifications in your device settings.`,
-				action: { label: t`Settings`, onPress: () => void Linking.openSettings() },
-			});
-		if (result === "passed") showToast({ message: t`Interview saved. The reminder time has already passed.` });
+		return reminders.turnOn(target, reminder.lead);
 	};
 
 	const save = async () => {
+		const scope = getAccountScope();
 		if (!at || !details.success || pending || saving.current) return;
 		saving.current = true;
 		const input = { id: application.id, at: at.toISOString(), ...details.data };
@@ -208,6 +228,7 @@ function InterviewForm({ application, interview, onClose }: InterviewFormProps) 
 			}
 		} catch {
 			saving.current = false;
+			if (!scope || scope !== getAccountScope()) return;
 			showToast({
 				message: interview
 					? t`Couldn't update the interview. Try again.`
@@ -215,48 +236,100 @@ function InterviewForm({ application, interview, onClose }: InterviewFormProps) 
 			});
 			return;
 		}
+		if (!scope || scope !== getAccountScope()) return;
 		onClose();
-		showToast({ message: t`Interview saved` });
+		const savedInterview = saved.activity.find(
+			(entry): entry is InterviewTimelineEntry => entry.type === "interview" && entry.id === entryId,
+		);
+		const calendar =
+			interview && savedInterview ? interviewCalendarAction(application, savedInterview, "PUBLISH", scope) : undefined;
+		showToast({ message: t`Interview saved`, ...(calendar ? { action: calendar } : {}) });
 		try {
-			if (entryId) await applyReminder(saved, entryId);
+			const result = entryId ? await applyReminder(saved, entryId) : undefined;
+			if (scope !== getAccountScope()) return;
+			if (result === "denied")
+				showToast({
+					message: t`The interview is saved. To get a reminder, allow notifications in your device settings.`,
+					action: calendar ?? { label: t`Settings`, onPress: () => void Linking.openSettings() },
+				});
+			if (result === "passed")
+				showToast({
+					message: t`Interview saved. The reminder time has already passed.`,
+					...(calendar ? { action: calendar } : {}),
+				});
 		} catch {
-			showToast({ message: t`Interview saved. Couldn't update its reminder. Edit the interview to try again.` });
+			if (scope === getAccountScope())
+				showToast({
+					message: t`Interview saved. Couldn't update its reminder. Edit the interview to try again.`,
+					...(calendar ? { action: calendar } : {}),
+				});
 		}
 	};
 
-	// Hidden at once and committed when the undo toast ends, so Undo keeps the round's identity and history.
-	// ponytail: the commit lives in a JS timer; if the app is killed first, the interview simply stays.
 	const remove = () => {
 		if (!interview || saving.current) return;
+		const form = activeForm.current;
+		saving.current = true;
+		const scope = getAccountScope();
+		const current = () => !!scope && scope === getAccountScope();
 		const key = applicationDetailQueryKey(application.id);
-		queryClient.setQueryData<Application>(key, (current) =>
-			current ? { ...current, activity: current.activity.filter((entry) => entry.id !== interview.id) } : current,
-		);
-		onClose();
-		// Its reminder stays scheduled through the undo window and is cancelled only once the delete commits.
-		holdReminder(interview.id);
-		const target = { kind: "interview", applicationId: application.id, entryId: interview.id } as const;
-		const timer = setTimeout(() => {
-			// The form is gone by now, so this calls the client directly rather than through a mounted mutation.
-			void client.applications
-				.deleteTimelineEntry({ id: application.id, entryId: interview.id })
-				.then(() => reminders.turnOff(target))
-				.catch(() => showToast({ message: t`Couldn't delete the interview. Try again.` }))
-				.finally(() => {
-					releaseReminder(interview.id);
-					void invalidate();
+		const reconcile = async () => {
+			releaseReminder(interview.id);
+			if (!current()) return;
+			await queryClient.cancelQueries({ queryKey: key });
+			if (!current()) return;
+			await queryClient.invalidateQueries({ queryKey: key, refetchType: "all" }, { throwOnError: true });
+			if (current()) void invalidate();
+		};
+		const failed = () => {
+			saving.current = false;
+			if (current())
+				showToast({
+					message: t`Couldn't delete the interview. Try again.`,
+					action: { label: t`Retry`, onPress: () => void reconcile().catch(failed) },
 				});
-		}, toastLifetime(UNDO_MS));
-		showToast({
+		};
+		withUndo({
 			message: t`Interview deleted`,
-			duration: UNDO_MS,
-			action: {
-				label: t`Undo`,
-				onPress: () => {
-					clearTimeout(timer);
+			prepare: async () => {
+				// Register the canonical reader before offering Undo, including summary-only calendar entry points.
+				await queryClient.fetchQuery({ ...applicationDetailQueryOptions(application.id), staleTime: 0 });
+				const request = await prepareRpc(client.applications.deleteTimelineEntry, {
+					id: application.id,
+					entryId: interview.id,
+				});
+				return {
+					send: request.send,
+					cancel: () => {
+						request.cancel();
+						releaseReminder(interview.id);
+					},
+				};
+			},
+			onReady: () => {
+				holdReminder(interview.id);
+				queryClient.setQueryData<Application>(key, (row) =>
+					row ? { ...row, activity: row.activity.filter((entry) => entry.id !== interview.id) } : row,
+				);
+				if (form && activeForm.current === form) onClose();
+			},
+			restore: reconcile,
+			failed,
+			commit: async (result) => {
+				try {
+					await result;
+					let message = t`Interview deleted`;
+					const target = { kind: "interview", applicationId: application.id, entryId: interview.id } as const;
+					try {
+						if (current()) await reminders.turnOff(target);
+					} catch {
+						message = t`Interview deleted. Couldn't cancel its device reminder.`;
+					}
+					showInterviewCancellation(application, interview, scope, message);
+				} finally {
 					releaseReminder(interview.id);
-					void invalidate();
-				},
+					if (current()) void invalidate();
+				}
 			},
 		});
 	};
@@ -393,7 +466,7 @@ function InterviewForm({ application, interview, onClose }: InterviewFormProps) 
 							<View style={{ flexDirection: "row", alignItems: "flex-end", gap: space.s2 }}>
 								<View style={{ flex: 1 }}>
 									<TextField
-										label={t`Name of person ${index + 1}`}
+										label={t`Name of person ${i18n.number(index + 1)}`}
 										editable={!pending}
 										value={person.name}
 										maxLength={200}
@@ -402,7 +475,7 @@ function InterviewForm({ application, interview, onClose }: InterviewFormProps) 
 								</View>
 								<IconButton
 									icon="x"
-									label={t`Remove person ${index + 1}`}
+									label={t`Remove person ${i18n.number(index + 1)}`}
 									disabled={pending}
 									onPress={() =>
 										set(

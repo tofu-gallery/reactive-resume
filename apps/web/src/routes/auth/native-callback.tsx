@@ -1,9 +1,12 @@
+import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { androidCallbackIntent } from "@/features/auth/native-callback";
+import { getPageTitle } from "@/libs/seo";
 
 export const Route = createFileRoute("/auth/native-callback")({
+	head: () => ({ meta: [{ title: getPageTitle(t`Return to the app`) }] }),
 	component: NativeCallbackPage,
 });
 
@@ -23,10 +26,10 @@ function NativeCallbackPage() {
 
 	return (
 		<div className="space-y-4 text-center">
-			<h1 className="text-xl font-semibold">
+			<h1 className="text-[30px] leading-9">
 				<Trans>Open the Reactive Resume app</Trans>
 			</h1>
-			<p className="text-muted-foreground text-sm">
+			<p className="text-sm text-ink-2">
 				<Trans>If the app did not open, try again on a device where it is installed.</Trans>
 			</p>
 			<a

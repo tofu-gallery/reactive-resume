@@ -1,16 +1,8 @@
-import type { Proposal } from "@reactive-resume/resume/proposals";
+import type { Proposal, ProposalApplicationResult, ProposalApplications } from "@reactive-resume/resume/proposals";
 import type { ResumeData } from "@reactive-resume/schema/resume/data";
 import { plural, t } from "@lingui/core/macro";
 import { produce } from "immer";
-import {
-	applyProposal,
-	applyTo,
-	getProposalState,
-	readTarget,
-	splitBlock,
-	splitBlocks,
-	writeTarget,
-} from "@reactive-resume/resume/proposals";
+import { applyResumeProposals, getProposalState, splitBlock, splitBlocks } from "@reactive-resume/resume/proposals";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { useResumeStore } from "@/features/resume/builder/draft";
 
@@ -41,41 +33,87 @@ export function markChange(before: string, after: string) {
 }
 
 /** The proposals still waiting on the user (not accepted, rejected or out of date), optionally in one section. */
-export const pendingProposals = (data: ResumeData, proposals: readonly Proposal[], sectionId?: string) =>
+export const pendingProposals = (
+	data: ResumeData,
+	proposals: readonly Proposal[],
+	sectionId?: string,
+	applications: ProposalApplications = {},
+) =>
 	proposals.filter(
 		(proposal) =>
 			(sectionId === undefined || proposal.target.sectionId === sectionId) &&
-			getProposalState(data, proposal) === "pending",
+			getProposalState(data, proposal, applications) === "pending",
 	);
 
 /**
  * The page as it would read with the proposals: each passage struck through, followed by its replacement,
  * highlighted. For the preview only; it's never saved.
  */
-export function markProposals(data: ResumeData, proposals: readonly Proposal[]): ResumeData {
-	const pending = pendingProposals(data, proposals);
+export function markProposals(
+	data: ResumeData,
+	proposals: readonly Proposal[],
+	applications: ProposalApplications = {},
+): ResumeData {
+	const pending = pendingProposals(data, proposals, undefined, applications);
 	if (pending.length === 0) return data;
 
 	return produce(data, (draft) => {
-		for (const proposal of pending) {
-			const value = readTarget(draft, proposal.target);
-			const marked = markChange(proposal.before, proposal.after);
-			const next = applyTo(value, { before: proposal.before, after: marked });
-			if (next !== undefined) writeTarget(draft, proposal.target, next);
-		}
+		applyResumeProposals(
+			draft,
+			pending.map((proposal) =>
+				proposal.snapshot ? proposal : { ...proposal, after: markChange(proposal.before, proposal.after) },
+			),
+			applications,
+		);
 	});
 }
 
-/** Applies proposals to the resume as one undo step; the toast's Undo takes them back, and they show as pending again. */
-export function acceptResumeProposals(proposals: readonly Proposal[]) {
-	useResumeStore.getState().updateResumeData(
-		(draft) => {
-			for (const proposal of proposals) applyProposal(draft, proposal);
-		},
-		{ newStep: true },
-	);
-	toast.add({
-		description: plural(proposals.length, { 1: "Edit applied", other: "# edits applied" }),
-		actionProps: { children: t`Undo`, onClick: () => useResumeStore.getState().undo() },
+/** The toast uses actual writes, with placement failures reported separately from successes. */
+export function proposalResultMessage({ applied, stale }: ProposalApplicationResult) {
+	return [
+		applied.length > 0 ? plural(applied.length, { 1: "Edit applied", other: "# edits applied" }) : "",
+		stale.length > 0
+			? plural(stale.length, {
+					one: "# edit couldn't be placed: its text changed. Ask again to redo it.",
+					other: "# edits couldn't be placed: their text changed. Ask again to redo them.",
+				})
+			: "",
+	]
+		.filter(Boolean)
+		.join(" · ");
+}
+
+/** Applies proposals as one undo step, returning only real writes for callers to record as accepted. */
+export function acceptResumeProposals(proposals: readonly Proposal[]): ProposalApplicationResult {
+	const store = useResumeStore.getState();
+	const resume = store.resume;
+	if (!resume || resume.isLocked) return { applied: [], stale: [] };
+	let result: ProposalApplicationResult = { applied: [], stale: [] };
+	const next = produce(resume.data, (draft) => {
+		result = applyResumeProposals(draft as ResumeData, proposals, store.proposalApplications);
 	});
+	if (result.applied.length > 0)
+		store.updateResumeData(
+			(draft) => {
+				Object.assign(draft, next);
+			},
+			{ newStep: true, applied: result.applied },
+		);
+	const accepted = useResumeStore.getState().resume?.data;
+	if (result.applied.length > 0 || result.stale.length > 0)
+		toast.add({
+			description: proposalResultMessage(result),
+			...(result.applied.length > 0
+				? {
+						actionProps: {
+							children: t`Undo`,
+							onClick: () => {
+								const current = useResumeStore.getState();
+								if (current.resume?.id === resume.id && current.resume.data === accepted) current.undo();
+							},
+						},
+					}
+				: {}),
+		});
+	return result;
 }

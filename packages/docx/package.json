@@ -16,7 +16,7 @@
 		"@reactive-resume/resume": "workspace:*",
 		"@reactive-resume/schema": "workspace:*",
 		"@reactive-resume/utils": "workspace:*",
-		"docx": "^9.14.0",
+		"docx": "^9.15.0",
 		"node-html-parser": "^9.0.5"
 	},
 	"devDependencies": {

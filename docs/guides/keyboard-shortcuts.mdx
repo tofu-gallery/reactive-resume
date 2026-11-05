@@ -1,34 +1,75 @@
 ---
 title: "Keyboard shortcuts"
-description: "The keyboard shortcuts in Reactive Resume: the command bar, Documents, the resume and letter editors, text formatting, the assistant and proposed edits."
+description: "The keyboard shortcuts in Reactive Resume: the command bar, Documents, Applications, the resume and letter editors, text formatting, the assistant and proposed edits."
 ---
 
 This page lists the keyboard shortcuts in Reactive Resume, grouped by where they work.
 
 On a Mac, use <kbd>⌘</kbd> (Command). On Windows and Linux, use <kbd>Ctrl</kbd> wherever this page shows <kbd>⌘</kbd>.
-The app's tooltips and buttons show the Mac symbols on every system.
+The shortcut help shows the keys for your platform.
+In the web editors on Windows and Linux, **Ctrl+J** keeps the browser’s Downloads command while the assistant is closed.
+Open **Assistant** with its button; **Ctrl+J** then closes it. On Mac, **⌘J** opens or closes it.
+The help list and button hint show the assistant shortcut only when it is available.
+
+## See shortcuts for the current page
+
+Press <kbd>?</kbd> outside a text field to open **Keyboard shortcuts**. You can also select **Keyboard shortcuts**
+in the web app's lower-right corner, a chat message box, the command bar, or an editor's document menu. In the native app,
+use the keyboard button in a header or the **Keyboard shortcuts** action in search. Help reads the commands
+registered on the current page, so the editor and Applications show their own actions. List commands require
+focus inside their list. Closing help returns focus to the control that opened it.
+
+Turn off **Single-character shortcuts** in help or **Settings → Preferences** if you use speech input or prefer to use the visible controls.
+This also turns off <kbd>?</kbd>; the keyboard button still opens help. The preference stays on this browser or
+device. On web it covers <kbd>N</kbd>, <kbd>/</kbd> and editor mode numbers as well. Native list commands require
+the list's explicit keyboard mode. Shortcuts with Command or Ctrl keep working.
+
+<img
+  src="/images/guides/career/keyboard-shortcuts.png"
+  alt="Keyboard shortcuts help opened over the fictional Cedar application, showing commands registered on Applications and the Single-character shortcuts switch."
+/>
+
+The help surface shows the current page's named commands and the control for turning character shortcuts off.
+Application row commands appear once, even when several rows are visible.
 
 <Note>
   Shortcuts made of a single key, such as <kbd>N</kbd> or <kbd>1</kbd>, don't work while you're typing in a text field,
-  so they never get in the way of your writing. Shortcuts with <kbd>⌘</kbd> work everywhere.
+  so they never get in the way of your writing. Shortcuts with <kbd>⌘</kbd> can work while typing. Help does not open
+  during text composition or over another dialog, menu or sheet. Opening help pauses background app shortcuts. In the
+  native app, sheets and alerts pause background app shortcuts. Native <kbd>?</kbd> requires an app build with bare-key
+  support; older binaries keep the visible help entry.
 </Note>
 
 ## Everywhere
 
-| Shortcut                                    | What it does                                                    |
-| ------------------------------------------- | --------------------------------------------------------------- |
-| <kbd>⌘</kbd> <kbd>K</kbd>                   | Open or close the [command bar](/guides/using-the-command-bar). |
-| <kbd>Esc</kbd>                              | Close the command bar.                                          |
-| <kbd>↑</kbd> <kbd>↓</kbd>, <kbd>Enter</kbd> | In the command bar, move between rows and run the selected one. |
+| Shortcut                                    | What it does                                                          |
+| ------------------------------------------- | --------------------------------------------------------------------- |
+| <kbd>?</kbd>                                | Open shortcut help outside text fields; on web, press again to close. |
+| <kbd>⌘</kbd> <kbd>K</kbd>                   | Open or close the [command bar](/guides/using-the-command-bar).       |
+| <kbd>Esc</kbd>                              | Close the command bar.                                                |
+| <kbd>Backspace</kbd>                        | In an empty command-bar search box, go back one list.                 |
+| <kbd>↑</kbd> <kbd>↓</kbd>, <kbd>Enter</kbd> | In the command bar, move between rows and run the selected one.       |
 
-## Documents, Applications and Settings
+## Documents, Applications, Career and Settings
 
-| Shortcut         | What it does                                        |
-| ---------------- | --------------------------------------------------- |
-| <kbd>N</kbd>     | Open the **New document** dialog.                   |
-| <kbd>/</kbd>     | Jump to the search box on **Documents**.            |
-| <kbd>Enter</kbd> | Save a document name while renaming it on its card. |
-| <kbd>Esc</kbd>   | Cancel renaming a document on its card.             |
+| Shortcut         | What it does                                                                     |
+| ---------------- | -------------------------------------------------------------------------------- |
+| <kbd>N</kbd>     | Open **New** for the section you're in.                                          |
+| <kbd>/</kbd>     | Jump to the search box on **Documents** or **Applications** in the web app.      |
+| <kbd>Enter</kbd> | In the **Documents** search box, open the first result.                          |
+| <kbd>↓</kbd>     | In the **Documents** search box, move to the first result.                       |
+| <kbd>Esc</kbd>   | In the **Documents** search box, clear the search; press again to leave the box. |
+| <kbd>Enter</kbd> | Save a document name while renaming it on its card.                              |
+| <kbd>Esc</kbd>   | Cancel renaming a document on its card.                                          |
+| <kbd>Esc</kbd>   | Clear the Documents selection when focus is outside a text field.                |
+
+In the native mobile app, use <kbd>⌘</kbd> <kbd>F</kbd> on an iPad hardware keyboard or <kbd>Ctrl</kbd> <kbd>F</kbd>
+on Android to open or refocus the current collection's search. Your filter stays in place. These native search
+shortcuts pause while a sheet or alert is open.
+
+The Applications list also offers [keyboard triage](/guides/tracking-job-applications): focus a row on web,
+or turn on **Keyboard triage** in the native app. Shortcut help includes these registered row commands.
+Stage moves retain Undo and conflict protection.
 
 ## Resume editor
 
@@ -37,12 +78,12 @@ The app's tooltips and buttons show the Mac symbols on every system.
 | <kbd>1</kbd>                                          | Switch to **Write**.                                                                                              |
 | <kbd>2</kbd>                                          | Switch to **Design**.                                                                                             |
 | <kbd>3</kbd>                                          | Switch to **Check**.                                                                                              |
+| <kbd>4</kbd>                                          | Switch to **Share**.                                                                                              |
 | <kbd>⌘</kbd> <kbd>Z</kbd>                             | Undo your last change.                                                                                            |
 | <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>Z</kbd>                | Redo.                                                                                                             |
 | <kbd>Ctrl</kbd> <kbd>Y</kbd>                          | Redo (Windows and Linux).                                                                                         |
 | <kbd>⌘</kbd> <kbd>P</kbd>                             | Download the PDF. This replaces the browser's print dialog; to print, use **Print** in the document menu.         |
-| <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>S</kbd>                | Open **Share & export** on the **Link** tab.                                                                      |
-| <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>E</kbd>                | Open **Share & export** on the **Download** tab.                                                                  |
+| <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>E</kbd>                | Open **Download & history** on the **Download** tab.                                                              |
 | <kbd>⌘</kbd> <kbd>J</kbd>                             | Open or close the assistant.                                                                                      |
 | <kbd>⌘</kbd> <kbd>0</kbd>                             | Fit the page to the window.                                                                                       |
 | <kbd>⌘</kbd> <kbd>S</kbd>                             | Nothing to do: a message reminds you that changes are saved automatically.                                        |
@@ -61,7 +102,7 @@ The download and share shortcuts do nothing while you're offline, because they n
 | <kbd>1</kbd>                           | Switch to **Write**.                                                                     |
 | <kbd>2</kbd>                           | Switch to **Design**.                                                                    |
 | <kbd>⌘</kbd> <kbd>P</kbd>              | Download the PDF.                                                                        |
-| <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>E</kbd> | Open **Share & export** on the **Download** tab.                                         |
+| <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>E</kbd> | Open **Download & history** on the **Download** tab.                                     |
 | <kbd>⌘</kbd> <kbd>J</kbd>              | Open or close the assistant.                                                             |
 | <kbd>⌘</kbd> <kbd>0</kbd>              | Fit the page to the window.                                                              |
 | <kbd>⌘</kbd> <kbd>S</kbd>              | Send any unsaved edits right away, with a reminder that changes are saved automatically. |
@@ -75,6 +116,7 @@ These work in rich text boxes, such as a summary or an entry's description. See
 | -------------------------------------- | ------------------------------------------ |
 | <kbd>⌘</kbd> <kbd>B</kbd>              | Bold.                                      |
 | <kbd>⌘</kbd> <kbd>I</kbd>              | Italic.                                    |
+| <kbd>⌘</kbd> <kbd>U</kbd>              | Underline.                                 |
 | <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>8</kbd> | Bulleted list.                             |
 | <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>7</kbd> | Numbered list.                             |
 | `- ` or `* ` at the start of a line    | Start a bulleted list.                     |
@@ -106,6 +148,6 @@ When the assistant or Check proposes edits, select an edit in the list to focus 
 ## Related guides
 
 - [Using the command bar](/guides/using-the-command-bar): search, jump anywhere and ask the assistant from one box.
-- [Editor overview](/guides/editor-overview): the editor bar and the three modes these shortcuts switch between.
+- [Editor overview](/guides/editor-overview): the editor bar and the four modes these shortcuts switch between.
 - [Undoing changes and version history](/guides/undoing-changes-and-version-history): undo, redo and restoring
   earlier versions.

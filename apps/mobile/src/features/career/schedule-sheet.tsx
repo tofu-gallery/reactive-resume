@@ -6,15 +6,18 @@ import DateTimePicker from "@react-native-community/datetimepicker";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Platform, View } from "react-native";
+import { defaultFollowUpNote } from "@reactive-resume/schema/applications/follow-up";
 import { careerScheduleInputSchema } from "@reactive-resume/schema/career";
 import { fromZonedDateTime } from "@reactive-resume/utils/timezone";
 import { client, useCareerAction, useCareerQueries, useCareerTime, useNow } from "./hooks";
-import { collectInterviews, nextCareerRun, prepareRunAt, rollForward, toZoned } from "./scheduling";
+import { collectInterviews, firstLeadAhead, nextCareerRun, prepareRunAt, rollForward, toZoned } from "./scheduling";
 import { EditorSheet, LoadState, SwitchRow } from "./shared";
 import { orpc } from "@/api/client";
-import { useSession } from "@/auth/session";
+import { useFlags } from "@/api/flags";
+import { getAccountScope, useSession } from "@/auth/session";
 import { AIProviderSetupSheet, useHasAIProvider } from "@/features/ai/providers";
-import { useApplications } from "@/features/applications/queries";
+import { SetUpWebAccess } from "@/features/ai/web-access";
+import { useApplication, useApplications } from "@/features/applications/queries";
 import { Banner, Button, SelectSheet, Sheet, Text, TextField, useTheme } from "@/ui";
 
 type Input = RouterInput["career"]["saveSchedule"];
@@ -42,7 +45,7 @@ export function ScheduleSheet(props: ScheduleSheetProps) {
 		enabled: session.status === "signed-in",
 		queryKey: [...orpc.webAccess.status.key(), session.server],
 	});
-	const flags = useQuery({ ...orpc.flags.get.queryOptions(), queryKey: [...orpc.flags.get.key(), session.server] });
+	const flags = useFlags();
 	const queries = [account.profile, career.profile, applications, web, flags];
 	const unavailable = queries.find((query) => query.isError || query.isPending);
 	return unavailable ? (
@@ -52,12 +55,13 @@ export function ScheduleSheet(props: ScheduleSheetProps) {
 	) : account.profile.data && career.profile.data && applications.data && web.data && flags.data ? (
 		<ScheduleForm
 			{...props}
-			key={session.server}
-			timezone={account.timeZone}
+			key={getAccountScope() ?? session.server}
+			timezone={props.schedule?.timezone ?? account.timeZone}
 			locale={account.locale}
 			profile={career.profile.data}
 			applications={applications.data}
 			search={web.data.search}
+			reader={web.data.provider}
 			available={flags.data.careerSchedulingEnabled ?? false}
 			smtp={flags.data.smtpEnabled}
 			verified={account.profile.data.emailVerified}
@@ -72,11 +76,13 @@ type FormProps = ScheduleSheetProps & {
 	profile: NonNullable<ReturnType<typeof useCareerQueries>["profile"]["data"]>;
 	applications: NonNullable<ReturnType<typeof useApplications>["data"]>;
 	search: boolean;
+	reader: string | null;
 	available: boolean;
 	smtp: boolean;
 	verified: boolean;
 	ai: ReturnType<typeof useHasAIProvider>;
 };
+/** Untouched reminder notes wait for selected detail; authored blanks survive failed reads. */
 function ScheduleForm({
 	schedule,
 	kind: initialKind,
@@ -87,6 +93,7 @@ function ScheduleForm({
 	profile,
 	applications,
 	search,
+	reader,
 	available,
 	smtp,
 	verified,
@@ -105,26 +112,40 @@ function ScheduleForm({
 			: nextCareerRun(new Date(), 1, timezone);
 		return {
 			kind: (schedule?.kind as Input["kind"]) ?? initialKind,
-			query: schedule?.query || [...profile.targetRoles, ...profile.locations].join(" · "),
+			query:
+				schedule?.kind === "discovery" ? schedule.query : [...profile.targetRoles, ...profile.locations].join(" · "),
+			followUpNote: schedule?.kind === "follow-up" ? schedule.query : null,
 			every: String(schedule?.intervalDays ?? 1),
 			...toZoned(at, timezone),
 			time: schedule ? toZoned(at, timezone).time : "08:00",
 			interviewId: schedule?.interviewId ?? upcoming[0]?.interview.id ?? "",
 			applicationId: schedule?.applicationId ?? open[0]?.id ?? "",
-			lead: (schedule?.lead as NonNullable<Input["lead"]>) ?? "24h",
+			lead: (schedule?.lead as NonNullable<Input["lead"]>) ?? firstLeadAhead(upcoming[0]?.start, timezone),
 			aiProviderId: schedule?.aiProviderId ?? ai.defaultProvider?.id ?? "",
 			enabled: schedule?.enabled ?? true,
 			email: schedule?.email ?? false,
 		};
 	});
 	const [draft, setDraft] = useState(initial);
+	const prefill = draft.kind === "follow-up" && draft.followUpNote === null && Boolean(draft.applicationId);
+	const detail = useApplication(prefill ? draft.applicationId : "");
+	const selectedDetail = detail.data?.id === draft.applicationId ? detail.data : undefined;
+	const prefillBlocked = prefill && (detail.isPending || detail.isFetching || !selectedDetail);
+	const followUpNote = draft.followUpNote ?? (selectedDetail ? defaultFollowUpNote(selectedDetail) : "");
+	// A lead the person picked stays; until then it follows the chosen interview (web schedule sheet).
+	const [leadChosen, setLeadChosen] = useState(false);
 	const [picker, setPicker] = useState<"date" | "time" | null>(null);
 	const [setup, setSetup] = useState(false);
 	const [validation, setValidation] = useState<string>();
 	const action = useCareerAction();
 	const set = (patch: Partial<typeof draft>) => setDraft((current) => ({ ...current, ...patch }));
 	const interview = upcoming.find((row) => row.interview.id === draft.interviewId);
-	const at = fromZonedDateTime(draft.date, draft.time, timezone);
+	const unchangedFollowUp =
+		schedule?.kind === "follow-up" &&
+		draft.kind === "follow-up" &&
+		draft.date === initial.date &&
+		draft.time === initial.time;
+	const at = unchangedFollowUp ? new Date(schedule.nextRunAt) : fromZonedDateTime(draft.date, draft.time, timezone);
 	const runAt = draft.kind === "prepare" && interview ? prepareRunAt(interview.start, draft.lead, timezone) : at;
 	const provider = ai.usableProviders.find((row) => row.id === draft.aiProviderId) ?? ai.defaultProvider;
 	const blocked =
@@ -133,17 +154,17 @@ function ScheduleForm({
 			? !interview || !ai.hasAIProvider
 			: draft.kind === "follow-up"
 				? !open.some((row) => row.id === draft.applicationId)
-				: !search);
+				: draft.enabled && !search);
 	const save = () => {
 		if (draft.kind === "discovery" && draft.query.trim().length < 3)
 			return setValidation(t`Add a role or company to look for.`);
-		if (blocked) return;
+		if (blocked || prefillBlocked) return;
 		if (!runAt) return setValidation(t`This date or time does not exist in your timezone. Choose another time.`);
-		if (draft.kind !== "prepare" && runAt <= now) return setValidation(t`Pick a time after now.`);
+		if (draft.kind !== "prepare" && !unchangedFollowUp && runAt <= now) return setValidation(t`Pick a time after now.`);
 		const input: Input = {
 			...(schedule ? { id: schedule.id } : {}),
 			kind: draft.kind,
-			query: draft.kind === "discovery" ? draft.query.trim() : "",
+			query: draft.kind === "follow-up" ? followUpNote.trim() : draft.kind === "discovery" ? draft.query.trim() : "",
 			applicationId:
 				draft.kind === "prepare"
 					? (interview?.application.id ?? null)
@@ -179,7 +200,7 @@ function ScheduleForm({
 					disabled={!!schedule || action.pending}
 					options={[
 						{ value: "discovery", label: t`Find roles` },
-						{ value: "prepare", label: t`Prepare` },
+						{ value: "prepare", label: t`Interview prep` },
 						{ value: "follow-up", label: t`Remind me` },
 					]}
 				/>
@@ -192,6 +213,13 @@ function ScheduleForm({
 				<Text color="ink3">{t`Times are shown in ${timezone}. Change timezone in Settings → Preferences.`}</Text>
 				{draft.kind === "discovery" ? (
 					<>
+						{!search && (
+							<Banner
+								tone="warn"
+								message={t`Finding roles needs a working web search service. Set it up first, or save jobs manually in Applications.`}
+							/>
+						)}
+						{!search && <SetUpWebAccess />}
 						<TextField
 							label={t`Look for`}
 							value={draft.query}
@@ -208,15 +236,30 @@ function ScheduleForm({
 								{ value: "7", label: t`Every week` },
 							]}
 						/>
-						<Text color="ink3">{t`Uses web search set up in Settings. Results wait in Today. Applications and documents are never created for you.`}</Text>
-						{!search ? <Banner tone="warn" message={t`Set up web search in Settings to find roles.`} /> : null}
+						<Text color="ink3">{t`Uses web search set up in Settings. Only this query and search countries are sent; your resume and Knowledge are not sent to search. The service may charge. Results wait in Today; applications and documents are never created for you.`}</Text>
+						<Text color="ink3">
+							{reader
+								? t`Found posting links are read by Reactive Resume and, when needed, ${reader} and the sites being read. The reader may charge.`
+								: t`Found posting links are read by Reactive Resume and the sites being read.`}
+						</Text>
+						<Text color="ink3">{t`AI is optional. Review target roles in Knowledge, wait for Saved, then create a new schedule. Existing schedules keep this query until you edit and save it.`}</Text>
+						<Text color="ink3">{t`Repeats at this local time in the displayed timezone across clock changes. A skipped clock time moves forward. Missed runs combine into one search. Results and failures appear in Today; delivery depends on the server runner.`}</Text>
+						{draft.enabled && !search ? (
+							<Banner tone="warn" message={t`Set up web search in Settings to find roles.`} />
+						) : null}
 					</>
 				) : draft.kind === "prepare" ? (
 					<>
 						<SelectSheet
 							label={t`Interview`}
 							value={draft.interviewId}
-							onChange={(interviewId) => set({ interviewId })}
+							onChange={(interviewId) => {
+								const chosen = upcoming.find((row) => row.interview.id === interviewId);
+								set({
+									interviewId,
+									...(leadChosen || schedule?.lead || !chosen ? {} : { lead: firstLeadAhead(chosen.start, timezone) }),
+								});
+							}}
 							options={upcoming.map((row) => ({
 								value: row.interview.id,
 								label: `${row.application.company} · ${new Intl.DateTimeFormat(locale, { timeZone: timezone, dateStyle: "short", timeStyle: "short" }).format(row.start)}`,
@@ -226,7 +269,10 @@ function ScheduleForm({
 						<SelectSheet
 							label={t`Prepare a briefing`}
 							value={draft.lead}
-							onChange={(lead) => set({ lead })}
+							onChange={(lead) => {
+								setLeadChosen(true);
+								set({ lead });
+							}}
 							options={[
 								{ value: "24h", label: t`24 hours before` },
 								{ value: "2h", label: t`2 hours before` },
@@ -258,17 +304,26 @@ function ScheduleForm({
 							onChange={(aiProviderId) => set({ aiProviderId })}
 							options={ai.usableProviders.map((row) => ({ value: row.id, label: row.label }))}
 						/>
-						<Button variant="secondary" label={t`Connect AI provider`} onPress={() => setSetup(true)} />
-						<Text color="ink3">{t`Sends this application and enabled Knowledge to this connection. Your provider may charge. If it becomes unavailable, scheduled work can use your default usable connection.`}</Text>
+						{!ai.isUnavailable && (
+							<Button variant="secondary" label={t`Connect AI provider`} onPress={() => setSetup(true)} />
+						)}
+						<Text color="ink3">{t`Sends this application and enabled Knowledge to this connection. Your provider may charge. Scheduled work never switches to another connection automatically.`}</Text>
 					</>
 				) : (
 					<>
 						<SelectSheet
 							label={t`Application`}
+							disabled={!!schedule}
 							value={draft.applicationId}
 							onChange={(applicationId) => set({ applicationId })}
 							options={open.map((row) => ({ value: row.id, label: `${row.company} · ${row.role}` }))}
 						/>
+						<TextField
+							label={t`Follow-up note`}
+							value={followUpNote}
+							onChangeText={(followUpNote) => set({ followUpNote })}
+						/>
+						{prefill ? <LoadState query={detail} /> : null}
 						{!open.length ? <Banner tone="warn" message={t`Add an application first.`} /> : null}
 					</>
 				)}
@@ -316,7 +371,7 @@ function ScheduleForm({
 				/>
 				<Text color="ink3">{t`Always appears in Today. Email requires a verified address and server mail setup. No push notifications are sent.`}</Text>
 				{validation || action.error ? <Banner tone="danger" message={validation ?? action.error ?? ""} /> : null}
-				<Button label={t`Save schedule`} loading={action.pending} disabled={blocked} onPress={save} />
+				<Button label={t`Save schedule`} loading={action.pending} disabled={blocked || prefillBlocked} onPress={save} />
 				{schedule ? (
 					<Button
 						variant="danger"

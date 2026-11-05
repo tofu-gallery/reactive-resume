@@ -20,6 +20,7 @@
  * - Each account (sign-in) gets a new identity number. Requests carry it; a 401 retry or refresh for an account that
  *   is no longer current fails instead of borrowing the new account's token.
  */
+import { i18n } from "@lingui/core";
 import * as AuthSession from "expo-auth-session";
 import * as Network from "expo-network";
 import * as SecureStore from "expo-secure-store";
@@ -227,6 +228,8 @@ export function restoreSession(): Promise<void> {
 
 async function readStoredSession(): Promise<void> {
 	try {
+		const { clearAccountExportCache } = await import("@/features/settings/export-cache");
+		clearAccountExportCache();
 		const storedServer = await SecureStore.getItemAsync(serverKey);
 		const server = storedServer && isAllowedServer(storedServer) ? storedServer : DEFAULT_SERVER;
 		const stored = await SecureStore.getItemAsync(tokensKey(server));
@@ -247,21 +250,27 @@ async function readStoredSession(): Promise<void> {
 	}
 }
 
-/** Stores tokens for the current account (a refresh); null deletes them and signs out without revoking. */
-export function saveTokens(next: Tokens | null): Promise<void> {
+/** Development previews may install a local fixture only when no real account is present. */
+export async function installDevelopmentSession(origin: string): Promise<void> {
+	if (!__DEV__ || !["localhost", "127.0.0.1", "[::1]", "10.0.2.2"].includes(new URL(origin).hostname))
+		throw new Error("Preview sessions require a local development server.");
+	if (new URL(origin).origin !== origin) throw new Error("Expected a development server origin.");
+	await restoreSession();
 	return transition(async () => {
-		const { server } = session;
-		if (next) await SecureStore.setItemAsync(tokensKey(server), JSON.stringify(next));
-		else await SecureStore.deleteItemAsync(tokensKey(server));
+		if (
+			session.status !== "signed-out" ||
+			tokens ||
+			accountScope ||
+			(await SecureStore.getItemAsync(tokensKey(origin)))
+		)
+			throw new Error("Sign out before opening a development preview.");
+		const next = { accessToken: `fixture.${btoa(JSON.stringify({ sub: "rr-M3T4-preview" }))}.fixture` };
+		await SecureStore.setItemAsync(tokensKey(origin), JSON.stringify(next));
+		await SecureStore.setItemAsync(serverKey, origin);
 		tokens = next;
-		if (next) {
-			accountScope = scopeOf(server, next.accessToken) ?? accountScope;
-			setSession({ ...session, status: "signed-in" });
-		} else {
-			accountScope = null;
-			changeIdentity();
-			setSession({ ...session, status: "signed-out" });
-		}
+		accountScope = scopeOf(origin, next.accessToken);
+		changeIdentity();
+		setSession({ status: "signed-in", server: origin });
 	});
 }
 
@@ -287,6 +296,8 @@ export async function signIn(server: string): Promise<boolean> {
 			await revoke(origin, next.refreshToken);
 			return false;
 		}
+		const { clearAccountExportCache } = await import("@/features/settings/export-cache");
+		clearAccountExportCache();
 		await SecureStore.setItemAsync(tokensKey(origin), JSON.stringify(next));
 		await SecureStore.setItemAsync(serverKey, origin);
 		await SecureStore.deleteItemAsync(refreshMarkerKey(origin));
@@ -315,7 +326,9 @@ async function authorize(origin: string, attempt: number): Promise<Tokens | null
 		redirectUri: redirectUri(origin),
 		scopes,
 		usePKCE: true,
-		extraParams: { resource: origin },
+		// OpenID's `ui_locales`: the browser's sign-in pages open in the app's language, and a new account (with its
+		// verification email) starts in it. Servers that don't read it ignore it.
+		extraParams: { resource: origin, ui_locales: i18n.locale },
 	});
 	await request.makeAuthUrlAsync(discovery);
 	// This attempt, bound to its state: only a redirect carrying the same state (and issuer) may use its verifier.
@@ -436,6 +449,10 @@ export function signOut(): Promise<void> {
 			const { clearStoredThumbnails } = await import("@/features/documents/thumbnail-store");
 			await clearStoredThumbnails();
 		});
+		await attempt(async () => {
+			const { clearAccountExportCache } = await import("@/features/settings/export-cache");
+			clearAccountExportCache();
+		});
 		const { scope } = departing;
 		if (scope) {
 			await attempt(async () => {
@@ -444,7 +461,10 @@ export function signOut(): Promise<void> {
 				clearDraftsFor(scope);
 			});
 			await attempt(() => {
-				const prefixes = scopedStoragePrefixes.map((prefix) => `${prefix}${scope}:`);
+				const prefixes = [
+					...scopedStoragePrefixes.map((prefix) => `${prefix}${scope}:`),
+					`letter-draft:${departing.server}:${scope}:`,
+				];
 				for (const key of Storage.getAllKeysSync())
 					if (prefixes.some((prefix) => key.startsWith(prefix))) Storage.removeItemSync(key);
 			});
@@ -553,7 +573,12 @@ async function expire(account: number): Promise<void> {
 	tokens = null;
 	changeIdentity();
 	setSession({ status: "expired", server });
-	await retireTokens(server);
+	try {
+		const { clearAccountExportCache } = await import("@/features/settings/export-cache");
+		clearAccountExportCache();
+	} finally {
+		await retireTokens(server);
+	}
 }
 
 /**

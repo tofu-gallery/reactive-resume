@@ -3,15 +3,23 @@ import type { Locale } from "@reactive-resume/utils/locale";
 import { useLingui } from "@lingui/react/macro";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { DevSettings, View } from "react-native";
-import { localeSchema } from "@reactive-resume/utils/locale";
+import { DevSettings, View, useWindowDimensions } from "react-native";
+import { isLocale } from "@reactive-resume/utils/locale";
+import { filterOptions } from "@reactive-resume/utils/string";
 import { timezoneSchema } from "@reactive-resume/utils/timezone";
 import { client, orpc } from "@/api/client";
 import { SettingsGroup, SettingsPage } from "@/features/settings/layout";
-import { localeMap } from "@/features/settings/locale-names";
+import { getLocaleOptions } from "@/features/settings/locale-names";
 import { useProfile } from "@/features/settings/queries";
-import { getDeviceLocale, getLocalePreference, setLocalePreference } from "@/i18n";
+import {
+	getDeviceLocale,
+	getLocalePreference,
+	hasLocalePreference,
+	selectableLocales,
+	setLocalePreference,
+} from "@/i18n";
 import { timeZones } from "@/lib/timezones";
+import { CharacterShortcutSetting } from "@/shell/shortcut-help";
 import {
 	Banner,
 	Button,
@@ -40,9 +48,15 @@ export default function PreferencesScreen() {
 		haptics.selection();
 	};
 	const { space } = useTheme();
+	const { fontScale } = useWindowDimensions();
 	const profile = useProfile();
 	const queryClient = useQueryClient();
 	const [locale, setLocale] = useState(getLocalePreference);
+	const selectedLocale = hasLocalePreference()
+		? locale
+		: isLocale(profile.data?.locale) && selectableLocales.includes(profile.data.locale)
+			? profile.data.locale
+			: null;
 	const [picker, setPicker] = useState<"language" | "timezone" | null>(null);
 	const [search, setSearch] = useState("");
 	const [zoneLimit, setZoneLimit] = useState(40);
@@ -61,11 +75,9 @@ export default function PreferencesScreen() {
 		},
 		onError: () => showToast({ message: t`Couldn't save the timezone. Try again.` }),
 	});
-	const languageName = (value: Locale) => i18n._(localeMap[value]);
-	const languages = localeSchema.options.map((value) => ({ value, label: languageName(value) }));
-	const matchingLanguages = languages.filter(({ value, label }) =>
-		`${value} ${label}`.toLowerCase().includes(search.trim().toLowerCase()),
-	);
+	const languages = getLocaleOptions(i18n, selectableLocales);
+	const languageName = (value: Locale) => languages.find((option) => option.value === value)?.label ?? value;
+	const matchingLanguages = filterOptions(languages, search);
 	const zones = [
 		...new Set(["UTC", deviceTimezone, ...(profile.data ? [profile.data.timezone] : []), ...timeZones]),
 	].sort();
@@ -94,6 +106,7 @@ export default function PreferencesScreen() {
 			<Text variant="caption" color="ink2">{t`Appearance`}</Text>
 			<Segmented<ThemePreference>
 				label={t`Theme`}
+				orientation={fontScale > 1.3 ? "vertical" : "horizontal"}
 				value={theme}
 				onChange={(value) => {
 					try {
@@ -109,6 +122,9 @@ export default function PreferencesScreen() {
 				]}
 			/>
 			<Text variant="callout" color="ink3">{t`Resumes always render on white paper, whatever the theme.`}</Text>
+			<SettingsGroup title={t`Keyboard shortcuts`}>
+				<CharacterShortcutSetting />
+			</SettingsGroup>
 			<SettingsGroup title={t`Feedback`} note={t`Applies to this device only.`}>
 				<ListRow
 					title={t`Haptic feedback`}
@@ -117,10 +133,13 @@ export default function PreferencesScreen() {
 					trailing={<Switch label={t`Haptic feedback`} value={hapticsOn} onValueChange={toggleHaptics} />}
 				/>
 			</SettingsGroup>
-			<SettingsGroup title={t`Language`} note={t`Interface only. Each resume sets its own language in Design.`}>
+			<SettingsGroup
+				title={t`Language`}
+				note={`${t`Interface only. Each resume sets its own language in Design.`} ${t`Account emails use it too.`}`}
+			>
 				<ListRow
 					title={t`Language`}
-					subtitle={locale ? languageName(locale) : t`System`}
+					subtitle={selectedLocale ? languageName(selectedLocale) : t`System`}
 					leading="translate"
 					chevron
 					onPress={() => openPicker("language")}
@@ -167,16 +186,16 @@ export default function PreferencesScreen() {
 						<ListRow
 							title={t`System`}
 							subtitle={languageName(getDeviceLocale())}
-							selected={locale === null}
+							selected={selectedLocale === null}
 							disabled={changingLanguage}
 							onPress={() => void chooseLanguage(null)}
 						/>
-						{matchingLanguages.map(({ value, label }) => (
+						{matchingLanguages.map(({ value, label, description }) => (
 							<ListRow
 								key={value}
 								title={label}
-								subtitle={value}
-								selected={locale === value}
+								subtitle={description}
+								selected={selectedLocale === value}
 								disabled={changingLanguage}
 								onPress={() => void chooseLanguage(value)}
 							/>

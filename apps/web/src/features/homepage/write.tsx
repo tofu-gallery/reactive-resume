@@ -52,7 +52,7 @@ export function Write() {
 			data-scene={SCENE.write}
 			data-pin
 			aria-labelledby="write-title"
-			className="relative h-[280vh] motion-reduce:h-svh min-[900px]:h-[330vh]"
+			className="relative h-[280vh] min-[900px]:h-[330vh]"
 		>
 			<div
 				className="sticky top-0 h-svh overflow-clip [--card:calc(1-var(--cl))] [--chip:var(--cl)] [--cl:clamp(0,(var(--p)-.8)/.08,1)] [--cm:clamp(0,(var(--p)-.36)/.08,1)] [--in:clamp(0,var(--p)/.12,1)] [--oc:var(--cl)] [--st:clamp(0,(var(--p)-.48)/.08,1)] [--ta:clamp(0,(var(--p)-.12)/.22,1)] [--ti:clamp(0,(var(--p)-.56)/.2,1)]"
@@ -62,6 +62,7 @@ export function Write() {
 				<Doodle
 					name="eraser"
 					wipe="clamp(0, (var(--p) - .02) / .2, 1)"
+					sizes="10vw"
 					className="start-[7vw] top-[36vh] w-[10vw] translate-y-[calc(var(--p)*-50px)] rotate-[-10deg] max-[900px]:hidden"
 				/>
 
@@ -69,8 +70,12 @@ export function Write() {
 					id="write-title"
 					className="font-anybody absolute start-(--gutter) top-[10vh] max-w-[90vw] text-[10vw] leading-[.95] font-light tracking-[-.03em] text-balance text-ink min-[900px]:top-[11vh] min-[900px]:max-w-[34vw] min-[900px]:text-[clamp(48px,4.5vw,80px)]"
 				>
-					{t`Write your professional resume`}
-					<span className="text-accent">.</span>
+					{/* One display word like the other scenes; the keyword sentence stays in the heading for search. */}
+					<span className="sr-only">{t`Write your professional resume`}</span>
+					<span aria-hidden="true">
+						{t({ message: "Write", comment: "Homepage scene title, one word followed by a full stop" })}
+						<span className="text-accent">.</span>
+					</span>
 				</h2>
 
 				<SceneCaption
@@ -99,7 +104,7 @@ export function Write() {
 								{t`Experience`}
 							</span>
 							<div className="flex items-baseline justify-between gap-[1em]">
-								<b className="font-display text-[1.55em] leading-[1.1] font-medium">{t`Lead Product Designer`}</b>
+								<b className="font-display text-[1.55em] leading-[1.1] font-normal">{t`Lead Product Designer`}</b>
 								<span className="font-martian text-[.72em] whitespace-nowrap text-[oklch(0.5_0.01_95)]">
 									{t`2021 – Present`}
 								</span>
@@ -201,7 +206,7 @@ export function Write() {
 						</ul>
 						<div className="col-start-1 mt-[1.2em] flex [translate:0_calc(-1*var(--row-off))] flex-col gap-[.25em]">
 							<div className="flex items-baseline justify-between gap-[1em]">
-								<b className="font-display text-[1.55em] leading-[1.1] font-medium">{t`Product Designer`}</b>
+								<b className="font-display text-[1.55em] leading-[1.1] font-normal">{t`Product Designer`}</b>
 								<span className="font-martian text-[.72em] whitespace-nowrap text-[oklch(0.5_0.01_95)]">{t`2017 – 2021`}</span>
 							</div>
 							<span className="text-[oklch(0.45_0.01_95)]">{t`Parcel & Co. · Porto`}</span>

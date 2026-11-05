@@ -82,11 +82,47 @@ export function localizedUrl(pageUrl: string, locale?: Locale) {
 // Lingui's pseudo-locale (lingui.config.ts): accented, stretched English for testing layouts, not a translation.
 const pseudoLocale: Locale = "zu-ZA";
 
-/** hreflang alternates for a page: every real locale plus x-default. "sr-SP" isn't a valid region, so it's "sr". */
+export const supportedLocales: readonly Locale[] = localeSchema.options.filter((locale) => locale !== pseudoLocale);
+
+/** Follow ordered device/browser preferences without ever selecting the development pseudo-locale. */
+export function getPreferredLocale(languages: readonly string[]): Locale {
+	for (const language of languages) {
+		const tag = language.toLowerCase();
+		const exact = supportedLocales.find((locale) => locale.toLowerCase() === tag);
+		if (exact) return exact;
+		const sameLanguage = supportedLocales.find((locale) => locale.split("-")[0] === tag.split("-")[0]);
+		if (sameLanguage) return sameLanguage;
+	}
+	return defaultLocale;
+}
+
+/** A locale as a BCP 47 language tag for hreflang and `inLanguage`: "sr-SP" isn't a valid region, so it's "sr". */
+export const languageTag = (locale: Locale) => (locale === "sr-SP" ? "sr" : locale);
+
+const nameVariants: Record<string, string> = { "zh-CN": "zh-Hans", "zh-TW": "zh-Hant" };
+const sharedLanguages = new Set(["en", "pt", "zh"]);
+// Chromium lacks locale data for these; keep their CLDR names instead of falling back to English.
+const unlistedNames: Record<string, string> = { km: "ខ្មែរ", ne: "नेपाली", or: "ଓଡ଼ିଆ", sq: "shqip" };
+
+/** A language's name, in its own language by default; exact names distinguish supported regions and scripts. */
+export function getLanguageName(locale: string, displayLocale = locale, exact = true) {
+	const language = locale.split("-")[0] ?? locale;
+	const code = exact && sharedLanguages.has(language) ? (nameVariants[locale] ?? locale) : language;
+	const name =
+		(displayLocale === locale && Intl.DisplayNames.supportedLocalesOf([locale]).length === 0
+			? unlistedNames[language]
+			: undefined) ??
+		new Intl.DisplayNames([displayLocale], { type: "language" }).of(code) ??
+		locale;
+	return name.charAt(0).toLocaleUpperCase(displayLocale) + name.slice(1);
+}
+
+/** hreflang alternates for a page: every real locale plus x-default. */
 export function getLocaleAlternates(pageUrl: string) {
-	const alternates = localeSchema.options
-		.filter((locale) => locale !== pseudoLocale)
-		.map((locale) => ({ hreflang: locale === "sr-SP" ? "sr" : locale, href: localizedUrl(pageUrl, locale) }));
+	const alternates = supportedLocales.map((locale) => ({
+		hreflang: languageTag(locale),
+		href: localizedUrl(pageUrl, locale),
+	}));
 	return [...alternates, { hreflang: "x-default", href: localizedUrl(pageUrl) }];
 }
 
@@ -107,6 +143,18 @@ export type Script =
 	| "arabic"
 	| "hebrew"
 	| "thai"
+	| "devanagari"
+	| "bengali"
+	| "gurmukhi"
+	| "gujarati"
+	| "oriya"
+	| "tamil"
+	| "telugu"
+	| "kannada"
+	| "malayalam"
+	| "sinhala"
+	| "ethiopic"
+	| "khmer"
 	| "emoji"
 	| "arrows"
 	| "symbols";
@@ -122,7 +170,7 @@ export function isCjkScript(script: Script): boolean {
 
 // The script a locale primarily uses, used to order the fallback stack so the
 // dominant language renders with its native font. Persian (fa-IR) uses the
-// Arabic script.
+// Arabic script; Marathi and Nepali use Devanagari, like Hindi.
 export function getLocaleScript(locale?: Locale): Script | null {
 	switch (locale) {
 		case "ko-KR":
@@ -140,6 +188,26 @@ export function getLocaleScript(locale?: Locale): Script | null {
 			return "hebrew";
 		case "th-TH":
 			return "thai";
+		case "hi-IN":
+		case "mr-IN":
+		case "ne-NP":
+			return "devanagari";
+		case "bn-BD":
+			return "bengali";
+		case "or-IN":
+			return "oriya";
+		case "ta-IN":
+			return "tamil";
+		case "te-IN":
+			return "telugu";
+		case "kn-IN":
+			return "kannada";
+		case "ml-IN":
+			return "malayalam";
+		case "am-ET":
+			return "ethiopic";
+		case "km-KH":
+			return "khmer";
 		default:
 			return null;
 	}

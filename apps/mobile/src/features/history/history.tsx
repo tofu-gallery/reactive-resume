@@ -1,5 +1,6 @@
 import type { RouterOutput } from "@/api/client";
 import type { ResumeDocument } from "@/draft/types";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { useQuery } from "@tanstack/react-query";
@@ -9,6 +10,7 @@ import { useState } from "react";
 import { ScrollView, View } from "react-native";
 import { client, orpc } from "@/api/client";
 import { getDraftScope, useResumeStore } from "@/draft";
+import { AiResultUsage } from "@/features/ai/usage";
 import { useDocumentOperations } from "@/features/documents/queries";
 import { flushResume } from "@/features/share/document";
 import { usePreview } from "@/preview/usePreview";
@@ -37,10 +39,11 @@ function versionTitle(version: Version) {
 			return t`Imported`;
 		case "auto":
 			return t`Editing session`;
+		// A named version's name goes with the restore's snapshots (web format.ts).
 		case "before-restore":
-			return t`Before restore`;
+			return version.name ? t`Before restoring “${version.name}”` : t`Before restore`;
 		case "restored":
-			return t`Restored a version`;
+			return version.name ? t`Restored “${version.name}”` : t`Restored a version`;
 		case "ai":
 			return t`AI edit`;
 		case "sent":
@@ -89,7 +92,7 @@ export function HistoryPanel({ resume, offline }: HistoryProps) {
 				await flushResume(resume.id);
 				// The server writes "Before restore" before changing data. Reopen resets the draft baseline and undo,
 				// but only if the user is still on this resume in the same account; otherwise their open draft stays.
-				await client.resume.restoreVersion({ resumeId: resume.id, versionId: selected.id });
+				await client.resume.restoreVersion({ resumeId: resume.id, versionId: selected.id, proposalSafety: "v1" });
 				const sameScope = (await getDraftScope()) === scope;
 				if (sameScope && useResumeStore.getState().document?.id === resume.id)
 					await useResumeStore.getState().open(resume.id);
@@ -97,7 +100,11 @@ export function HistoryPanel({ resume, offline }: HistoryProps) {
 		) {
 			setSelected(null);
 			void list.refetch();
-			showToast({ message: t`Version restored. Your previous state is saved as “Before restore”.` });
+			showToast({
+				message: selected.name
+					? t`Restored “${selected.name}”. Your previous state is saved as “Before restoring “${selected.name}””.`
+					: t`Version restored. Your previous state is saved as “Before restore”.`,
+			});
 		}
 	};
 	const mutateVersion = async (remove: boolean) => {
@@ -152,6 +159,7 @@ export function HistoryPanel({ resume, offline }: HistoryProps) {
 				{operations.error && <Banner tone="danger" message={operations.error} />}
 				{!selected && (
 					<>
+						{(resume.aiOperationIds?.length ?? 0) > 0 && <AiResultUsage usage={resume.aiUsage} />}
 						<TextField
 							label={t`Name this version`}
 							placeholder={t`For example, Sent to Lumen`}
@@ -290,6 +298,7 @@ function VersionPage({ resumeId, versionId, offline }: VersionPageProps) {
 			style={{ flex: 1 }}
 			contentContainerStyle={{ padding: space.s4, gap: space.s3, alignItems: "center" }}
 		>
+			{version.data && <AiResultUsage usage={version.data.aiUsage} />}
 			{version.isError || preview.error ? (
 				<Banner
 					tone="danger"
@@ -309,7 +318,7 @@ function VersionPage({ resumeId, versionId, offline }: VersionPageProps) {
 					<Image
 						key={page.index}
 						source={{ uri: page.uri }}
-						accessibilityLabel={t`Page ${page.index + 1} · read-only`}
+						accessibilityLabel={t`Page ${i18n.number(page.index + 1)} · read-only`}
 						style={{ width, maxWidth: "100%", aspectRatio: page.width / page.height, backgroundColor: colors.paper }}
 						contentFit="contain"
 					/>

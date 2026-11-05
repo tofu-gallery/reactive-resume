@@ -1,65 +1,32 @@
-import type { Application } from "./types";
+import type { ApplicationSummary as Application } from "./types";
 import type { IconName } from "@/ui";
-import type { InterviewTimelineEntry } from "@reactive-resume/schema/applications/data";
+import type { NextStep, OfferHint } from "@reactive-resume/schema/applications/next-step";
+export type { NextStep, OfferHint } from "@reactive-resume/schema/applications/next-step";
+import type { ApplicationLane } from "@reactive-resume/schema/applications/lanes";
 import { plural, t } from "@lingui/core/macro";
+import { getNextStep as sharedGetNextStep } from "@reactive-resume/schema/applications/next-step";
 import { getClosedReasonLabel } from "./stages";
 
-const isInterview = (entry: Application["activity"][number]): entry is InterviewTimelineEntry =>
-	entry.type === "interview";
-
-const DAY_MS = 86_400_000;
-
-/** Days without a reply after applying before a follow-up is suggested. */
-const FOLLOW_UP_AFTER_DAYS = 10;
-
-type NextStepSource = Pick<Application, "status" | "activity" | "followUpAt" | "followUpNote" | "appliedAt">;
+export {
+	needsAttention,
+	needsFollowUp,
+	nextStepSortKey,
+	compareNextStepSortKeys,
+} from "@reactive-resume/schema/applications/next-step";
 
 /**
- * What an application needs next, derived rather than stored: the earliest interview still to come, else the
- * follow-up date, else how long it has been waiting. Closed applications need nothing.
+ * What's known of an application's newest saved offer: its reply deadline. `null` means no offer is saved yet;
+ * leaving it out means it isn't known here (the step then reads as deciding on the offer).
  */
-export type NextStep =
-	| { kind: "interview"; interview: InterviewTimelineEntry; at: Date }
-	| { kind: "follow-up"; at: Date; note: string; overdue: boolean }
-	| { kind: "no-reply"; days: number }
-	| { kind: "waiting"; days: number }
-	| { kind: "not-applied" }
-	| { kind: "closed" };
 
-/** When the application entered its current stage (its latest entry for that stage), or when it was added. */
-function stageSince(application: Pick<Application, "status" | "activity" | "appliedAt">): Date {
-	const entries = application.activity
-		.filter((entry) => entry.type === "stage" && entry.stage === application.status)
-		.map((entry) => new Date(entry.at).getTime());
-	return new Date(entries.length > 0 ? Math.max(...entries) : new Date(application.appliedAt).getTime());
-}
-
-const daysBetween = (from: Date, to: Date) => Math.max(0, Math.floor((to.getTime() - from.getTime()) / DAY_MS));
-
-/** Whole days the application has spent in its current stage. */
-export const daysInStage = (application: Pick<Application, "status" | "activity" | "appliedAt">, now = new Date()) =>
-	daysBetween(stageSince(application), now);
-
-export function getNextStep(application: NextStepSource, now = new Date()): NextStep {
-	if (application.status === "closed") return { kind: "closed" };
-
-	const upcoming = application.activity
-		.filter(isInterview)
-		.map((interview) => ({ interview, at: new Date(interview.at) }))
-		.filter(({ interview, at }) => at.getTime() + interview.durationMinutes * 60_000 >= now.getTime())
-		.sort((a, b) => a.at.getTime() - b.at.getTime())[0];
-	if (upcoming) return { kind: "interview", ...upcoming };
-
-	if (application.followUpAt) {
-		const at = new Date(application.followUpAt);
-		return { kind: "follow-up", at, note: application.followUpNote ?? "", overdue: at.getTime() < now.getTime() };
-	}
-
-	if (application.status === "saved") return { kind: "not-applied" };
-
-	const days = daysInStage(application, now);
-	if (application.status === "applied" && days >= FOLLOW_UP_AFTER_DAYS) return { kind: "no-reply", days };
-	return { kind: "waiting", days };
+export function getNextStep(
+	application: Parameters<typeof sharedGetNextStep>[0],
+	now = new Date(),
+	_lanes: readonly ApplicationLane[] = [],
+	timeZone = "UTC",
+	offer?: OfferHint | null,
+): NextStep {
+	return sharedGetNextStep(application, now, timeZone, offer);
 }
 
 export type NextStepText = { icon: IconName; title: string; sub: string; tone: "normal" | "warn" | "muted" };
@@ -70,7 +37,7 @@ const formatWhen = (date: Date, locale: string, timeZone: string, withTime: bool
 		weekday: "short",
 		day: "numeric",
 		month: "short",
-		...(withTime ? { hour: "2-digit", minute: "2-digit" } : {}),
+		...(withTime ? { hour: "2-digit", minute: "2-digit", hourCycle: "h23" } : {}),
 	});
 
 /** How a next step reads in the list, on cards and in the detail sheet, on the user's clock (`useUserTime`). */
@@ -97,6 +64,22 @@ export function describeNextStep(
 				tone: "normal",
 			};
 		}
+		case "offer":
+			return step.respondBy
+				? {
+						icon: step.overdue ? "clock" : "calendar-dot",
+						title: t`Reply to the offer`,
+						sub: t`By ${formatWhen(step.respondBy, locale, timeZone, true)}`,
+						tone: step.overdue ? "warn" : "normal",
+					}
+				: step.terms
+					? { icon: "scales", title: t`Decide on the offer`, sub: t`Compare it with your other offers`, tone: "normal" }
+					: {
+							icon: "scales",
+							title: t`Add the offer's terms`,
+							sub: t`Pay, deadline and conditions, so you can compare and decide`,
+							tone: "normal",
+						};
 		case "follow-up":
 			return {
 				icon: step.overdue ? "clock" : "calendar-dot",
@@ -107,7 +90,13 @@ export function describeNextStep(
 		case "no-reply":
 			return {
 				icon: "clock",
-				title: plural(step.days, { one: "No reply in # day", other: "No reply in # days" }),
+				title:
+					step.after === "interview"
+						? plural(step.days, {
+								one: "No word since your interview # day ago",
+								other: "No word since your interview # days ago",
+							})
+						: plural(step.days, { one: "No reply in # day", other: "No reply in # days" }),
 				sub: t`A short follow-up is usually fine now`,
 				tone: "warn",
 			};
@@ -116,18 +105,44 @@ export function describeNextStep(
 				? {
 						icon: "hourglass",
 						title:
-							step.days === 0
-								? t`Applied today`
-								: plural(step.days, { one: "Applied # day ago", other: "Applied # days ago" }),
+							step.days === null
+								? t`Waiting to hear back`
+								: step.days === 0
+									? t`Applied today`
+									: plural(step.days, { one: "Applied # day ago", other: "Applied # days ago" }),
 						sub: "",
 						tone: "normal",
 					}
 				: {
 						icon: "hourglass",
 						title: t`Waiting to hear back`,
-						sub: plural(step.days, { one: "For # day", other: "For # days" }),
+						sub:
+							step.days === null
+								? ""
+								: step.days === 0
+									? t`Since today`
+									: plural(step.days, { one: "For # day", other: "For # days" }),
 						tone: "normal",
 					};
+		case "interview-feedback":
+			return {
+				icon: "hourglass",
+				title: t`Waiting for interview feedback`,
+				sub:
+					step.days === null
+						? ""
+						: step.days === 0
+							? t`Since today`
+							: plural(step.days, { one: "For # day", other: "For # days" }),
+				tone: "normal",
+			};
+		case "no-interview":
+			return {
+				icon: "calendar-dot",
+				title: t`No interview scheduled`,
+				sub: t`Add the date when you have it`,
+				tone: "normal",
+			};
 		case "not-applied":
 			return { icon: "bookmark-simple", title: t`Not applied yet`, sub: "", tone: "muted" };
 		case "closed":

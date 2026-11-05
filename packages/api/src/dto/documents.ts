@@ -1,11 +1,22 @@
 import z from "zod";
+import { applicationStatusSchema } from "@reactive-resume/schema/applications/data";
 import { paginationShape } from "../pagination";
+import { applicationDto } from "./application";
+import { acceptedRevisionSchema, expectedRevisionSchema } from "./resume";
 
 const documentTypeSchema = z.enum(["resume", "letter"]).describe("resume, or letter (a saved cover letter).");
 const documentRefSchema = z.object({
 	type: documentTypeSchema,
 	id: z.string().min(1).describe("The ID of the resume or cover letter."),
 });
+
+// One request may act on a large loaded page, but the client sends every operation as one batch rather than one call
+// per document. Empty Trash doesn't use this list; it is a server-side "all" operation.
+const documentBatchSchema = z
+	.array(documentRefSchema)
+	.min(1)
+	.max(5000)
+	.describe("The loaded documents the user selected, not every document in Trash.");
 
 const documentSchema = z.object({
 	type: documentTypeSchema,
@@ -14,32 +25,74 @@ const documentSchema = z.object({
 	tags: z.array(z.string()),
 	isLocked: z.boolean(),
 	isPublic: z.boolean().describe("Whether a resume's public link is on; always false for letters."),
+	hasPassword: z
+		.boolean()
+		.describe(
+			"Whether a resume has a password set. Visitors need it while the resume is public (isPublic); always false for letters.",
+		),
 	slug: z.string().nullable().describe("A resume's public address, /{username}/{slug}; null for letters."),
 	trashedAt: z.date().nullable().describe("When the document moved to Trash; null while it's live."),
 	createdAt: z.date(),
-	updatedAt: z.date(),
+	updatedAt: z.date().describe("When anything about the document last changed, its details included."),
+	editedAt: z
+		.date()
+		.describe(
+			"When its content was last edited: a resume's data, or a letter's text, recipient and design. Renames, tags, sharing, locks and Trash don't move it. Library sorting by edited uses it.",
+		),
+	recipient: z
+		.string()
+		.nullable()
+		.describe(
+			"Who a letter is to: its recipient company, else the recipient's name. Null for resumes and blank letters.",
+		),
 	application: z
-		.object({ id: z.string(), company: z.string(), role: z.string() })
+		.object({
+			id: z.string(),
+			company: z.string(),
+			role: z.string(),
+			status: applicationStatusSchema.describe("The job's pipeline stage; closed groups start collapsed."),
+		})
 		.nullable()
 		.describe("The job application this document was made for, if any."),
 });
 
 export type DocumentSummary = z.infer<typeof documentSchema>;
 
+const documentFiltersSchema = z.object({
+	trashed: z.boolean().default(false),
+	type: z.enum(["all", "resume", "letter"]).default("all"),
+	q: z.string().max(500).default(""),
+	tags: z.array(z.string().min(1).max(40)).max(20).default([]),
+	public: z.boolean().default(false),
+	sort: z.enum(["edited", "name", "created"]).default("edited"),
+});
+export type DocumentFilters = z.infer<typeof documentFiltersSchema>;
+
 export const documentsDto = {
 	list: {
-		input: z
-			.object({
-				...paginationShape,
-				trashed: z.boolean().default(false).describe("List the documents in Trash instead."),
-			})
-			.default({ trashed: false }),
+		input: documentFiltersSchema.extend(paginationShape).prefault({}),
 		output: z.array(documentSchema),
+	},
+	page: {
+		input: documentFiltersSchema
+			.extend({
+				limit: z.number().int().min(1).max(100).default(100),
+				offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
+			})
+			.prefault({}),
+		output: z.object({
+			items: z.array(documentSchema),
+			total: z.number(),
+			counts: z.object({ resume: z.number(), letter: z.number() }),
+			tags: z.array(z.string()),
+			hasPublic: z.boolean(),
+		}),
 	},
 	counts: {
 		input: z.void(),
 		output: z.object({ resume: z.number(), letter: z.number(), trash: z.number() }),
 	},
+	suggestDuplicateName: { input: documentRefSchema, output: z.string().min(1).max(100) },
 	rename: {
 		input: documentRefSchema.extend({ name: z.string().trim().min(1).max(100) }),
 		output: z.void(),
@@ -55,17 +108,46 @@ export const documentsDto = {
 	linkApplication: {
 		input: documentRefSchema.extend({
 			applicationId: z.string().min(1).nullable().describe("The application to link, or null to unlink."),
+			expectedUpdatedAt: expectedRevisionSchema.describe(
+				"Resumes only. If provided, the link only changes when the resume version still matches this timestamp; otherwise RESUME_VERSION_CONFLICT (409).",
+			),
 		}),
-		output: z.void(),
+		// A resume's answer is its new revision, for an open editor to build on; a letter's is null.
+		output: acceptedRevisionSchema.nullable(),
 	},
 	trash: { input: documentRefSchema, output: z.void() },
 	restore: { input: documentRefSchema, output: z.void() },
+	restoreMany: {
+		input: z.object({ documents: documentBatchSchema }),
+		output: z.object({ restored: z.number().int().nonnegative() }),
+	},
 	purge: { input: documentRefSchema, output: z.void() },
+	purgeMany: {
+		input: z.object({ documents: documentBatchSchema }),
+		output: z.object({
+			deleted: z.number().int().nonnegative(),
+			skipped: z.number().int().nonnegative().describe("Active, already deleted, or another account's documents."),
+		}),
+	},
+	emptyTrash: {
+		input: z.object({}).optional(),
+		output: z.object({ deleted: z.number().int().nonnegative() }),
+	},
 	copyForJob: {
 		input: z.object({
 			resumeId: z.string().min(1).describe("The resume to copy."),
 			applicationId: z.string().min(1).optional().describe("The job the copy is for; omit for no job yet."),
+			application: applicationDto.create.input
+				.pick({ company: true, role: true, location: true, sourceUrl: true, jobDescription: true, postingSource: true })
+				.optional()
+				.describe("A new job to save with the copy: both are saved together, or neither is. Not with `applicationId`."),
 			name: z.string().trim().min(1).max(100).optional().describe("Defaults to “{source} — {company}”."),
+			newId: z
+				.uuid()
+				.optional()
+				.describe(
+					"A UUID the client chose for the new copy. A retry of the same request with the same ID (after a lost response, say) returns the copy already made, and its job, instead of making another. The ID with any other request, one already used by a resume or application, or one whose copy or job has since been deleted or moved to Trash, or whose new-job copy was unlinked or relinked to another job, is refused with CONFLICT and nothing changes.",
+				),
 		}),
 		output: z.string().describe("The ID of the copy."),
 	},

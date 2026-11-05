@@ -3,7 +3,8 @@ import type { IconName } from "@/ui";
 import type { PdfAtsReport, PdfCategory } from "@reactive-resume/resume/ats-pdf";
 import type { DocumentPickerAsset } from "expo-document-picker";
 import type { ReactNode } from "react";
-import { plural } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import * as DocumentPicker from "expo-document-picker";
 import { File, Paths } from "expo-file-system";
@@ -12,11 +13,12 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Circle } from "react-native-svg";
+import { pdfVerdict } from "@reactive-resume/resume/ats-pdf/verdict";
 import { AtsCheckError, MAX_IMPORT_BYTES, runAtsCheck } from "./check";
 import { getPdfCategoryLabel, getPdfFindingMessage } from "./messages";
 import { OriginalPage } from "./original-page";
 import { getServer, useSession } from "@/auth/session";
-import { ImportError, importDocument } from "@/features/documents/import-file";
+import { createReviewedResume, ImportError, importDocument } from "@/features/documents/import-file";
 import { routes } from "@/routes";
 import { Banner, Button, Chip, Icon, Segmented, Text, TextArea, useTheme } from "@/ui";
 
@@ -25,7 +27,7 @@ type PickedFile = Pick<DocumentPickerAsset, "uri" | "name" | "size" | "mimeType"
 type State =
 	| { name: "idle"; error?: string | undefined }
 	| { name: "busy"; file: PickedFile; step: number }
-	| { name: "done"; file: PickedFile; result: AtsResult }
+	| { name: "done"; file: PickedFile; result: AtsResult; importError?: string | undefined }
 	| { name: "importing" };
 
 const MAX_POSTING = 20_000;
@@ -97,25 +99,27 @@ export function AtsChecker() {
 		reset();
 	};
 
-	const importAndOpen = async (file: PickedFile) => {
+	// A failed import goes back to the report it came from, with the reason (web checker).
+	const importAndOpen = async (file: PickedFile, result?: AtsResult) => {
 		setState({ name: "importing" });
 		const controller = new AbortController();
 		abort.current = controller;
 		try {
 			// Server text extraction, no AI: the same reading the check did, so every issue lines up in Check.
-			const imported = await importDocument(file, false, false, controller.signal);
+			const result = await importDocument(file, false, false, controller.signal);
+			// Without AI nothing waits for review; a reviewed import would be created as read.
+			const imported = result.type === "review" ? await createReviewedResume(result, false, controller.signal) : result;
 			router.replace(routes.builder(imported.id, "check"));
 		} catch (error) {
 			if (controller.signal.aborted) return;
-			setState({
-				name: "idle",
-				error: error instanceof ImportError ? error.message : t`Couldn't import the file. Try again from Documents.`,
-			});
+			const message =
+				error instanceof ImportError ? error.message : t`Couldn't import the file. Try again from Documents.`;
+			setState(result ? { name: "done", file, result, importError: message } : { name: "idle", error: message });
 		}
 	};
 
-	const fix = (file: PickedFile) => {
-		if (signedIn) return void importAndOpen(file);
+	const fix = (file: PickedFile, result: AtsResult) => {
+		if (signedIn) return void importAndOpen(file, result);
 		pendingImport.current = { file, server: getServer(), at: Date.now() };
 		router.push(routes.signIn());
 	};
@@ -145,7 +149,8 @@ export function AtsChecker() {
 					result={state.result}
 					uri={state.file.uri}
 					size={state.file.size ?? new File(state.file.uri).size}
-					onFix={() => fix(state.file)}
+					importError={state.importError}
+					onFix={() => fix(state.file, state.result)}
 					onReset={reset}
 					onBlank={() => router.replace(routes.new())}
 				/>
@@ -311,7 +316,7 @@ function issueRows(report: PdfAtsReport): Row[] {
 			return {
 				key: category,
 				title: getPdfCategoryLabel(category),
-				count: String(findings.length),
+				count: i18n.number(findings.length),
 				tone,
 				icon,
 				findings,
@@ -324,12 +329,17 @@ type ResultProps = {
 	result: AtsResult;
 	uri: string;
 	size: number;
+	importError?: string | undefined;
 	onFix: () => void;
 	onReset: () => void;
 	onBlank: () => void;
 };
 
-function Result({ result, uri, size, onFix, onReset, onBlank }: ResultProps) {
+// A file with no text behind its pages has nothing to import: the editor would open empty. A partly scanned one
+// (IMAGE_ONLY_DOCUMENT) still brings its readable pages.
+const UNREADABLE = new Set(["NO_TEXT_LAYER"]);
+
+function Result({ result, uri, size, importError, onFix, onReset, onBlank }: ResultProps) {
 	const { t } = useLingui();
 	const { colors, radius, space } = useTheme();
 	const { report } = result;
@@ -338,9 +348,13 @@ function Result({ result, uri, size, onFix, onReset, onBlank }: ResultProps) {
 	const [lens, setLens] = useState<"report" | "page" | "text">("report");
 	const issues = report.findings.length;
 	const toneColor = { danger: colors.dangerText, warn: colors.warnText, accent: colors.accentText };
+	// The same headline rule as the web checker: "Reads cleanly" only with nothing to fix.
+	const { verdict: level, tone } = pdfVerdict(report);
 	const verdict =
-		report.score >= 80 ? t`Reads cleanly` : report.score >= 50 ? t`Mostly readable` : t`Hard for software to read`;
+		level === "clean" ? t`Reads cleanly` : level === "mostly" ? t`Mostly readable` : t`Hard for software to read`;
+	const tips = report.tips.length;
 	const tooLarge = size > MAX_IMPORT_BYTES;
+	const unreadable = report.findings.some((finding) => UNREADABLE.has(finding.code));
 	const megabytes = Math.ceil(size / 1_000_000);
 
 	const accordion = (key: string, title: string, count: string, icon: IconName, color: string, body: ReactNode) => {
@@ -385,13 +399,17 @@ function Result({ result, uri, size, onFix, onReset, onBlank }: ResultProps) {
 				contentContainerStyle={{ padding: space.s4, gap: space.s4 }}
 			>
 				<View style={{ flexDirection: "row", alignItems: "center", gap: space.s4 }}>
-					<ScoreRing score={report.score} color={report.score >= 80 ? colors.accent : colors.warn} />
+					<ScoreRing
+						score={report.score}
+						color={tone === "accent" ? colors.accent : tone === "warn" ? colors.warn : colors.danger}
+					/>
 					<View style={{ flex: 1, gap: space.s1 }}>
 						<Text variant="title">{verdict}</Text>
 						<Text variant="callout" color="ink2">
 							{issues > 0
 								? plural(issues, { one: "# issue could cost you a match.", other: "# issues could cost you a match." })
 								: t`Nothing here should cost you a match.`}{" "}
+							{tips > 0 ? `${plural(tips, { one: "Plus # tip.", other: "Plus # tips." })} ` : ""}
 							{t`The score reflects how reliably text is extracted, not your chances.`}
 						</Text>
 					</View>
@@ -401,7 +419,7 @@ function Result({ result, uri, size, onFix, onReset, onBlank }: ResultProps) {
 					<Banner
 						tone="info"
 						icon="info"
-						title={t`Only the first ${report.document.pageCount} pages were checked.`}
+						title={t`Only the first ${i18n.number(report.document.pageCount)} pages were checked.`}
 						message={t`The rest of the file isn't in this report.`}
 					/>
 				) : null}
@@ -412,8 +430,8 @@ function Result({ result, uri, size, onFix, onReset, onBlank }: ResultProps) {
 					onChange={setLens}
 					options={[
 						{ value: "report", label: t`Report` },
-						{ value: "page", label: t`Original page` },
-						{ value: "text", label: t`As software reads it` },
+						{ value: "page", label: t`What a person sees` },
+						{ value: "text", label: t`What a parser reads` },
 					]}
 				/>
 
@@ -432,7 +450,7 @@ function Result({ result, uri, size, onFix, onReset, onBlank }: ResultProps) {
 								? accordion(
 										"posting",
 										t`Terms from the posting`,
-										`${report.jd.matchedCount}/${report.jd.totalTerms}`,
+										`${i18n.number(report.jd.matchedCount)}/${i18n.number(report.jd.totalTerms)}`,
 										"list-checks",
 										colors.warnText,
 										report.jd.totalTerms === 0 ? (
@@ -522,12 +540,30 @@ function Result({ result, uri, size, onFix, onReset, onBlank }: ResultProps) {
 					backgroundColor: colors.surface,
 				}}
 			>
-				{tooLarge ? (
+				{importError ? <Banner tone="danger" message={importError} /> : null}
+				{unreadable ? (
 					<>
 						<Banner
 							tone="warn"
 							icon="warning"
-							title={t`This file is ${megabytes} MB. Imports take files up to 10 MB.`}
+							title={t`There's no text here to bring into the editor`}
+							message={t`Start a blank resume and paste your sections in, or import the Word version instead.`}
+						/>
+						<View style={{ flexDirection: "row", gap: space.s2 }}>
+							<View style={{ flex: 1 }}>
+								<Button variant="secondary" label={t`Check another file`} onPress={onReset} fullWidth />
+							</View>
+							<View style={{ flex: 1 }}>
+								<Button label={t`Start blank`} onPress={onBlank} fullWidth />
+							</View>
+						</View>
+					</>
+				) : tooLarge ? (
+					<>
+						<Banner
+							tone="warn"
+							icon="warning"
+							title={t`This file is ${ph({ megabytes: i18n.number(megabytes) })} MB. Imports take files up to 10 MB.`}
 							message={t`Export a smaller PDF and check it again, or start a blank resume and fix these there.`}
 						/>
 						<View style={{ flexDirection: "row", gap: space.s2 }}>
@@ -540,7 +576,13 @@ function Result({ result, uri, size, onFix, onReset, onBlank }: ResultProps) {
 						</View>
 					</>
 				) : (
-					<Button label={t`Fix these in the editor`} onPress={onFix} fullWidth />
+					// With nothing to fix, editing is the offer, not fixing (web says the same).
+					<Button
+						label={issues === 0 ? t`Edit it in Reactive Resume` : t`Fix these in the editor`}
+						variant={issues === 0 ? "secondary" : "primary"}
+						onPress={onFix}
+						fullWidth
+					/>
 				)}
 			</View>
 		</View>
@@ -561,7 +603,7 @@ function ScoreRing({ score, color }: ScoreRingProps) {
 		<View
 			accessible
 			accessibilityRole="image"
-			accessibilityLabel={t`Readability score: ${score} out of 100`}
+			accessibilityLabel={t`Readability score: ${ph({ score: i18n.number(score) })} out of 100`}
 			style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}
 		>
 			<Svg width={size} height={size} style={{ position: "absolute", transform: [{ rotate: "-90deg" }] }}>
@@ -578,7 +620,7 @@ function ScoreRing({ score, color }: ScoreRingProps) {
 					strokeDashoffset={circumference * (1 - Math.min(100, Math.max(0, score)) / 100)}
 				/>
 			</Svg>
-			<Text variant="heading">{String(score)}</Text>
+			<Text variant="heading">{i18n.number(score)}</Text>
 		</View>
 	);
 }

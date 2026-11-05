@@ -4,9 +4,11 @@
 	"type": "module",
 	"private": true,
 	"exports": {
+		"./contact-details": "./src/contact-details.ts",
 		"./cover-letter": "./src/cover-letter.ts",
 		"./ats": "./src/ats/index.ts",
 		"./ats-pdf": "./src/ats-pdf/index.ts",
+		"./ats-pdf/verdict": "./src/ats-pdf/verdict.ts",
 		"./export-sections": "./src/export-sections.ts",
 		"./icons": "./src/icons.ts",
 		"./markdown": "./src/markdown.ts",
@@ -14,10 +16,16 @@
 		"./patch": "./src/patch.ts",
 		"./proposals": "./src/proposals.ts",
 		"./section-sort": "./src/section-sort.ts",
+		"./section-title": "./src/section-title.ts",
+		"./sharing": "./src/sharing.ts",
+		"./word-diff": "./src/word-diff.ts",
+		"./spill": "./src/spill.ts",
 		"./social-meta": "./src/social-meta.ts",
 		"./stylesheet": "./src/stylesheet/index.ts",
 		"./stylesheet/registry": "./src/stylesheet/registry/index.ts",
-		"./stylesheet/types": "./src/stylesheet/semantic-types.ts"
+		"./stylesheet/types": "./src/stylesheet/semantic-types.ts",
+		"./entries": "./src/entries.ts",
+		"./structural-proposals": "./src/structural-proposals.ts"
 	},
 	"scripts": {
 		"typecheck": "tsrs --noEmit",

@@ -4,11 +4,14 @@ import { ORPCError } from "@orpc/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { View } from "react-native";
+import { aiModelForTask } from "@reactive-resume/ai/task-models";
+import { isNetworkError } from "@reactive-resume/utils/http";
 import { orpc } from "@/api/client";
 import { AIProviderSetupSheet, useHasAIProvider } from "@/features/ai/providers";
+import { AiResultUsage } from "@/features/ai/usage";
 import { Button, ListRow, Text, TextField, useTheme } from "@/ui";
 
-type Action = "verb" | "result" | "shorter" | "custom";
+type Action = "verb" | "result" | "shorter" | "posting" | "warmer" | "custom";
 
 type ImprovePanelProps = {
 	line: { index: number; text: string };
@@ -16,42 +19,69 @@ type ImprovePanelProps = {
 	where: string;
 	/** The rest of the field, so a result can come from the lines around it. */
 	context: string;
+	letter?: { applicationId?: string | null | undefined } | undefined;
 	onClose: () => void;
 	/** Swaps the line; false when it changed since Improve was asked. */
-	onReplace: (text: string) => Promise<boolean>;
+	onReplace: (text: string, aiOperationIds?: string[]) => Promise<boolean>;
 };
 
 /**
  * Improve (`ai.improve`): pick what to change, then Replace or Keep mine. Only the one line changes, and only when
  * the user replaces it. Without a provider, the setup sheet connects one first.
  */
-export function ImprovePanel({ line, where, context, onClose, onReplace }: ImprovePanelProps) {
+export function ImprovePanel({ line, where, context, letter, onClose, onReplace }: ImprovePanelProps) {
 	const { t } = useLingui();
 	const { colors, radius, space } = useTheme();
 	const ai = useHasAIProvider();
-	const [asking, setAsking] = useState(false);
+	const improveProvider = ai.defaultProvider
+		? { label: ai.defaultProvider.label, model: aiModelForTask(ai.defaultProvider, "fast") }
+		: undefined;
+	// "custom" asks what to change; "result" asks what the result was, since only the user knows it (web improve).
+	const [asking, setAsking] = useState<"custom" | "result" | null>(null);
 	const [request, setRequest] = useState("");
+	const [result, setResult] = useState("");
+	// The last request sent, with its words, so Try again and Try another send exactly that again.
+	const [last, setLast] = useState<{ action: Action; words: string } | null>(null);
 	const [changed, setChanged] = useState(false);
 	const [setup, setSetup] = useState(false);
 	const improve = useMutation(orpc.ai.improve.mutationOptions());
 
-	const options: { action: Action; icon: IconName; label: string }[] = [
-		{ action: "verb", icon: "lightning", label: t`Stronger verb` },
-		{ action: "result", icon: "trend-up", label: t`Add a result` },
-		{ action: "shorter", icon: "arrows-in-line-vertical", label: t`Make it shorter` },
-	];
+	const options: { action: Action; icon: IconName; label: string }[] = letter
+		? [
+				...(letter.applicationId
+					? [{ action: "posting" as const, icon: "briefcase" as const, label: t`Tie to the posting` }]
+					: []),
+				{ action: "warmer", icon: "hand-heart", label: t`Warmer` },
+				{ action: "shorter", icon: "arrows-in-line-vertical", label: t`Shorter` },
+			]
+		: [
+				{ action: "verb", icon: "lightning", label: t`Stronger verb` },
+				{ action: "result", icon: "trend-up", label: t`Add a result` },
+				{ action: "shorter", icon: "arrows-in-line-vertical", label: t`Make it shorter` },
+			];
 
-	const run = (action: Action) =>
+	const run = (
+		action: Action,
+		words = action === "custom" ? request.trim() : action === "result" ? result.trim() : "",
+	) => {
+		if (!ai.defaultProvider) return;
+		setLast({ action, words });
 		improve.mutate({
+			aiProviderId: ai.defaultProvider.id,
+			includeProvenance: true,
 			action,
 			line: line.text,
 			where,
 			context: context.slice(0, 10_000),
-			...(action === "custom" ? { request: request.trim() } : {}),
+			...(words ? { request: words } : {}),
+			...(action === "posting" && letter?.applicationId ? { applicationId: letter.applicationId } : {}),
 		});
+	};
+	const pick = (action: Action) => (action === "result" ? setAsking("result") : run(action));
 
-	const error =
-		improve.error instanceof ORPCError && improve.error.message
+	const error = isNetworkError(improve.error)
+		? t`Couldn't reach Reactive Resume. Check your internet connection, then try again.`
+		: improve.error instanceof ORPCError && improve.error.message
 			? improve.error.message
 			: t`Couldn't get a suggestion. Nothing changed.`;
 
@@ -67,12 +97,22 @@ export function ImprovePanel({ line, where, context, onClose, onReplace }: Impro
 			}}
 		>
 			<Text variant="micro" color="ink3">
-				{t`Improve selected line`}
+				{letter ? t`Improve this paragraph` : t`Improve selected line`}
 			</Text>
-			<Text variant="callout" color="ink2" numberOfLines={2}>
+			<Text variant="caption" color="ink3">{t`Original`}</Text>
+			<Text variant="callout" color="ink2" selectable>
 				{line.text}
 			</Text>
 
+			{improveProvider && (
+				<Text variant="caption" color="ink3">
+					{letter
+						? letter.applicationId
+							? t`Sends this paragraph, the rest of the letter, the linked job posting and your instructions to ${improveProvider.label} · ${improveProvider.model}.`
+							: t`Sends this paragraph, the rest of the letter and your instructions to ${improveProvider.label} · ${improveProvider.model}.`
+						: t`Sends this line, surrounding field text and your instructions to ${improveProvider.label} · ${improveProvider.model}.`}
+				</Text>
+			)}
 			{ai.isLoading ? (
 				<Text color="ink2">{t`Loading…`}</Text>
 			) : !ai.hasAIProvider ? (
@@ -102,6 +142,7 @@ export function ImprovePanel({ line, where, context, onClose, onReplace }: Impro
 						{improve.data.why}
 						{improve.data.addsFacts ? ` ${t`Check it's accurate.`}` : ""}
 					</Text>
+					<AiResultUsage usage={improve.data.aiUsage} />
 					{changed ? (
 						<Text variant="caption" color="dangerText" accessibilityLiveRegion="assertive">
 							{t`The line changed since you asked, so it wasn't replaced.`}
@@ -112,10 +153,15 @@ export function ImprovePanel({ line, where, context, onClose, onReplace }: Impro
 							<Button
 								size="sm"
 								label={t`Replace`}
-								onPress={() => void onReplace(improve.data.text).then((done) => setChanged(!done))}
+								onPress={() =>
+									void onReplace(improve.data.text, improve.data.aiOperationIds).then((done) => setChanged(!done))
+								}
 							/>
 						) : null}
 						<Button size="sm" variant="secondary" label={t`Keep mine`} onPress={onClose} />
+						{last && !changed ? (
+							<Button size="sm" variant="ghost" label={t`Try another`} onPress={() => run(last.action, last.words)} />
+						) : null}
 					</View>
 				</View>
 			) : improve.isPending ? (
@@ -128,11 +174,33 @@ export function ImprovePanel({ line, where, context, onClose, onReplace }: Impro
 						{error}
 					</Text>
 					<View style={{ flexDirection: "row", gap: space.s2 }}>
-						<Button size="sm" variant="secondary" label={t`Try again`} onPress={() => improve.reset()} />
+						{/* Sends the same request again (web improve). */}
+						<Button
+							size="sm"
+							variant="secondary"
+							label={t`Try again`}
+							onPress={() => (last ? run(last.action, last.words) : improve.reset())}
+						/>
 						<Button size="sm" variant="ghost" label={t`Cancel`} onPress={onClose} />
 					</View>
 				</View>
-			) : asking ? (
+			) : asking === "result" ? (
+				<View style={{ gap: space.s2 }}>
+					<TextField
+						label={t`What changed because of this? A number, a time saved, who used it.`}
+						value={result}
+						maxLength={500}
+						autoFocus
+						returnKeyType="send"
+						onChangeText={setResult}
+						onSubmitEditing={() => result.trim() && run("result")}
+					/>
+					<View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.s2 }}>
+						<Button size="sm" label={t`Add`} disabled={!result.trim()} onPress={() => run("result")} />
+						<Button size="sm" variant="ghost" label={t`I don't have one yet`} onPress={() => run("result", "")} />
+					</View>
+				</View>
+			) : asking === "custom" ? (
 				<View style={{ gap: space.s2 }}>
 					<TextField
 						label={t`What should change?`}
@@ -156,10 +224,10 @@ export function ImprovePanel({ line, where, context, onClose, onReplace }: Impro
 							key={option.action}
 							title={option.label}
 							leading={option.icon}
-							onPress={() => run(option.action)}
+							onPress={() => pick(option.action)}
 						/>
 					))}
-					<ListRow title={t`Ask for something else…`} leading="chat-text" onPress={() => setAsking(true)} />
+					<ListRow title={t`Ask for something else…`} leading="chat-text" onPress={() => setAsking("custom")} />
 					<ListRow title={t`Cancel`} leading="x" onPress={onClose} />
 				</View>
 			)}

@@ -24,12 +24,47 @@ export function handleOpenAiAppsChallenge() {
 	});
 }
 
+/** Nothing else is published under /.well-known, and a 404 says so; a 200 body would be parsed as the document asked for. */
 export function handleWellKnownFallback() {
-	return new Response("OK", { status: 200 });
+	return new Response("Not Found", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+}
+
+/**
+ * Agentic Resource Discovery catalog (https://agenticresourcediscovery.org/spec/), so agent registries can find the MCP
+ * server by what it does. Served at /.well-known/ard.json and at the spec's earlier path, /.well-known/ai-catalog.json,
+ * which Lighthouse's agentic browsing audit reads; `specVersion` and `host` belong to that earlier format.
+ */
+export function handleAgentCatalog() {
+	const baseUrl = appUrl();
+	const catalog = {
+		specVersion: "1.0",
+		host: { displayName: "Reactive Resume", documentationUrl: DOCS_URL, logoUrl: `${baseUrl}/pwa-512x512.png` },
+		entries: [
+			{
+				identifier: `urn:air:${new URL(baseUrl).hostname}:mcp:reactive-resume`,
+				displayName: "Reactive Resume MCP server",
+				type: "application/mcp-server-card+json",
+				url: `${baseUrl}/.well-known/mcp/server-card.json`,
+				description:
+					"Reads and edits the user's resumes, cover letters and job applications in Reactive Resume, a free and open-source resume builder.",
+				tags: ["resume", "cover letter", "job applications", "careers"],
+				representativeQueries: [
+					"update my resume with my new job",
+					"tailor my resume to this job description",
+					"write a cover letter for this application",
+					"track the jobs I have applied to",
+				],
+			},
+		],
+	};
+
+	return Response.json(catalog, {
+		headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=3600" },
+	});
 }
 
 export function handleMcpServerCard() {
-	const card = buildMcpServerCard(appVersion);
+	const card = buildMcpServerCard(appVersion, appUrl());
 
 	return Response.json(
 		{
@@ -80,8 +115,8 @@ function buildIntegrations() {
 				label: "Reactive Resume API key",
 				generateUrl: `${baseUrl}/dashboard/settings/ai`,
 				setup: [
-					"Open **Settings → AI & developer**, select **New key** in the **API keys** section, name it, choose when it expires, then copy it.",
-					"The key is shown only once and acts as you: anyone holding it can read and edit your documents. Revoke it from the same table when you no longer need it.",
+					"Open **Settings → AI & developer**, select **New key** in the **API keys** section and name it. Under **Access**, choose **Read only** unless the tool needs to change your documents. Choose when it expires, then copy it.",
+					"The key is shown only once and acts as you with the access you chose: anyone holding a read-only key can read your account, and a full-access key can also change and delete it. Revoke it from the same table when you no longer need it.",
 					"Send it in the `x-api-key` header.",
 				].join("\n\n"),
 			},
@@ -90,7 +125,8 @@ function buildIntegrations() {
 				label: "Reactive Resume OAuth",
 				setup: [
 					`OAuth authorization-code flow with dynamic client registration (RFC 7591). Clients discover the authorization server from \`${baseUrl}/.well-known/oauth-protected-resource\` (issuer \`${authorizationServer()}\`).`,
-					"The user signs in to Reactive Resume and approves the client on the consent screen; the resulting access token is sent as `Authorization: Bearer <token>`.",
+					`Send \`resource=${baseUrl}\` on authorization, token exchange and refresh requests (RFC 8707). Authorization without a resource is refused with invalid_target.`,
+					"The user signs in to a permanent Reactive Resume account and approves the client on the consent screen; guest accounts cannot connect apps. Send the resulting access token as `Authorization: Bearer <token>`.",
 				].join("\n\n"),
 			},
 		},

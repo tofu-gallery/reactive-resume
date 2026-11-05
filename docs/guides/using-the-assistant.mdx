@@ -1,9 +1,11 @@
 ---
 title: "Using the assistant"
-description: "Ask the AI assistant to improve your resume or cover letter, then accept or reject each edit it proposes. Nothing changes until you accept."
+description: "Ask the AI assistant to improve your resume or cover letter, then review and accept or reject its proposed changes. Nothing changes until you accept."
 ---
 
-The assistant is an AI chat panel beside your document in the editor. It reads the resume or letter you have open, and the job posting when the document is linked to an application, then suggests changes as edits you accept or reject one at a time. It never changes your document on its own.
+The assistant is an AI chat panel beside your document in the editor. It reads the resume or letter you have open, and the job posting when the document is linked to an application, then proposes changes for you to review. Text-only suggestions can be accepted individually; changes to fields, entries or sections are reviewed and accepted as one set. It never changes your document on its own.
+
+**Prepare application** in Apply generates a combined review of pending tailoring proposals, a letter draft and answers for pasted form questions after one context disclosure. Each section needs approval; existing version guards and account-scoped draft recovery apply. See [Prepare the application together](/guides/writing-application-answers#prepare-the-application-together). Nothing is submitted to an employer.
 
 ## Before you start
 
@@ -13,10 +15,10 @@ Connect an AI provider with your own API key. See [Connecting an AI provider](/g
 
 In the editor, select **Assistant** (the sparkle button) in the editor bar, just before **Share**, or press <kbd>⌘</kbd> <kbd>J</kbd> (<kbd>Ctrl</kbd> <kbd>J</kbd> on Windows and Linux). Press it again, or select **Close the assistant** (×) in the panel, to close it.
 
-<Frame caption="The assistant beside a resume, ready for a first request">
+<Frame caption="Start with a suggestion or your own message. This example uses a fictional resume and a local demonstration provider.">
   <img
-    src="/images/guides/using-the-assistant/assistant-beside-the-page.webp"
-    alt="Resume editor with the Assistant panel open on the right, showing What should we work on? and three suggestions: Find weak bullets, Tighten to one page and Draft a summary"
+    src="/images/guides/career/chat-assistant.png"
+    alt="Assistant showing What should we work on, resume starter rows, the Fictional Cedar AI connection and stub model, document and Knowledge controls, an unsent message and its privacy disclosure"
   />
 </Frame>
 
@@ -24,9 +26,21 @@ On wide screens the assistant opens as a third column. On smaller laptops it tak
 
 You can also reach it from elsewhere:
 
-- In the command bar (<kbd>⌘</kbd> <kbd>K</kbd>), type a question and choose **Ask the assistant**. Outside the editor, this opens the document you edited last and sends the question there. See [Using the command bar](/guides/using-the-command-bar).
+- In the command bar (<kbd>⌘</kbd> <kbd>K</kbd>), type a question and choose **Ask the assistant**. Outside the editor, choose the document first. The question appears in its composer; review it and press send when ready. See [Using the command bar](/guides/using-the-command-bar).
+
+If no tested provider is enabled, the command bar names that requirement and opens provider setup in place. Closing or
+finishing setup keeps your question; choose Ask again to continue. Native Search uses the same setup-before-opening flow
+and leaves the question unsent in the named document.
 
 For job search and interview coaching, open **Career → Coach**, or select **Open workspace** in an application and then **Ask the coach**. That coach works with your Knowledge and application context. This guide covers editing resumes and letters; [Career and Application Workspaces](/guides/career-overview) covers the career coach.
+
+Both chats start with **What should we work on?** and a list of suggestions. The connection menu names the connection
+and model in use. Context controls sit inside the message box, with a disclosure underneath explaining what goes with
+your next message. The assistant's document controls and the coach's Knowledge, application and memory controls keep
+their own purposes; check that disclosure before sending.
+The keyboard button in the message box opens [shortcut help](/guides/keyboard-shortcuts).
+
+Scroll up to read earlier messages. **Latest** returns to the newest message and resumes following new text. It hides when you reach the bottom, including a small gap as scrolling settles, and stays out of the keyboard tab order while hidden.
 
 ## Ask for a change
 
@@ -44,61 +58,194 @@ For job search and interview coaching, open **Career → Coach**, or select **Op
 
 Specific requests work best: "Rewrite my summary for a senior frontend role", "Make the bullets in my latest job lead with results", or "Shorten this letter to under 250 words". When you only ask a question, such as "Which bullet is the weakest?", the assistant answers without proposing edits.
 
+For resumes, you can also ask to add entries or custom sections, or change your name, headline, section titles and entry text fields. For example, "Add a Patents section with this patent" creates a custom section with structured entries; it does not put a heading inside a project description. Languages, Certifications and Skills use their own typed entries. Create or open cover letters through **Documents**; they cannot be added as resume sections. Hidden summary, sections and entries are excluded from the assistant's document view. Show them in Write first if you want to work on them.
+
+Requests involving fields, entries or sections appear as one set showing the affected fields. Review the set, then accept or reject it together. If the resume's text or structure changes before accepting, ask again for a fresh set; this avoids overwriting your newer changes. Text-only resume suggestions and cover-letter suggestions still work paragraph by paragraph.
+
+Field suggestions identify the entry and role they change. Entry suggestions show the stored fields, including proficiency levels, icons and colors, and each set keeps the reasons for its changes. A text edit adds or rewrites one paragraph or bullet, supplied on one line. Ambiguous multiline records and section headings inside that text are declined; ask for a new section instead. Quoted text such as `"## Languages"` remains ordinary text.
+
+Outside translation, some fields, including existing dates, website fields, keyword lists and page language, still need **Write** or **Design**. Select **Open Write** in the assistant: **Basics** holds name, headline and contact details; each section holds its entries; **Add section** adds a missing section. You can also import an old resume from Documents to fill a blank resume.
+
+For another language, choose **Translate into…** in the document menu or assistant, pick a language different from the source's page language, then choose **Create language copy**. The source language is excluded from the picker. Your original stays unchanged. The private copy uses that page language for generated headings, date words and text direction. It opens the assistant with an unsent request: choose your connection, check what will be sent, then press **Send**. Creating the copy makes no AI call.
+
+Translations of visible text—including explicit headings, keywords, nested roles, custom fields and link labels—come back as one set to review before accepting. Formatting, link destinations, email addresses, phone numbers and structured dates stay intact; proper names and facts should retain their meaning. Hidden content and private notes stay in the copy, untranslated, and are not sent for translation. Changes to name fields and figures are flagged for you to check. Check names, figures, meaning and layout before accepting; a proposal is not a guarantee of translation quality. If the resume changes, ask for a fresh set. Oversized or incomplete translations are refused rather than silently presented as complete.
+
+<Frame caption="Create a separate language copy before requesting translations. Fictional resume; translations require a chosen AI connection and Send.">
+  <img
+    src="/images/guides/career/language-copy.png"
+    alt="Translate into dialog with German selected and Create language copy button."
+  />
+</Frame>
+
 ## Review proposed edits
 
-Each proposed edit shows where it lands (for example, **Summary · paragraph 1**), the current text struck through, the new text highlighted, and a short reason. The same change is marked on the page, and the section shows a **proposed** badge, so you can read it in place.
+A text-only suggestion shows where it lands (for example, **Summary · paragraph 1**), the current text struck through, the new text highlighted, and a short reason. These text changes are also marked on the page, with a **proposed** badge in their section.
 
-<Frame caption="A proposed edit, shown on the page and in the assistant">
+A request involving fields, entries or sections appears as one card for the entire supported set. The card lists the affected entries and roles, the current field values, the proposed values and the reasons. New entries show their stored fields, including date facts and link destinations. Review this card before accepting: the page previews the proposed resume, but structural changes do not have the individual old/new markings or section badges used for text-only suggestions.
+
+<Frame caption="A headline and a new certification, reviewed together as one structural set">
+  <img
+    src="/images/guides/using-the-assistant/structural-change-set.webp"
+    alt="Fictional resume assistant showing one pending set with a headline change and a First Aid certification from Red Cross, its date facts and reason, followed by Accept and Reject controls for the whole set"
+  />
+</Frame>
+
+<Frame caption="A tailored edit on a fictional job copy, shown on the page and in the assistant. The posting chip and the disclosure under the message box show the posting is shared.">
   <img
     src="/images/guides/using-the-assistant/proposed-edit-on-page.webp"
-    alt="Resume editor where the summary on the page shows the old text struck through and the new text below it, with a banner reading 1 proposed edit on this page · nothing changes until you accept, and the matching card in the Assistant panel"
+    alt="Resume editor for Game Developer Resume — Lumen Games, where the summary on the page shows the old text struck through and the new text below it, with a banner reading 1 proposed edit on this page · nothing changes until you accept. The Assistant panel shows the matching card with a cited passage, flagged details and Accept, Edit and Reject buttons, and chips for the resume, the Lumen Games posting and Use Knowledge above the message box"
   />
 </Frame>
 
-<Frame caption="The proposed edit card">
+<Frame caption="The proposed edit card when tailoring: the assistant's reading of the posting's requirements, with two gaps left open, then the edit, its citation to check, and details nothing checked backs">
   <img
     src="/images/guides/using-the-assistant/proposed-edit-card.webp"
-    alt="Card titled 1 proposed edit, with the location Summary · paragraph 1, the old summary struck through, the shorter new summary highlighted in green, the reason, and Accept and Reject buttons"
+    alt="Card titled 1 proposed edit. The assistant's reading of 3 posting requirements · 2 gaps lists Gameplay programming in Unity or Unreal as An edit addresses it, and Shipped at least one console title and Online multiplayer networking as No evidence found · left as a gap. Below, Summary · paragraph 1 with the old summary struck through, the new summary highlighted in green, the reason, Posting asks for: Gameplay programming in Unity or Unreal, The assistant cites 1 source · check it says this with an experience bullet, a warning listing Figure: 5+, Figure: 2 console and words not in the resume, and Accept, Edit and Reject buttons"
   />
 </Frame>
 
-- Select **Accept** to apply an edit, or **Reject** to dismiss it.
-- When a set has more than one edit waiting, **Accept all** applies them together.
+- Select **Accept** to apply a text edit or an entire structural set, or **Reject** to dismiss it. A rejected edit shows **Rejected · Undo**; **Undo** makes it undecided again.
+- With more than one edit waiting, **Reject all** dismisses them together.
+- A decided edit folds to one line with its number, where it landed and what happened. Select **Show** to open it again.
+- For text-only suggestions with more than one edit waiting, **Accept all** applies the edits it can still place. The notification counts those edits and tells you how many could not be placed. A structural set has one Accept control for all its changes.
 - With an edit focused, press <kbd>A</kbd> to accept, <kbd>R</kbd> to reject, and <kbd>↑</kbd> <kbd>↓</kbd> to move between edits.
 
-Accepted edits show **Applied** and the set's title changes to, for example, **1 of 1 applied**. If you change a passage yourself before deciding, its edit shows **Out of date: the text has changed since.** Ask again to get a fresh suggestion.
+A small wording change marks only the words it changes: removed words struck through, added words highlighted. A rewrite shows the old and new text whole.
+
+After undoing a rejection, you can select **Edit**, change the text and select **Save wording**. The card shows **Edited by you** once the saved wording is read back. Your document changes only when you select **Accept**; Undo and Redo then follow that reviewed wording.
+
+<Frame caption="Reviewed wording on a fictional resume, reopened after accepting and reloading.">
+  <img
+    src="/images/guides/using-the-assistant/restored-reviewed-wording.png"
+    alt="An opened Summary edit with the original paragraph struck through, Audited the fictional checkout flow with keyboard users highlighted, and Edited by you beneath it"
+  />
+</Frame>
+
+Each set is headed by what the edits do together, as the assistant titled it, and how many there are: for example **Tailor to the Lumen posting · 3 proposed edits**. An edit that adds a passage after an existing one shows **Adds after:** and that passage, then the new text, one line per new bullet. An edit whose new text says something your document doesn't, however small, shows **New detail: check it's true**. **Accept all** leaves those out (the button reads **Accept the others**), so you accept each one yourself after checking it.
+
+Before accepting resume edits, **Page fit** compares the printed page count before and after the edits eligible for **Accept all** (or **Accept the others**). **Estimated overflow change** shows the signed change in spill lines: a positive number adds overflow, a negative number reduces it. Measurement uses private copies with the current design and does not save changes. Edits open for rewriting and new details needing individual confirmation are left out. If measurement fails, check the page preview before accepting.
+
+<Frame caption="Page-fit measurement before accepting: this fictional one-edit set stays at five printed pages, with no change in estimated overflow.">
+  <img
+    src="/images/guides/using-the-assistant/proposal-page-fit.png"
+    alt="Proposal header reading Tighten the first passage, 1 proposed edit, Page fit: 5 to 5 printed pages, Estimated overflow change: 0 lines"
+  />
+</Frame>
+
+When you refine a request ("Don't say last year, it was 2025"), the new suggestion replaces the earlier one for the same passage if you hadn't decided on it. The earlier card shows **Replaced by a newer suggestion**, so you don't have to reject it yourself.
+
+After you ask to **Tighten to one page**, the request tells the assistant how far the resume runs over, and its reply says how much its edits save. Wording alone often can't close a gap that comes from the layout. Once a set is applied and the resume still runs over, the card says by how much and offers **Fit to one page**, which adjusts the design. On mobile, use **Fit to one page** on the Page tab.
+
+Accepted edits show **Applied** and the set's title changes to, for example, **1 of 1 applied**. They stay applied when you refine the wording yourself. If you change a passage yourself before deciding, its edit shows **Out of date: the text has changed since.** A pending structural set also becomes out of date when resume content or layout changes. Ask again to get a fresh suggestion.
+
+<Frame caption="Accept all placed two edits; the competing rewrite could not be placed">
+  <img
+    src="/images/guides/using-the-assistant/accept-all-results.png"
+    alt="Actual proposed edit cards with fictional release-check wording: 2 of 3 applied, two Applied badges, one Out of date notice, and a notification reporting 2 edits applied and 1 edit that could not be placed, with Undo"
+  />
+</Frame>
 
 The assistant only rewrites what your document already says. When a posting asks for something your document doesn't mention, it asks you first instead of inventing it.
 
+Select **Edit** to change a text edit's new text in your own words before deciding, then **Save wording**. A structural set has no **Edit**: accept it and adjust the result in Write, or reject it and ask again. Once it's saved and the app has read it back, the card shows **Edited by you**, and **Accept** applies your wording. If saving or reading it back fails, your text stays in the box with **Try again**, which picks up wording that was already saved. While its wording is open, saving or unsaved, the edit can't be accepted by any route, including **Accept all** and the <kbd>A</kbd> key, until it's saved or you cancel. An accepted edit is recorded with the document save itself, and only when it was applied in that edit's current wording. It stays recorded when other edits land in the same place, when you refine it, and through Undo and Redo. The same holds for a structural set you refine after accepting. If another tab or device changed the wording first, the save is refused and nothing is written: the editor shows a version conflict, where you can keep your draft as a copy and reload. Undo works the same way as for any accepted edit.
+
+### Tailoring to a posting
+
+Tailoring changes a copy of your resume made for that job, never the resume your other applications use. If the open resume isn't that copy, the assistant shows **Copy for this job** above the message box and won't propose edits that use the posting until you copy it, or leave the posting out. Edits it proposed with a posting can't be accepted on a resume that isn't that job's copy: copy the resume for the job and ask again there. Edits from older conversations that may have used a posting show as out of date and can't be applied anywhere; ask again on the resume you want to change.
+
+Tailoring started through MCP or the public API uses this same review flow. Its new copy starts unchanged, and its conversation holds pending proposals or questions. Review them here on web or mobile before accepting; **Undo** uses the normal editor history. This route sends the resume and posting without private notes, Knowledge or web access. If generation fails or is stopped, the unchanged copy remains in Documents so you can continue its conversation. Submitted application document links stay intact. The original `resumeId` and `name` response fields still identify the copy; they do not mean generated edits were accepted.
+
+<Note>
+  An older version of the app can't check these edits. A resume or letter with tailored edits it can't accept, or with
+  wording you changed, refuses changes from an older version of the app, even ones typed by hand: that app shows a
+  version conflict and keeps its draft as a copy. Refresh the page, or update the mobile app, to keep editing that
+  document. Changes an older version kept on your device while offline are still treated as that version's after you
+  update: such a document refuses them the same way. On mobile, **This older draft needs review** offers **Keep both**
+  to save them as a separate document, or **Use saved version** to discard them and start from the server's copy. **Keep
+  mine** isn't available for that refusal. On the web, **Review saved version** leads to the existing recovery choices.
+  Documents without such edits work as before.
+</Note>
+
+When you tailor, the card can also show:
+
+- **The assistant's reading of n posting requirements:** the requirements it found in the posting (and any the application lists), marked **An edit addresses it**, **Cited as already shown · check it**, **No evidence found · left as a gap** or **Not assessed**. Tick a gap to mark what you want to discuss; untick it to clear your choice. Ticking does not supply evidence, change its assessment, or change your resume. Gaps stay open, even when no edit could be placed; the assistant doesn't fill them with experience you don't have. It can miss requirements in a posting's text, so read the posting too.
+- **Posting asks for:** the requirement an edit addresses.
+- **The assistant cites n sources · check they say this:** the passages, or Knowledge facts, the assistant pointed to. A citation is the assistant's pointer, not proof; read it before you accept. **Nothing cited for this edit** means it pointed to nothing.
+- **Nothing checked backs these. Confirm each before accepting:** what the model flagged, plus numbers and years unless one statement in the entry (or role) being edited says all of them with the same subject words (longer words, and short names such as AWS), and words that aren't anywhere in your resume. A reworded claim can be flagged too. These checks find likely problems; they can't confirm an edit is true.
+
+Accepting changes the document only. It never saves anything to Knowledge as a confirmed fact. This reading helps you edit; it's separate from the term list in Check, and it isn't a prediction of how an employer or screening system will respond.
+
+<Frame caption="Tick a posting gap to mark it for discussion; its assessment stays Not assessed. Fictional resume and job.">
+  <img
+    src="/images/guides/using-the-assistant/posting-gap-checklist.png"
+    alt="Assistant showing an unchecked Accessibility audits gap, Not assessed, and proposed edits with separate Accept and Reject controls"
+  />
+</Frame>
+
+### Use Knowledge
+
+Turn on **Knowledge** in the message box to let the assistant look up your switched-on [Knowledge](/guides/building-career-knowledge) facts and cite them. It's off for each new conversation. When it's on, facts the assistant looks up are sent to your AI provider with that message. Once a reply looks up Knowledge, that reply and every later one in the conversation are treated as using it, because they can repeat it. They aren't sent again with a message that leaves Knowledge off. If you later correct, switch off or forget a fact, those replies are hidden from the conversation and never sent again, and a reply waiting on your answer has to start over.
+
 ## Undo an accepted edit
 
-Accepting shows a toast, **Edit applied**, with **Undo**. You can also press <kbd>⌘</kbd> <kbd>Z</kbd> (<kbd>Ctrl</kbd> <kbd>Z</kbd>) like any other change, or restore an earlier version from History. An edit you undo becomes pending again in the conversation, so you can accept it later. See [Undoing changes and version history](/guides/undoing-changes-and-version-history).
+Accepting shows a notification with the number of edits applied and **Undo**. You can also press <kbd>⌘</kbd> <kbd>Z</kbd> (<kbd>Ctrl</kbd> <kbd>Z</kbd>) like any other change, or use History to restore an earlier document. An edit you explicitly undo becomes pending again when its original passage is available, so you can accept it later. That decision is saved with the document, even if you close the assistant. If an unsaved decision is recovered after another tab or device saved a newer version, saving pauses for the usual conflict controls; matching text alone does not choose which decision to keep. See [Undoing changes and version history](/guides/undoing-changes-and-version-history).
+
+Accepted edits keep the reply's recorded AI request sources with your resume or letter, including through save, recovery and Undo. Other accepted edits from the same reply keep their source when you undo just one. Pending or rejected edits add none. Connection changes or deletion do not rewrite the original provider and model; accepting a saved edit makes no new AI request. See [AI usage](/guides/using-ai#see-your-ai-usage).
 
 ## Answer a question
 
 When the assistant needs a fact or a choice from you, it shows a blue question card with a few answers. Select one, or type your own under **Or in your own words…** and select **Send**. The assistant then continues with your answer.
 
-<Frame caption="A clarifying question from the assistant">
+After answering, **Remember** opens a review of your answer for Knowledge. Edit the fact and its type, choose whether it stays private to the selected application, then select **Remember** again to save. **Cancel** saves nothing. This is an explicit statement you review, not verified evidence or automatic memory; it sends nothing to AI and leaves your resume unchanged.
+
+<Frame caption="Review your own answer before saving a fact. Fictional answer; no Knowledge write until Remember.">
+  <img
+    src="/images/guides/using-the-assistant/answer-knowledge-review.png"
+    alt="Completed accessibility question with the original answer and an editable Knowledge review form, fact type, Remember and Cancel"
+  />
+</Frame>
+
+The same question cards appear in **Career → Coach** and **Ask the coach** inside an application workspace, on web and mobile. Only the latest reply can take an answer. Choices stay disabled while a reply is starting or reconnecting; **Stop** cancels that wait.
+
+If a question did not finish or could not be asked, send a new message to continue. If the provider fails after you answer, **Try again** keeps that answer and retries the reply. After reopening a conversation whose answer was already saved, send a new message instead.
+
+<Frame caption="Answer a clarifying question before continuing">
   <img
     src="/images/guides/using-the-assistant/clarifying-question-card.webp"
-    alt="A request to add accessibility work, followed by a blue question card asking whether the user has done accessibility work, with the answers Yes, I have and No, skip it and a box to answer in your own words"
+    alt="Assistant question card asking whether the applicant has accessibility experience, with Yes, I have, No, skip it and a free-text reply"
   />
 </Frame>
 
 ## Choose what's shared with each message
 
-Above the message box, chips show what goes with your next message: the document, and the job posting when the document is linked to an application. Select the **×** on a chip to leave it out, including before your first message. Without the document, the assistant can't read or edit it for that message. The line under the box always says what will be sent and to which provider, and nothing is sent until you press send.
+Above the message box, chips show what goes with your next message: the document, and the job posting when the document is linked to an application. Select the **×** on a chip to leave it out, including before your first message. A chip you left out stays as a dashed outline; select it to send that item again. Without the document, the assistant can't read or edit it for that message. The line under the box always says what will be sent and to which provider, names any attached files, and mentions earlier messages only once there are some. Nothing is sent until you press send. A long pasted message folds to its first lines in the conversation, with **Show all**. Before sending a long paste, **Attach a file instead** offers to upload those words as `message.txt`, using the existing destination approval. After a successful upload, the unchanged message box says **Read the attachment**; text you typed while it uploaded stays intact. A failed upload keeps your paste. Review the named file and disclosure, then press **Send** yourself. Removing the file releases its upload before the next message. Unsent uploads stay with their conversation. Reopening it on web or mobile restores their named chips, including an upload that finished while you changed accounts. Review or remove those files before sending; reopening never sends them to a provider.
 
-When you select **Prepare** from an application's detail panel, the assistant uses that application's posting, even when several applications share the same resume.
+Removing either context chip also leaves earlier conversation history out of the next reply. Pending questions or approvals from a different context cannot resume; send a new message with your current choices.
+
+The **Knowledge** chip is off by default. Turn it on for a message to let the assistant search your shared facts and stories, plus Knowledge private to the selected application when its posting is shared, read-only, for example "Add my conference talk from Knowledge". The line under the box then says what it finds is sent too. It can't change Knowledge; facts private to another application never appear. If you later correct, switch off or forget a fact, messages written after the assistant first searched Knowledge, up to that change, aren't sent again.
+
+From **Career → Coach** or a job's coach, **Add to resume** under an answer opens a resume's assistant with that answer in the message box; in a job's coach, that job's copies are listed first. The answer is handed over inside the app, not in the page address. Nothing is sent until you review it and press send, and the assistant proposes edits for you to accept as usual.
+
+Under each reply, **Used** names what it read: the document, and any facts and stories its Knowledge search found. Select a chip to see them.
+
+When you select **Interview prep** from an application's detail panel, the assistant uses that application's posting, even when several applications share the same resume.
 
 ## Attach files
 
-Select the paperclip in the message box to attach files, such as a job description PDF or your notes. You can attach them before your first message or later in the conversation. Each file shows as a chip; select its **×** to remove it before sending.
+Select the paperclip in the message box to attach files, such as a job description PDF or your notes. You can attach them before your first message or later in the conversation. The file picker offers the types the assistant can read. Each file shows as a chip; select its **×** to remove it before sending, which also deletes the uploaded file.
 
-- Plain text, Markdown and JSON files are read as text (up to the first 40,000 characters).
+On the web, the file stays in the box until removal is confirmed. Sending and further file changes wait while removal is pending. If removal fails, your message and file stay available; select **×** again to retry. The same applies in Career and application coach conversations. Files already sent stay with their messages until you delete the conversation.
+
+<Frame caption="A failed web removal keeps the fictional job-notes file and unsent message available for retry.">
+  <img
+    src="/images/guides/using-the-assistant/attachment-removal.png"
+    alt="Web assistant showing a fictional attachment chip and typed message after a removal error."
+  />
+</Frame>
+
+- Plain text, Markdown, JSON and Word (`.docx`) files are read as text (up to the first 40,000 characters). A Word file's page headers and footers are read too. If a Word file is damaged or has no text, the step shows **Couldn't read the attachment**.
 - Images, PDFs and MP3 or WAV audio are passed to the model directly. Whether the model can use them depends on your provider.
-- Other file types are attached but not read. Paste the relevant text instead.
-- You can attach up to 10 files per message, each up to 25 MB, 100 MB per conversation and 1 GB across all your conversations.
+- You can attach up to 10 files per message, each up to 25 MB, 100 MB per conversation and 1 GB across all your conversations. When you reach a limit, the message names it.
 
 <Note>
   Attachments work with local, S3-compatible or Vercel Blob storage and stay private. If you use a reverse proxy, allow
@@ -111,24 +258,50 @@ If you connect an optional **Web access** service in Integrations, the assistant
 
 You can also supply a public page URL: the assistant uses the selected reader or built-in reading. Page reading does not require a separate search account. Failed reading leads to pasted-text recovery; clipped or incomplete pages are identified before you rely on them.
 
+In a resume conversation, a successfully read page offers **Save as a job…** beneath its **Sources** link. Enter the company and role, check **Saved description**, then choose **Save and link this resume**. This saves the retained posting snapshot and its reading source, links the open resume, and switches on that posting's context chip for your next message. It does not read the page again or make another AI call. Search snippets and failed reads do not offer this action.
+
+**Cancel** saves nothing before confirmation. If saving succeeds but linking fails, retry the same confirmation to finish linking the saved application. When a link's response is lost, the app reads the stored link before confirming it. If that check fails, retry rechecks the same saved application. The posting chip switches on only after linking is confirmed. This action links the current resume rather than making a copy; use **Copy for a job** first when you want to keep it separate from your base resume. Clipped or incomplete snapshots keep that warning. Page text remains external content to review, including anything that looks like an instruction.
+
+<Frame caption="A fictional page read offers explicit posting review and save/link beneath its source. The company and role need confirmation before anything is saved.">
+  <img
+    src="/images/guides/using-the-assistant/save-read-posting.png"
+    alt="Assistant source for a fictional job with Company and Role fields, a Saved description disclosure, and Save and link this resume and Cancel buttons"
+  />
+</Frame>
+
+To remove your saved web connection, select **Remove connection**, then confirm. **Keep connection** cancels
+without changing it. On the website and mobile apps, the confirmation explains that reconnecting needs your API
+key again. The built-in reader remains active after removal.
+
+<Frame caption="Removing a saved web connection asks first; this example uses fictional local credentials">
+  <img
+    src="/images/guides/using-the-assistant/remove-web-connection-confirmation.png"
+    alt="The web connection removal dialog explains that reconnecting needs the key again, with Keep connection and Remove connection buttons"
+  />
+</Frame>
+
+Before each search, a card shows the exact query. Select **Search the web** to send that query to your search service, or **Skip** to continue without it. Review it for private details before approving. This applies on web and mobile.
+
+The sharing dialog can also ask permission for a direct OpenAI, Anthropic or Google Gemini connection to retry a rejected-key or exhausted-quota search with its own search service. This may add AI requests and charges. The exact-query card still needs your approval; the retry adds no document or Knowledge context to that query. Declining sharing or selecting **Skip** prevents that search. Custom endpoints and compatible gateways are excluded, and unsupported models can still fail. Coach requires **Web research** on for the message. Scheduled discovery does not gain this fallback.
+
 The conversation shows search/read progress, failures and retrieved **Sources**. Sources remain visible after reopening the conversation. A failed search keeps your conversation and does not silently switch paid providers.
 
 ## Switch models
 
-The model chip in the assistant's header shows the model in use. Select it to switch to another connected provider for this conversation, or choose **Connect another…** to add one in settings.
+The model chip in the assistant's header shows the model in use. Select it to choose another connected provider and approve transferring earlier messages on your next send, or choose **Connect another…** to add one right there, over the conversation. **Back to the conversation** returns with your message as you left it.
 
-<Frame caption="The model menu">
+<Frame caption="Choose a model available through your provider">
   <img
     src="/images/guides/using-the-assistant/model-menu.webp"
-    alt="Model menu open under the gpt-5-mini chip, listing the provider Work gateway with its model gpt-5-mini and a checkmark, and Connect another…"
+    alt="Assistant model menu for the connected local example provider"
   />
 </Frame>
 
 ## Stop, retry or copy a conversation
 
 - **Stop a reply** with the stop button that replaces send while the assistant is working, or press <kbd>Esc</kbd> in the message box. If it stopped before proposing anything, you'll see **Stopped. No edits were proposed.** with **Continue**.
-- **When the provider returns an error**, your message is kept. Select **Retry**, or **Switch model** to try another provider.
-- **Copy transcript** at the end of the conversation copies the messages as plain text, speaker by speaker, without the tool steps, and includes the retrieved source links.
+- **When a reply fails**, your message is kept. Select **Retry**. **Switch model** appears when the provider caused the failure, such as a rejected key, a missing model or a rate limit. A lost internet connection says **Couldn't reach Reactive Resume** instead.
+- **Copy transcript** at the end of the conversation copies the messages as plain text, speaker by speaker, with each proposed edit (where it lands, old and new text, and whether you accepted it), each question with your answer, and the retrieved source links.
 
 A single reply can run for about four minutes. If it hits that limit, the assistant says "Time limit reached. Your progress is saved. Ask me to continue."
 
@@ -136,16 +309,23 @@ A single reply can run for about four minutes. If it hits that limit, the assist
 
 Each conversation belongs to one document. Opening the assistant continues that document's latest conversation. Select **New conversation** (the pencil) to start fresh, or **Past conversations** (the clock) to see earlier ones.
 
-<Frame caption="Past conversations for this document">
+<Frame caption="Reopen a saved conversation">
   <img
-    src="/images/guides/using-the-assistant/past-conversations.webp"
-    alt="Past conversations list under This document, showing three conversations titled by their first message, each with its time and outcome such as 1 of 1 edits accepted or no edits"
+    src="/images/guides/using-the-assistant/past-conversations.png"
+    alt="Assistant history with a task title, the fictional opening message beneath it, and edit counts"
   />
 </Frame>
 
-Conversations are titled by your first message and show how many edits you accepted. Conversations about your other documents appear under **Other documents**; opening one takes you to that document. To delete a conversation, hover over it, select **×**, then confirm. Its messages and attachments are deleted, but edits you accepted stay in your document.
+Conversations are titled by the first set of edits the assistant proposed ("Tailor summary to payments roles"), or by your first message until there is one. A one-line preview of your original first message appears below the title on web and mobile, followed by the time and how many edits you accepted. This uses the saved message, without another AI request. An attachment-only opening has no message preview. While a conversation is open, its address is in the page's URL, so reloading the page reopens it. Conversations about your other documents appear under **Other documents**; opening one takes you to that document. To delete a conversation, hover over it, select **×**, then confirm. Its messages and attachments are deleted, but edits you accepted stay in your document.
 
-A conversation becomes read-only if its document is locked or deleted, or its provider was deleted. Unlock the document, or pick another model from the model chip, to continue.
+On a locked document the assistant still answers questions and writes drafts, such as a follow-up email or interview notes, but proposes no edits. The note above the message box offers **Unlock**. A deleted document keeps its conversation read-only. Opening an old conversation link, including in a new tab, returns to Documents with a note explaining that the conversation is unavailable or its document was deleted. Reloading Documents doesn't repeat that note. If a provider is off, broken or deleted, history and pending edits stay readable. You can accept saved edits and undo document changes while sending pauses. Repair the connection through **Set up AI**, or choose another model and approve its destination. The app never moves a conversation automatically.
+
+<Frame caption="An unavailable conversation link returns to Documents with an explanation">
+  <img
+    src="/images/guides/using-the-assistant/unavailable-conversation.png"
+    alt="Documents for a fictional test account, with a notification saying the conversation is unavailable and may have been deleted"
+  />
+</Frame>
 
 <Info>
   Replies stream while the conversation is open. On instances without Redis (some self-hosted setups), a reply that's
@@ -168,3 +348,17 @@ A conversation becomes read-only if its document is locked or deleted, or its pr
     Use the assistant on letters, too.
   </Card>
 </CardGroup>
+
+<Frame caption="Pending edits remain after an explicitly approved connection change.">
+  <img
+    src="/images/guides/using-the-assistant/rx98-explicit-destination.png"
+    alt="Fictional assistant conversation retaining its proposed rewrite, with the alternate connection named under the composer."
+  />
+</Frame>
+
+<Frame caption="An existing proposal remains actionable while its AI connection is Off.">
+  <img
+    src="/images/guides/using-the-assistant/rx98-off-local-accept.png"
+    alt="Fictional resume with its saved rewrite marked Applied while the original AI connection is unavailable and the message composer is disabled."
+  />
+</Frame>

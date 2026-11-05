@@ -14,17 +14,21 @@ import { TanStackDevtools } from "@tanstack/react-devtools";
 import { HotkeysProvider } from "@tanstack/react-hotkeys";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtoolsPanel } from "@tanstack/react-query-devtools";
-import { createRootRouteWithContext, HeadContent, Outlet } from "@tanstack/react-router";
+import { createRootRouteWithContext, HeadContent, Outlet, redirect } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
 import { LazyMotion, MotionConfig } from "motion/react";
 import { useEffect } from "react";
 import { Toaster } from "@reactive-resume/ui/components/toast";
 import { TooltipProvider } from "@reactive-resume/ui/components/tooltip";
+import { isAppSectionPath } from "@reactive-resume/utils/app-paths";
 import { isRTL } from "@reactive-resume/utils/locale";
 import { BreakpointIndicator } from "@/components/layout/breakpoint-indicator";
+import { NavigationFocus } from "@/components/layout/navigation-focus";
 import { DialogManager } from "@/dialogs/manager";
+import { SessionRecovery } from "@/features/auth/components/session-recovery";
 import { CommandPalette } from "@/features/command-palette";
 import { useDocumentWebMcpTools } from "@/features/documents/webmcp";
+import { KeyboardShortcuts } from "@/features/keyboard-shortcuts";
 import { ThemeProvider } from "@/features/theme/provider";
 import { ConfirmDialogProvider } from "@/hooks/use-confirm";
 import { loadRootContext } from "@/libs/root-context";
@@ -45,8 +49,6 @@ const iconContextValue: IconProps = { size: 16, weight: "regular" };
 const motionFeatures = import("@/libs/motion-features").then((module) => module.default);
 const loadMotionFeatures = () => motionFeatures;
 
-// Tofu (2026-10-25): upstream's donation pop-up (components/ui/donation-toast.tsx) is not shown on Tofu's copies.
-
 export const Route = createRootRouteWithContext<RouterContext>()({
 	component: RootComponent,
 	// index.html carries the tags that never change (charset, viewport, icons, manifest); the server adds each page's
@@ -55,7 +57,15 @@ export const Route = createRootRouteWithContext<RouterContext>()({
 		const { title, description } = getHomepageMeta();
 		return { meta: [{ title }, { name: "description", content: description }] };
 	},
-	beforeLoad: ({ context }) => loadRootContext(context.queryClient),
+	beforeLoad: async ({ context, location, preload }) => {
+		const root = await loadRootContext(context.queryClient, { commit: !preload });
+		const { aliasUrl, appUrl } = root.flags;
+		// Sign-in and the editor live on APP_URL; the alias (APP_ALIAS_URL) only serves the public pages. The server
+		// redirects full page loads; this catches links followed inside the app.
+		if (!preload && appUrl && aliasUrl === window.location.origin && isAppSectionPath(location.pathname))
+			throw redirect({ href: `${appUrl}${location.href}` });
+		return root;
+	},
 });
 
 function RootComponent() {
@@ -85,10 +95,13 @@ function RootComponent() {
 										<DirectionProvider direction={dir}>
 											<TooltipProvider>
 												<ConfirmDialogProvider>
+													<NavigationFocus />
 													<Outlet />
+													<SessionRecovery />
 
 													<DialogManager />
 													<CommandPalette />
+													<KeyboardShortcuts />
 													<LocalizedToaster />
 
 													{import.meta.env.DEV && <BreakpointIndicator />}
@@ -123,5 +136,5 @@ function RootComponent() {
 
 function LocalizedToaster() {
 	useLingui();
-	return <Toaster closeLabel={t`Close notification`} />;
+	return <Toaster closeLabel={t`Close notification`} regionLabel={t`Notifications`} />;
 }

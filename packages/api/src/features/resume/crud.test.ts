@@ -1,9 +1,12 @@
+import { readFile } from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { createRouterClient } from "@orpc/server";
+import { createRouterClient, ORPCError } from "@orpc/server";
 import { defaultResumeData } from "@reactive-resume/schema/resume/default";
+import { sampleResumeData } from "@reactive-resume/schema/resume/sample";
 
 const mocks = vi.hoisted(() => ({
 	create: vi.fn(),
+	getById: vi.fn(),
 	update: vi.fn(),
 	snapshot: vi.fn(),
 }));
@@ -22,6 +25,7 @@ vi.mock("../../context", async () => {
 vi.mock("./service", () => ({
 	resumeService: {
 		create: mocks.create,
+		getById: mocks.getById,
 		update: mocks.update,
 		versions: { snapshot: mocks.snapshot },
 	},
@@ -31,8 +35,14 @@ const { crudRouter } = await import("./crud");
 
 describe("resume write route validation", () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		vi.resetAllMocks();
 		mocks.create.mockResolvedValue("resume-id");
+		mocks.getById.mockResolvedValue({
+			id: "resume-id",
+			name: "Original",
+			tags: [],
+			data: defaultResumeData,
+		});
 		mocks.update.mockResolvedValue({});
 		mocks.snapshot.mockResolvedValue(undefined);
 	});
@@ -54,18 +64,174 @@ describe("resume write route validation", () => {
 		expect(mocks.snapshot).not.toHaveBeenCalled();
 	});
 
-	it.each([false, true])("puts the account holder's name on a new resume (sample data: %s)", async (withSampleData) => {
+	it("declares RESUME_PRIMARY_CONFLICT in the generated update contract", async () => {
+		type CodeSchema = { properties?: { code?: { const?: string } } };
+		const spec = JSON.parse(await readFile(new URL("../../../../../docs/spec.json", import.meta.url), "utf8")) as {
+			paths: {
+				"/resumes/{id}": {
+					put: { responses: { "409": { content: { "application/json": { schema: { oneOf: CodeSchema[] } } } } } };
+				};
+			};
+		};
+		const codes = spec.paths["/resumes/{id}"].put.responses["409"].content["application/json"].schema.oneOf
+			.map((schema) => schema.properties?.code?.const)
+			.filter(Boolean);
+
+		expect(codes).toContain("RESUME_PRIMARY_CONFLICT");
+	});
+
+	it.each([false, true])(
+		"names a new resume's person: the account holder, or the sample's own (sample data: %s)",
+		async (withSampleData) => {
+			const client = createRouterClient(crudRouter, {
+				context: {
+					locale: "en-US",
+					reqHeaders: new Headers(),
+					user: { id: "user-id", name: "Sam Taylor", email: "sam@example.test" },
+				} as never,
+			});
+
+			await client.create({ name: "Outstanding Blue Whale", tags: [], withSampleData });
+
+			// A sample keeps its fictional person: someone else's career under the account's name would mislead.
+			expect(mocks.create).toHaveBeenCalledWith(
+				expect.objectContaining({
+					name: "Outstanding Blue Whale",
+					data: expect.objectContaining({
+						basics: expect.objectContaining({ name: withSampleData ? sampleResumeData.basics.name : "Sam Taylor" }),
+					}),
+				}),
+			);
+			// A blank resume also starts with the account's email; a sample keeps its own.
+			const created = mocks.create.mock.calls.at(-1)?.[0] as { data: { basics: { email: string } } };
+			if (!withSampleData) expect(created.data.basics.email).toBe("sam@example.test");
+			else expect(created.data.basics.email).toBe(sampleResumeData.basics.email);
+		},
+	);
+
+	it("leaves a guest's placeholder address off a new resume", async () => {
 		const client = createRouterClient(crudRouter, {
-			context: { locale: "en-US", reqHeaders: new Headers(), user: { id: "user-id", name: "Sam Taylor" } } as never,
+			context: {
+				locale: "en-US",
+				reqHeaders: new Headers(),
+				user: { id: "guest-id", name: "Guest", email: "temp-1@reactive-resume.local", isAnonymous: true },
+			} as never,
 		});
 
-		await client.create({ name: "Outstanding Blue Whale", tags: [], withSampleData });
+		await client.create({ name: "Untitled", tags: [], withSampleData: false });
 
+		const created = mocks.create.mock.calls.at(-1)?.[0] as { data: { basics: { email: string } } };
+		expect(created.data.basics.email).toBe("");
+	});
+
+	it("keeps a signed-up account's address even on the guest domain", async () => {
+		const client = createRouterClient(crudRouter, {
+			context: {
+				locale: "en-US",
+				reqHeaders: new Headers(),
+				user: { id: "user-id", name: "Sam", email: "sam@reactive-resume.local", isAnonymous: false },
+			} as never,
+		});
+
+		await client.create({ name: "Untitled", tags: [], withSampleData: false });
+
+		const created = mocks.create.mock.calls.at(-1)?.[0] as { data: { basics: { email: string } } };
+		expect(created.data.basics.email).toBe("sam@reactive-resume.local");
+	});
+
+	it("allows overlong slug on update to reach the service for change-sensitive check", async () => {
+		const client = createRouterClient(crudRouter, {
+			context: { locale: "en-US", reqHeaders: new Headers(), user: { id: "user-id", name: "Sam" } } as never,
+		});
+		const tooLongSlug = "a".repeat(65);
+		mocks.update.mockResolvedValueOnce({
+			id: "resume-id",
+			name: "Resume",
+			slug: tooLongSlug,
+			tags: [],
+			isPublic: false,
+			showDownloadButtons: true,
+			showInSearchEngines: false,
+			hideContactDetails: false,
+			isPrimary: false,
+			isLocked: false,
+			data: defaultResumeData,
+			createdAt: new Date(),
+			updatedAt: new Date(),
+			hasPassword: false,
+		});
+
+		await client.update({ id: "resume-id", slug: tooLongSlug });
+		expect(mocks.update).toHaveBeenCalledWith(expect.objectContaining({ id: "resume-id", slug: tooLongSlug }));
+	});
+
+	it.each(
+		["create", "duplicate", "update"].flatMap((operation) =>
+			["", "a".repeat(65), "Invalid Slug@123!"].map((slug) => ({ operation, slug })),
+		),
+	)("returns INVALID_SLUG for $operation with slug '$slug'", async ({ operation, slug }) => {
+		mocks.create.mockRejectedValueOnce(new ORPCError("INVALID_SLUG", { status: 400 }));
+		mocks.update.mockRejectedValueOnce(new ORPCError("INVALID_SLUG", { status: 400 }));
+
+		const client = createRouterClient(crudRouter, {
+			context: { locale: "en-US", reqHeaders: new Headers(), user: { id: "user-id", name: "Sam" } } as never,
+		});
+
+		const result =
+			operation === "create"
+				? client.create({ name: "Resume", tags: [], slug })
+				: operation === "duplicate"
+					? client.duplicate({ id: "resume-id", name: "Resume", slug })
+					: client.update({ id: "resume-id", slug });
+
+		await expect(result).rejects.toMatchObject({ code: "INVALID_SLUG", status: 400 });
+	});
+
+	it("propagates NOT_FOUND when duplicating a non-existent resume", async () => {
+		mocks.getById.mockRejectedValueOnce(new ORPCError("NOT_FOUND", { status: 404 }));
+
+		const client = createRouterClient(crudRouter, {
+			context: { locale: "en-US", reqHeaders: new Headers(), user: { id: "user-id", name: "Sam" } } as never,
+		});
+
+		await expect(client.duplicate({ id: "missing-id" })).rejects.toMatchObject({
+			code: "NOT_FOUND",
+			status: 404,
+		});
+	});
+	it("passes an explicit copy language to creation without modifying the source data", async () => {
+		const source = structuredClone(defaultResumeData);
+		mocks.getById.mockResolvedValueOnce({ id: "resume-id", name: "Original", tags: [], data: source });
+		const client = createRouterClient(crudRouter, {
+			context: { locale: "en-US", reqHeaders: new Headers(), user: { id: "owner" } } as never,
+		});
+		await client.duplicate({ id: "resume-id", name: "German copy", pageLocale: "de-DE" });
+		expect(mocks.getById).toHaveBeenCalledWith({ id: "resume-id", userId: "owner" });
 		expect(mocks.create).toHaveBeenCalledWith(
-			expect.objectContaining({
-				name: "Outstanding Blue Whale",
-				data: expect.objectContaining({ basics: expect.objectContaining({ name: "Sam Taylor" }) }),
-			}),
+			expect.objectContaining({ userId: "owner", locale: "de-DE", name: "German copy" }),
 		);
+		expect(source).toEqual(defaultResumeData);
+		await expect(client.duplicate({ id: "resume-id", pageLocale: "invalid" as never })).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+		});
+		expect(mocks.create).toHaveBeenCalledTimes(1);
 	});
 });
+
+it.each([false, true])(
+	"uses explicit resume language for blank/sample=%s independently of interface language",
+	async (withSampleData) => {
+		const client = createRouterClient(crudRouter, {
+			context: { locale: "en-US", reqHeaders: new Headers(), user: { id: "owner", name: "Fictional Person" } } as never,
+		});
+		await client.create({ name: "German resume", tags: [], withSampleData, locale: "de-DE" });
+		expect(mocks.create).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				locale: "de-DE",
+				data: expect.objectContaining({
+					metadata: expect.objectContaining({ page: expect.objectContaining({ locale: "de-DE" }) }),
+				}),
+			}),
+		);
+	},
+);

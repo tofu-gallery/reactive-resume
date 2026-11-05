@@ -5,6 +5,7 @@ import { Button } from "@reactive-resume/ui/components/button";
 import { ButtonGroup } from "@reactive-resume/ui/components/button-group";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { IconButton } from "@reactive-resume/ui/components/icon-button";
+import { cn } from "@reactive-resume/utils/style";
 import { AssistantButton } from "@/features/assistant/assistant-button";
 import { BackLink, DrawerControls } from "@/features/resume/editor/chrome";
 import { useEditorStore } from "@/features/resume/editor/store";
@@ -17,19 +18,28 @@ type EditorBarFrameProps = {
 	menu: ReactNode;
 	/** The mode switch; phones switch from their tab bar instead. */
 	modes: ReactNode;
+	/** Undo and Redo, first in the actions. */
+	history?: ReactNode;
 	/** Share and Download, after History and the assistant. */
 	children: ReactNode;
 };
 
 /**
- * The 56px editor bar: back, the document's name and save state · the mode switch · History, the assistant, Share and
- * Download. The mode switch stays centered through a `1fr auto 1fr` grid.
+ * The 56px editor bar: back, the document's name and save state · the mode switch · Undo and Redo, History, the
+ * assistant, Share and Download. Desktop centers the modes; tablet actions take only their own width.
  */
-export function EditorBarFrame({ layout, pinnable, menu, modes, children }: EditorBarFrameProps) {
-	const setShareTab = useEditorStore((state) => state.setShareTab);
+export function EditorBarFrame({ layout, pinnable, menu, modes, history, children }: EditorBarFrameProps) {
+	const setSheetTab = useEditorStore((state) => state.setSheetTab);
 
 	return (
-		<header className="grid h-(--editor-bar) grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-b border-line bg-surface px-3">
+		<header
+			className={cn(
+				"grid h-(--editor-bar) items-center gap-3 border-b border-line bg-surface px-3",
+				layout === "tablet"
+					? "grid-cols-[minmax(0,1fr)_auto_auto] gap-2"
+					: "grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
+			)}
+		>
 			<div className="flex min-w-0 items-center gap-1.5">
 				<BackLink />
 				{layout === "tablet" && <DrawerControls pinnable={pinnable} />}
@@ -39,13 +49,14 @@ export function EditorBarFrame({ layout, pinnable, menu, modes, children }: Edit
 			{layout === "mobile" ? <span /> : modes}
 
 			<div className="flex items-center justify-end gap-1">
-				{/* History lives in the Share & export sheet; the clock opens it there. */}
+				{history}
+				{/* History lives in the Download & history sheet; the clock opens it there. */}
 				{layout === "desktop" && (
 					<IconButton
 						icon="clock-counter-clockwise"
 						label={t`History`}
 						className="text-ink-2"
-						onClick={() => setShareTab("history")}
+						onClick={() => setSheetTab("history")}
 					/>
 				)}
 				{/* Every layout opens the assistant from the ✦: a column, a drawer, or full screen on phones. */}
@@ -79,7 +90,7 @@ export function DownloadButtons({
 	disabled = false,
 	onPreload,
 }: DownloadButtonsProps) {
-	const setShareTab = useEditorStore((state) => state.setShareTab);
+	const setSheetTab = useEditorStore((state) => state.setSheetTab);
 
 	if (compact) {
 		return (
@@ -113,7 +124,7 @@ export function DownloadButtons({
 				className="w-8 border-s border-s-[oklch(1_0_0/0.25)]"
 				onPointerEnter={onPreload}
 				onFocus={onPreload}
-				onClick={() => setShareTab("download")}
+				onClick={() => setSheetTab("download")}
 			>
 				<Icon name="caret-down" />
 			</Button>

@@ -15,7 +15,10 @@ const passed = {
 
 function authorize(runs) {
 	return requireSuccessfulCI({
-		github: { rest: { actions: { listWorkflowRuns() {} } }, paginate: async () => runs },
+		github: {
+			rest: { actions: { listWorkflowRuns() {} } },
+			paginate: async (_method, { workflow_id }) => (workflow_id === "ci.yml" ? runs : []),
+		},
 		repo: { owner: "example", repo: "app" },
 		sha,
 	});

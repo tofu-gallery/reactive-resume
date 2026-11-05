@@ -3,13 +3,8 @@ import fs from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
-	env: { APP_URL: "https://rxresu.me", ROOT_RESUME_ID: undefined as string | undefined },
+	env: { APP_URL: "https://rxresu.me" },
 	serveStatic: vi.fn(() => vi.fn()),
-	getPublicResumeSocialMeta: vi.fn(),
-}));
-
-vi.mock("@reactive-resume/api/features/resume/social-meta", () => ({
-	getPublicResumeSocialMeta: mocks.getPublicResumeSocialMeta,
 }));
 
 vi.mock("node:fs", () => ({
@@ -30,32 +25,27 @@ vi.mock("@reactive-resume/env/server", () => ({
 	env: mocks.env,
 }));
 
-const { handleWebApp } = await import("./web");
+const { handleWebApp, isPublicResumePath } = await import("./web");
 
 describe("web app fallback classification", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
-		mocks.env.ROOT_RESUME_ID = undefined;
 		vi.mocked(fs.readFile).mockResolvedValue("<html>app</html>");
-		mocks.getPublicResumeSocialMeta.mockResolvedValue(null);
 	});
 
 	// Tofu (2026-10-25): pages and headers no longer carry upstream's Context7 site key (seo.ts).
-	it.each(["/", "/?locale=de-DE", "/ats-checker", "/resume-templates", "/dashboard", "/alice/resume", "/index.html"])(
-		"serves %s and its HEAD response without upstream's Context7 site key",
-		async (path) => {
-			vi.mocked(fs.readFile).mockResolvedValue('<html><head></head><body><div id="app"></div></body></html>');
-			const response = await handleWebApp(new Request(`https://rxresu.me${path}`));
-			const html = await response.text();
-			expect(html).toContain('<body><div id="app"></div>');
-			expect(html).not.toMatch(/context7|siteKey|blockquote/i);
-			expect(html).not.toContain("Add .md");
-			expect(response.headers.get("Link")).toBeNull();
-			const head = await handleWebApp(new Request(`https://rxresu.me${path}`, { method: "HEAD" }));
-			expect(head.headers.get("Link")).toBeNull();
-			expect(await head.text()).toBe("");
-		},
-	);
+	it.each(["/", "/dashboard"])("serves %s and its HEAD response without upstream's Context7 site key", async (path) => {
+		vi.mocked(fs.readFile).mockResolvedValue('<html><head></head><body><div id="app"></div></body></html>');
+		const response = await handleWebApp(new Request(`https://rxresu.me${path}`));
+		const html = await response.text();
+		expect(html).toContain('<body><div id="app"></div>');
+		expect(html).not.toMatch(/context7|siteKey|blockquote/i);
+		expect(html).not.toContain("Add .md");
+		expect(response.headers.get("Link")).toBeNull();
+		const head = await handleWebApp(new Request(`https://rxresu.me${path}`, { method: "HEAD" }));
+		expect(head.headers.get("Link")).toBeNull();
+		expect(await head.text()).toBe("");
+	});
 
 	it("injects canonical metadata and structured data into tracking-parameter root requests only", async () => {
 		vi.mocked(fs.readFile).mockResolvedValue(`
@@ -88,6 +78,19 @@ describe("web app fallback classification", () => {
 		expect(await dashboardResponse.text()).not.toContain('rel="canonical"');
 	});
 
+	it.each(["https://example.com/?locale=zu-ZA", "https://example.com/"])(
+		"recovers a pseudo-locale request or cookie to readable public HTML: %s",
+		async (url) => {
+			vi.mocked(fs.readFile).mockImplementation((path) =>
+				Promise.resolve(`<html><head></head><body>${String(path)}</body></html>`),
+			);
+			const response = await handleWebApp(new Request(url, { headers: { cookie: "locale=zu-ZA" } }));
+			const html = await response.text();
+			expect(html).toContain("dist-prerender/home/en-US.html");
+			expect(html).not.toContain("zu-ZA");
+		},
+	);
+
 	it("serves the homepage prerendered in the requested or saved locale, with hreflang alternates", async () => {
 		vi.mocked(fs.readFile).mockImplementation((path) => {
 			const locale = String(path).match(/dist-prerender\/home\/(.+)\.html$/)?.[1];
@@ -111,94 +114,105 @@ describe("web app fallback classification", () => {
 		expect(await unknown.text()).toContain('<div id="app">en-US</div>');
 	});
 
-	describe.each(["ats-checker", "resume-templates"])("the %s page", (path) => {
-		const shell = `<html><head><title>Reactive Resume — A free and open-source resume builder</title><meta name="description" content="Marketing copy."></head><body></body></html>`;
+	it("names structured data's language as a BCP 47 tag, and as English when the page falls back to the shell", async () => {
+		vi.mocked(fs.readFile).mockImplementation((path) => {
+			const locale = String(path).match(/dist-prerender\/home\/(.+)\.html$/)?.[1];
+			if (locale === "fr-FR") return Promise.reject(new Error("missing"));
+			return Promise.resolve(`<html><head></head><body><div id="app">${locale ?? "shell"}</div></body></html>`);
+		});
 
-		it("serves an indexable shell rather than a 404", async () => {
-			vi.mocked(fs.readFile).mockResolvedValue(shell);
+		const serbian = await (await handleWebApp(new Request("https://example.com/?locale=sr-SP"))).text();
+		expect(serbian).toContain('"inLanguage":"sr"');
+		expect(serbian).not.toContain('"inLanguage":"sr-SP"');
+
+		const missing = await (await handleWebApp(new Request("https://example.com/?locale=fr-FR"))).text();
+		expect(missing).toContain('"inLanguage":"en-US"');
+	});
+
+	it("keeps shared HTML and its cache validators independent of browser language hints", async () => {
+		vi.mocked(fs.readFile).mockImplementation((path) =>
+			Promise.resolve(`<html><head></head><body>${String(path)}</body></html>`),
+		);
+		const german = await handleWebApp(new Request("https://rxresu.me/", { headers: { "accept-language": "de-DE" } }));
+		const french = await handleWebApp(new Request("https://rxresu.me/", { headers: { "accept-language": "fr-FR" } }));
+		const body = await german.text();
+		expect(body).toContain("home/en-US.html");
+		expect(await french.text()).toBe(body);
+		expect(german.headers.get("ETag")).toBe(french.headers.get("ETag"));
+		expect(german.headers.get("Vary")).toBe("Cookie");
+		expect(german.headers.get("Set-Cookie")).toBeNull();
+	});
+
+	it("preserves request parameters in language links before JavaScript", async () => {
+		const template =
+			'<html><head></head><body><a href="/?locale=de-DE#languages" lang="de-DE">Deutsch</a><a href="/?locale=en-US#languages" lang="en-US">English</a><a href="/auth/login">Sign in</a></body></html>';
+		vi.mocked(fs.readFile).mockResolvedValue(template);
+		const request = new Request("https://example.com/?locale=ar-SA&campaign=independent&tag=a&tag=b&empty=", {
+			headers: { cookie: "locale=ar-SA" },
+		});
+		const response = await handleWebApp(request);
+		const html = await response.text();
+		expect(html).toContain('href="/?locale=de-DE&amp;campaign=independent&amp;tag=a&amp;tag=b&amp;empty=#languages"');
+		expect(html).toContain('href="/?locale=en-US&amp;campaign=independent&amp;tag=a&amp;tag=b&amp;empty=#languages"');
+		expect(html).toContain('<a href="/auth/login">Sign in</a>');
+		expect(html).toContain('<link rel="canonical" href="https://rxresu.me/?locale=ar-SA">');
+		expect(response.headers.get("Vary")).toBe("Cookie");
+	});
+
+	it("keeps query values inert and out of script authorization when personalizing language links", async () => {
+		const script = "window.ready = true;";
+		const template = `<html><head></head><body><a href="/?locale=de-DE#languages">Deutsch</a><script>${script}</script></body></html>`;
+		vi.mocked(fs.readFile).mockResolvedValue(template);
+		const url = new URL("https://example.com/?locale=en-US");
+		url.searchParams.set("campaign", '"><script>window.injected=true</script>&$&');
+		const response = await handleWebApp(new Request(url));
+		const html = await response.text();
+		expect(html).toContain(
+			'href="/?locale=de-DE&amp;campaign=%22%3E%3Cscript%3Ewindow.injected%3Dtrue%3C%2Fscript%3E%26%24%26#languages"',
+		);
+		expect(html.match(/<script>/g)).toHaveLength(1);
+		expect(html).toContain(`<script>${script}</script>`);
+		expect(response.headers.get("Content-Security-Policy")).toContain(
+			`'sha256-${createHash("sha256").update(script).digest("base64")}'`,
+		);
+		expect(response.headers.get("Content-Security-Policy")).not.toContain(
+			`'sha256-${createHash("sha256").update("window.injected=true").digest("base64")}'`,
+		);
+	});
+
+	it.each(["ats-checker", "resume-templates"])(
+		"serves the %s page as an indexable shell rather than a 404",
+		async (path) => {
+			vi.mocked(fs.readFile).mockResolvedValue(
+				`<html><head><title>Reactive Resume — A free and open-source resume builder</title><meta name="description" content="Marketing copy."></head><body></body></html>`,
+			);
 
 			const response = await handleWebApp(new Request(`https://example.com/${path}`));
 
 			expect(response.status).toBe(200);
 			expect(response.headers.get("Content-Type")).toBe("text/html; charset=UTF-8");
 			expect(response.headers.get("X-Robots-Tag")).toBeNull();
-		});
+		},
+	);
 
-		it("serves the prerendered page in the requested locale, with its own title on the social cards", async () => {
-			vi.mocked(fs.readFile).mockImplementation((path) => {
-				const match = String(path).match(/dist-prerender\/(?:ats-checker|resume-templates)\/(.+)\.html$/);
-				if (!match) return Promise.resolve(shell);
-				return Promise.resolve(
-					`<html><head><title>ATS-Prüfung &amp; mehr</title><meta name="description" content="Lesbar?"></head><body><div id="app">${match[1]}</div></body></html>`,
-				);
-			});
-
-			const html = await (await handleWebApp(new Request(`https://example.com/${path}?locale=de-DE`))).text();
-
-			expect(html).toContain('<div id="app">de-DE</div>');
-			expect(html).toContain(`<link rel="canonical" href="https://rxresu.me/${path}?locale=de-DE">`);
-			expect(html).toContain('<meta property="og:title" content="ATS-Prüfung &amp; mehr">');
-			expect(html).toContain('<meta property="og:locale" content="de_DE">');
-		});
-	});
-
-	describe("public resume social cards", () => {
-		const shell = `<html><head><title>Reactive Resume — A free and open-source resume builder</title><meta name="description" content="Marketing copy."></head><body></body></html>`;
-
-		it("escapes user-authored values so resume content cannot break out of the attribute", async () => {
-			vi.mocked(fs.readFile).mockResolvedValue(shell);
-			mocks.getPublicResumeSocialMeta.mockResolvedValue({
-				name: 'Jane" onload="alert(1)',
-				title: "<script>alert(1)</script>",
-				description: 'Ends with " and & ampersand',
-				template: "azurill",
-			});
-
-			const html = await (await handleWebApp(new Request("https://example.com/jane/resume"))).text();
-
-			expect(html).not.toContain("<script>alert(1)</script>");
-			expect(html).not.toContain('onload="alert(1)');
-			expect(html).toContain('<meta property="og:title" content="&lt;script&gt;alert(1)&lt;/script&gt;">');
-			expect(html).toContain('content="Ends with &quot; and &amp; ampersand"');
-		});
-
-		it("keeps replacement patterns in resume text literal", async () => {
-			vi.mocked(fs.readFile).mockResolvedValue(shell);
-			mocks.getPublicResumeSocialMeta.mockResolvedValue({
-				name: "Jane $& $' Doe",
-				title: "Jane Doe",
-				description: "Costs $$ and $` nothing",
-				template: "azurill",
-			});
-
-			const html = await (await handleWebApp(new Request("https://example.com/jane/resume"))).text();
-
-			expect(html).toContain("<title>Jane $&amp; $&#39; Doe - Reactive Resume</title>");
-			expect(html).toContain('<meta name="description" content="Costs $$ and $` nothing">');
-		});
-
-		it("preloads the PDF the app will fetch, only for resumes anyone may open", async () => {
-			vi.mocked(fs.readFile).mockResolvedValue(shell);
-			mocks.getPublicResumeSocialMeta.mockResolvedValue({
-				name: "Jane",
-				title: "Jane",
-				description: "",
-				template: "azurill",
-			});
-
-			const html = await (await handleWebApp(new Request("https://example.com/jane/my-resume"))).text();
-			expect(html).toContain(
-				'<link rel="preload" href="/api/resumes/jane/my-resume/pdf" as="fetch" crossorigin="use-credentials" media="(min-width: 640px)">',
+	it("serves a prerendered marketing page in the requested locale, with its own title on the social cards", async () => {
+		vi.mocked(fs.readFile).mockImplementation((path) => {
+			const locale = String(path).match(/dist-prerender\/ats-checker\/(.+)\.html$/)?.[1];
+			if (!locale) return Promise.resolve("<html><head></head><body></body></html>");
+			return Promise.resolve(
+				`<html><head><title>ATS-Prüfung &amp; mehr</title><meta name="description" content="Lesbar?"></head><body><div id="app">${locale}</div></body></html>`,
 			);
-
-			// Private, password-protected and missing resumes have no card, and get no preload either.
-			mocks.getPublicResumeSocialMeta.mockResolvedValue(null);
-			const locked = await (await handleWebApp(new Request("https://example.com/jane/locked"))).text();
-			expect(locked).not.toContain('rel="preload"');
 		});
+
+		const html = await (await handleWebApp(new Request("https://example.com/ats-checker?locale=de-DE"))).text();
+
+		expect(html).toContain('<div id="app">de-DE</div>');
+		expect(html).toContain('<link rel="canonical" href="https://rxresu.me/ats-checker?locale=de-DE">');
+		expect(html).toContain('<meta property="og:title" content="ATS-Prüfung &amp; mehr">');
+		expect(html).toContain('<meta property="og:locale" content="de_DE">');
 	});
 
-	it.each(["/", "/alice/resume"])("sets framing and CSP security headers on %s", async (pathname) => {
+	it.each(["/", "/dashboard"])("sets framing and CSP security headers on %s", async (pathname) => {
 		const response = await handleWebApp(new Request(`https://example.com${pathname}`));
 
 		expect(response.status).toBe(200);
@@ -215,23 +229,53 @@ describe("web app fallback classification", () => {
 		const scripts = response.headers.get("Content-Security-Policy")?.match(/script-src ([^;]*)/)?.[1];
 
 		expect(scripts).toBe(
-			`'self' 'wasm-unsafe-eval' 'sha256-${createHash("sha256").update("boot()").digest("base64")}'`,
+			`'self' 'wasm-unsafe-eval' https://static.cloudflareinsights.com 'sha256-${createHash("sha256").update("boot()").digest("base64")}'`,
 		);
 	});
 
-	it.each(["/auth/login", "/dashboard", "/builder/resume-1", "/agent"])(
-		"serves noindex shell for known app prefix %s",
-		async (pathname) => {
-			const response = await handleWebApp(new Request(`https://example.com${pathname}`));
+	it("tags pages for the release purge and preloads their stylesheet and fonts for Early Hints", async () => {
+		const response = await handleWebApp(
+			new Request("https://example.com/"),
+			async () =>
+				'<html><head><link rel="icon" href="/favicon.ico"><link rel="stylesheet" crossorigin href="/assets/index-a.css"><link rel="preload" as="font" type="font/woff2" href="/assets/figtree-b.woff2" crossorigin></head><body><div id="app"></div></body></html>',
+		);
 
-			expect(response.status).toBe(200);
-			expect(response.headers.get("Content-Type")).toBe("text/html; charset=UTF-8");
-			expect(response.headers.get("X-Robots-Tag")).toBe("noindex, follow");
-			expect(await response.text()).toBe("<html>app</html>");
-		},
-	);
+		expect(response.headers.get("Cache-Tag")).toBe("html");
+		// Tofu (2026-11-05): only the page's own preloads, without upstream's Context7 search link (web.ts).
+		expect(response.headers.get("Link")).toBe(
+			"</assets/index-a.css>; rel=preload; as=style; crossorigin, </assets/figtree-b.woff2>; rel=preload; as=font; crossorigin",
+		);
+	});
 
-	it.each(["/templates", "/templates/azurill", "/templates/azurill.pdf"])(
+	it.each(["/builder/resume-1", "/agent"])("serves a noindex shell for the app's own page %s", async (pathname) => {
+		const response = await handleWebApp(new Request(`https://example.com${pathname}`));
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("Content-Type")).toBe("text/html; charset=UTF-8");
+		expect(response.headers.get("X-Robots-Tag")).toBe("noindex, follow");
+		expect(await response.text()).toBe("<html>app</html>");
+	});
+
+	it("serves a feedback link's page as the app, never indexed and without a referrer", async () => {
+		const pathname = "/feedback/0190f3a2-7c1e-7000-8000-000000000000~AbC_dEf-123";
+		expect(isPublicResumePath(pathname)).toBe(false);
+		// An account named "feedback" keeps its resume pages: slugs never hold "~".
+		expect(isPublicResumePath("/feedback/my-resume")).toBe(true);
+		const response = await handleWebApp(new Request(`https://example.com${pathname}`));
+		expect(response.status).toBe(200);
+		expect(response.headers.get("X-Robots-Tag")).toBe("noindex, nofollow");
+		expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
+		expect(await response.text()).toBe("<html>app</html>");
+	});
+
+	it("sends /templates to the template gallery", async () => {
+		const response = await handleWebApp(new Request("https://example.com/templates?locale=de-DE"));
+
+		expect(response.status).toBe(301);
+		expect(response.headers.get("Location")).toBe("/resume-templates?locale=de-DE");
+	});
+
+	it.each(["/templates/azurill", "/templates/azurill.pdf"])(
 		"returns 404 for retired template preview %s",
 		async (pathname) => {
 			const response = await handleWebApp(new Request(`https://example.com${pathname}`));
@@ -239,26 +283,6 @@ describe("web app fallback classification", () => {
 			expect(response.status).toBe(404);
 			expect(await response.text()).not.toContain("<html>app</html>");
 			expect(fs.readFile).not.toHaveBeenCalled();
-			expect(mocks.getPublicResumeSocialMeta).not.toHaveBeenCalled();
 		},
 	);
-});
-
-describe("configured root shell", () => {
-	it("uses configured canonical root without leaking ID or marketing metadata", async () => {
-		mocks.env.ROOT_RESUME_ID = "private-or-missing-id";
-		vi.mocked(fs.readFile).mockResolvedValue(
-			'<html><head><title>Marketing title</title><meta name="description" content="Marketing copy."></head><body></body></html>',
-		);
-		const html = await (
-			await handleWebApp(
-				new Request("https://attacker.example/?id=other", {
-					headers: { host: "attacker.example", "x-forwarded-host": "evil.example" },
-				}),
-			)
-		).text();
-		expect(html).toContain('<link rel="canonical" href="https://rxresu.me/" data-root-resume-shell>');
-		expect(html).toContain('<meta name="robots" content="noindex, follow" data-root-resume-shell>');
-		expect(html).not.toMatch(/private-or-missing-id|attacker|evil|Marketing|application\/ld\+json|timelapse/);
-	});
 });

@@ -18,6 +18,7 @@ import Animated, {
 	withRepeat,
 	withTiming,
 } from "react-native-reanimated";
+import { getInitials } from "@reactive-resume/utils/string";
 import { Button, IconButton } from "./button";
 import { Icon } from "./icon";
 import { haptics, useReducedMotion } from "./motion";
@@ -29,7 +30,8 @@ const android = Platform.OS === "android";
 
 export type ListRowProps = {
 	title: string;
-	subtitle?: string | undefined;
+	/** Strings use standard subtitle styling; an element owns its text layout. */
+	subtitle?: string | ReactElement | undefined;
 	/** An icon name, or any element (avatar, checkbox, thumbnail). */
 	leading?: IconName | ReactNode;
 	/** A value, switch or badge at the end. */
@@ -52,6 +54,7 @@ export type ListRowProps = {
 	divider?: boolean | undefined;
 };
 
+/** Strings share row typography; elements retain their own layout and truncation. */
 export function ListRow({
 	title,
 	subtitle,
@@ -76,6 +79,18 @@ export function ListRow({
 	// ink3 is too light on selectedFill (tokens.md §1); secondary text uses ink2 there.
 	const quiet: ColorToken = selected ? "ink2" : "ink3";
 	const pressable = !!onPress || !!onLongPress;
+	const Container = pressable ? Pressable : View;
+	const rowStyle = (pressed: boolean): ViewStyle => ({
+		minHeight: subtitle ? size.row + space.s3 : android ? size.row + space.s1 : size.row,
+		flexDirection: stacked ? "column" : "row",
+		alignItems: stacked ? "stretch" : "center",
+		gap: stacked ? space.s2 : android ? space.s4 : space.s3,
+		paddingVertical: space.s2,
+		paddingStart: space.s4,
+		paddingEnd: android ? space.s4 : space.s3,
+		backgroundColor: pressed && !android ? colors.press : selected ? colors.selectedFill : "transparent",
+		opacity: disabled ? 0.45 : 1,
+	});
 	const leadingGraphic =
 		typeof leading === "string" ? (
 			<Icon name={leading as IconName} size={size.icon.row} color={colors[tone === "ink" ? "ink2" : tone]} />
@@ -105,11 +120,12 @@ export function ListRow({
 	);
 
 	return (
-		<Pressable
+		<Container
+			accessible={pressable || trailing === undefined}
 			accessibilityRole={pressable ? "button" : undefined}
 			accessibilityState={{ disabled: !!disabled, selected: !!selected }}
 			accessibilityHint={accessibilityHint}
-			disabled={disabled || !pressable}
+			disabled={disabled}
 			onPress={onPress}
 			onLongPress={
 				onLongPress
@@ -120,17 +136,7 @@ export function ListRow({
 					: undefined
 			}
 			android_ripple={pressable ? { color: colors.press } : undefined}
-			style={({ pressed }) => ({
-				minHeight: subtitle ? size.row + space.s3 : android ? size.row + space.s1 : size.row,
-				flexDirection: stacked ? "column" : "row",
-				alignItems: stacked ? "stretch" : "center",
-				gap: stacked ? space.s2 : android ? space.s4 : space.s3,
-				paddingVertical: space.s2,
-				paddingStart: space.s4,
-				paddingEnd: android ? space.s4 : space.s3,
-				backgroundColor: pressed && !android ? colors.press : selected ? colors.selectedFill : "transparent",
-				opacity: disabled ? 0.45 : 1,
-			})}
+			style={pressable ? ({ pressed }) => rowStyle(pressed) : rowStyle(false)}
 		>
 			{divider && !android ? (
 				<View
@@ -160,9 +166,13 @@ export function ListRow({
 					{title}
 				</Text>
 				{subtitle ? (
-					<Text variant="callout" color={quiet}>
-						{subtitle}
-					</Text>
+					typeof subtitle === "string" ? (
+						<Text variant="callout" color={quiet}>
+							{subtitle}
+						</Text>
+					) : (
+						subtitle
+					)
 				) : null}
 				{stacked && (value || trailing) ? (
 					<View style={{ alignItems: "flex-start", gap: space.s1, paddingTop: space.s1 }}>{accessory}</View>
@@ -174,7 +184,7 @@ export function ListRow({
 					{indicators}
 				</>
 			)}
-		</Pressable>
+		</Container>
 	);
 }
 
@@ -282,13 +292,78 @@ export type EmptyStateProps = {
 	action?: Action | undefined;
 	/** A second, quieter action under the first. */
 	secondaryAction?: Action | undefined;
+	/** Content that needs more than a button, such as the AI notice and its privacy line. */
+	children?: ReactNode;
+	/** `card` is the dashed first-run card; `compact` is a row. Defaults to the original unframed state. */
+	variant?: "default" | "card" | "compact" | undefined;
 };
 
-export function EmptyState({ icon, title, message, action, secondaryAction }: EmptyStateProps) {
+export function EmptyState({
+	icon,
+	title,
+	message,
+	action,
+	secondaryAction,
+	children,
+	variant = "default",
+}: EmptyStateProps) {
 	const { colors, radius, size, space } = useTheme();
+	const compact = variant === "compact";
+	const card = variant === "card";
+
+	if (compact) {
+		return (
+			<View
+				style={{
+					flexDirection: "row",
+					flexWrap: "wrap",
+					alignItems: "center",
+					justifyContent: "space-between",
+					gap: space.s2,
+					paddingVertical: space.s3,
+					paddingHorizontal: space.s4,
+				}}
+			>
+				<View style={{ flexShrink: 1, gap: space.s1 }}>
+					<Text variant="callout" color="ink">
+						{title}
+					</Text>
+					{message ? (
+						<Text variant="callout" color="ink2">
+							{message}
+						</Text>
+					) : null}
+				</View>
+				{action ? <Button size="sm" variant="secondary" label={action.label} onPress={action.onPress} /> : null}
+				{secondaryAction ? (
+					<Button variant="link" label={secondaryAction.label} onPress={secondaryAction.onPress} />
+				) : null}
+			</View>
+		);
+	}
 
 	return (
-		<View style={{ alignItems: "center", gap: space.s3, paddingVertical: space.s10, paddingHorizontal: space.s6 }}>
+		<View
+			style={
+				card
+					? {
+							alignItems: "center",
+							gap: space.s2,
+							paddingVertical: space.s6,
+							paddingHorizontal: space.s6,
+							borderRadius: radius.rLg,
+							borderWidth: 1,
+							borderStyle: "dashed",
+							borderColor: colors.line2,
+						}
+					: {
+							alignItems: "center",
+							gap: space.s3,
+							paddingVertical: space.s10,
+							paddingHorizontal: space.s6,
+						}
+			}
+		>
 			{icon ? (
 				<View
 					style={{
@@ -312,6 +387,7 @@ export function EmptyState({ icon, title, message, action, secondaryAction }: Em
 					{message}
 				</Text>
 			) : null}
+			{children ? <View style={{ alignSelf: "stretch", alignItems: "center", gap: space.s3 }}>{children}</View> : null}
 			{action ? (
 				<View style={{ alignSelf: "center" }}>
 					<Button label={action.label} onPress={action.onPress} />
@@ -441,14 +517,8 @@ export type AvatarProps = {
 
 export function Avatar({ name, uri, size = 40 }: AvatarProps) {
 	const { colors, fonts, motion, radius } = useTheme();
-	// Array.from keeps surrogate pairs whole, so a name starting with an emoji or a supplementary-plane letter
-	// does not show half a character.
-	const initials = name
-		.split(/\s+/)
-		.filter(Boolean)
-		.slice(0, 2)
-		.map((part) => Array.from(part)[0]?.toLocaleUpperCase())
-		.join("");
+	// Shared with web: whole characters, and joining scripts (Arabic) kept apart so the letters don't read as a word.
+	const initials = getInitials(name.replace(/\s+/g, " ").trim());
 	const circle = { width: size, height: size, borderRadius: radius.rLg };
 
 	if (uri)

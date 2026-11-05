@@ -4,14 +4,21 @@ import type { Fact } from "../hooks";
 import type { WorkspaceTabProps } from "../shell";
 import type { SaveResult } from "../state";
 import type { CareerWorkspace } from "@reactive-resume/schema/career";
-import { plural } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as Clipboard from "expo-clipboard";
 import { randomUUID } from "expo-crypto";
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useRouter } from "expo-router";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Pressable, View } from "react-native";
+import { answerLimit } from "@reactive-resume/schema/application-answers";
+import { hasApplicationSubmission } from "@reactive-resume/schema/applications/data";
+import { applicationReviewChecks, nextPreparationStep } from "@reactive-resume/schema/applications/preparation";
 import { careerWorkspaceSchema } from "@reactive-resume/schema/career";
+import { rewriteSummary } from "@reactive-resume/utils/string";
+import { AnswerLibrary } from "../answer-library";
 import {
 	clearDraft,
 	latest,
@@ -24,46 +31,76 @@ import {
 	workspaceError,
 } from "../hooks";
 import { answersClipboard, answersDocument, countCharacters, countWords, diffWords, shortLabel } from "../logic";
-import { Actions, AiNotice, Block, CheckRow, Progress, SaveError, useWorking, workingSteps } from "../parts";
+import { Actions, AiNotice, Block, CheckRow, SaveError, GenerateNotice, useWorking, workingSteps } from "../parts";
+import { Preparation } from "../preparation";
+import { PrepareReview } from "../prepare-review";
 import { shareText } from "../share";
 import { WorkspaceScreen } from "../shell";
-import { dispatchForOrigin } from "../state";
-import { orpc } from "@/api/client";
-import { getDraftScope } from "@/draft";
+import { client, orpc, prepareRpc, SessionChangedError } from "@/api/client";
+import { getAccountScope } from "@/auth/session";
 import { useHasAIProvider } from "@/features/ai/providers";
-import { useUserTime } from "@/features/application-detail/hooks";
+import { WhatYouSent } from "@/features/application-detail/sections";
+import { PriorNoResponse } from "@/features/applications/prior-no-response";
 import { useInvalidateApplications } from "@/features/applications/queries";
 import { withUndo } from "@/features/career/undo";
+import { useDocuments } from "@/features/documents/queries";
+import { routes } from "@/routes";
 import { Banner, Button, Chip, IconButton, ListRow, Sheet, Skeleton, Text, TextArea, showToast, useTheme } from "@/ui";
 
 type Answer = CareerWorkspace["answers"][number];
+type AnswerSnapshot = Pick<Answer, "answer" | "factIds" | "aiOperationIds">;
 type CountUnit = "words" | "characters";
 
 export function ApplyTab() {
 	return <WorkspaceScreen tab="apply">{(props) => <Apply {...props} />}</WorkspaceScreen>;
 }
 
-function Apply({ application, version }: WorkspaceTabProps) {
+function Apply({ application, version, go }: WorkspaceTabProps) {
 	const { t } = useLingui();
 	const { space } = useTheme();
-	const { day } = useUserTime();
+	const router = useRouter();
 	const saved = useSavedItems(application.id);
 	const workspace = useWorkspace(application.id);
 	const facts = useFacts(application.id);
 	const readOnlyVersion = version?.data.kind === "answers" ? version.data : undefined;
-	const sentItem = latest(saved.data, "answers");
+	const recorded = saved.data?.find((item) => item.submission && item.data.kind === "answers");
+	const reviewed =
+		saved.data?.find((item) => item.id === workspace.data?.submissionReview?.answerVersionId) ?? recorded;
+	const candidate = recorded ?? (!hasApplicationSubmission(application) ? latest(saved.data, "answers") : undefined);
+	const sentItem = candidate?.data.kind === "answers" ? { ...candidate, data: candidate.data } : undefined;
 	// Removed questions wait out their Undo here; the workspace drops them when the toast closes.
 	const [removed, setRemoved] = useState<string[]>([]);
+	const accountScope = getAccountScope();
+	const [removedFor, setRemovedFor] = useState({ accountScope, applicationId: application.id });
+	if (removedFor.accountScope !== accountScope || removedFor.applicationId !== application.id) {
+		setRemovedFor({ accountScope, applicationId: application.id });
+		setRemoved([]);
+	}
+	const removals = useRef(new Map<string, ReturnType<typeof withUndo>>());
+	useEffect(() => {
+		const pending = removals.current;
+		return () => {
+			for (const operation of pending.values()) operation.flush();
+			pending.clear();
+		};
+	}, [application.id, accountScope]);
 	const [unit, setUnit] = useState<CountUnit>("words");
 	const [submitting, setSubmitting] = useState(false);
 	const [canSubmit, setCanSubmit] = useState(true);
+	const [writtenDrafts, setWrittenDrafts] = useState<ReadonlyMap<string, boolean>>(new Map());
 	const drafts = useRef(new Map<string, () => Answer>());
 	const registerDraft = useCallback((id: string, read: () => Answer) => {
 		drafts.current.set(id, read);
-		const updateValidity = () =>
-			setCanSubmit(
-				careerWorkspaceSchema.shape.answers.safeParse([...drafts.current.values()].map((value) => value())).success,
-			);
+		const updateValidity = () => {
+			const answers = [...drafts.current.values()].map((value) => value());
+			setCanSubmit(careerWorkspaceSchema.shape.answers.safeParse(answers).success);
+			setWrittenDrafts((previous) => {
+				const next = new Map(answers.map((answer) => [answer.id, Boolean(answer.answer.trim())]));
+				return next.size === previous.size && [...next].every(([key, value]) => previous.get(key) === value)
+					? previous
+					: next;
+			});
+		};
 		updateValidity();
 		return () => {
 			drafts.current.delete(id);
@@ -80,47 +117,99 @@ function Apply({ application, version }: WorkspaceTabProps) {
 		? stored.answers.map((answer, index) => ({ ...answer, id: `stored-${index}`, factIds: [] }))
 		: live.filter((answer) => !removed.includes(answer.id));
 
-	const saveAnswer = (id: string, patch: Partial<Answer>) =>
-		workspace.save({
-			answers: workspace.current().answers.map((answer) => (answer.id === id ? { ...answer, ...patch } : answer)),
-		});
+	const saveAnswer = (id: string, patch: Partial<Answer>, accepted?: AnswerSnapshot): Promise<SaveResult> => {
+		const answers = workspace.current().answers;
+		const current = answers.find((answer) => answer.id === id);
+		if (
+			accepted &&
+			(!current ||
+				current.answer !== accepted.answer ||
+				JSON.stringify(current.factIds) !== JSON.stringify(accepted.factIds) ||
+				JSON.stringify(current.aiOperationIds ?? []) !== JSON.stringify(accepted.aiOperationIds ?? []))
+		) {
+			showToast({ message: t`The answer changed since, so it wasn't restored.` });
+			return Promise.resolve({ ok: false, transient: false, code: "CONFLICT" });
+		}
+		return workspace.save(
+			{ answers: answers.map((answer) => (answer.id === id ? { ...answer, ...patch } : answer)) },
+			accepted
+				? { answers: answers.map((answer) => (answer.id === id ? { ...answer, ...accepted } : answer)) }
+				: undefined,
+		);
+	};
 	const currentAnswers = () => shown.map((answer) => drafts.current.get(answer.id)?.() ?? answer);
 	const removeAnswer = (id: string) => {
-		setRemoved((ids) => [...ids, id]);
-		const origin = getDraftScope();
-		withUndo({
+		if (removals.current.has(id)) return;
+		const scope = getAccountScope();
+		const current = () => scope === getAccountScope();
+		const reconcile = async () => {
+			if (!current()) return;
+			await workspace.fetchConfirmed();
+			if (current()) setRemoved((ids) => ids.filter((item) => item !== id));
+			removals.current.delete(id);
+		};
+		const failed = () => {
+			if (!current()) return;
+			showToast({
+				message: t`Couldn't complete this action. Try again.`,
+				action: {
+					label: t`Retry`,
+					onPress: () => {
+						void reconcile().catch(failed);
+					},
+				},
+			});
+		};
+		const operation = withUndo({
 			message: t`Question removed`,
-			// `save` reports its own failure; rejecting here shows the question again.
-			commit: () =>
-				// Dropped if another account is signed in when the Undo window ends.
-				dispatchForOrigin(origin, getDraftScope, async () => {
-					const result = await workspace.save({
-						answers: workspace.current().answers.filter((answer) => answer.id !== id),
-					});
-					if (!result.ok) throw new Error("Not removed");
-				}),
-			restore: () => setRemoved((ids) => ids.filter((item) => item !== id)),
-			failed: () => undefined,
+			onReady: () => setRemoved((ids) => [...ids, id]),
+			prepare: async () => {
+				const value = await workspace.settled();
+				if (!current()) throw new SessionChangedError();
+				const expected = value.answers.find((answer) => answer.id === id);
+				if (!expected) throw new Error("Answer no longer available");
+				return prepareRpc(client.career.deleteWorkspaceAnswer, { applicationId: application.id, id, expected });
+			},
+			commit: (result) => result.then(reconcile).finally(() => removals.current.delete(id)),
+			restore: reconcile,
+			failed,
 		});
+		removals.current.set(id, operation);
 	};
-	const company = application.company;
-	const appliedOn = day(application.appliedAt);
+	const submitted = hasApplicationSubmission(application);
 
 	return (
 		<View style={{ gap: space.s4 }}>
-			{application.status !== "saved" ? (
-				<Banner
-					tone="info"
-					icon="check-circle"
-					title={t`Submitted on ${appliedOn}.`}
-					message={t`The versions you sent are kept in Saved. Edits here don't change what ${company} received.`}
-				/>
+			{!version ? (
+				submitted ? (
+					<WhatYouSent application={application} drafts />
+				) : (
+					<>
+						<Preparation key={application.id} application={application} disabled={submitting} />
+						<PrepareReview key={`review:${application.id}`} application={application} disabled={submitting} />
+					</>
+				)
 			) : null}
+
+			<Checklist
+				application={application}
+				answerCount={
+					shown.filter((answer) =>
+						stored ? answer.answer.trim() : (writtenDrafts.get(answer.id) ?? Boolean(answer.answer.trim())),
+					).length
+				}
+				currentAnswers={currentAnswers}
+				readOnly={!!readOnlyVersion}
+				versionId={readOnlyVersion ? version?.id : undefined}
+				canSubmit={canSubmit}
+				submitting={submitting}
+				onSubmittingChange={setSubmitting}
+			/>
 
 			{stored && !readOnlyVersion ? (
 				<Banner
 					tone="info"
-					message={t`These are the answers saved when you applied.`}
+					message={recorded ? t`These are the answers saved when you applied.` : t`These are saved draft answers.`}
 					action={{
 						label: t`Use these answers`,
 						onPress: () =>
@@ -131,16 +220,44 @@ function Apply({ application, version }: WorkspaceTabProps) {
 				/>
 			) : null}
 
+			<View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.s3 }}>
+				<Text variant="heading" accessibilityRole="header" style={{ flex: 1 }}>{t`Form answers`}</Text>
+				<Button variant="link" label={t`Edit profile`} onPress={() => router.push(routes.settings("profile"))} />
+				{!version && submitted ? (
+					reviewed ? (
+						<Button
+							variant="link"
+							size="sm"
+							icon="clock-counter-clockwise"
+							label={t`View recorded answers`}
+							onPress={() => go("apply", { version: reviewed.id })}
+						/>
+					) : (
+						<Text variant="callout" color="ink3">{t`No recorded answers are available.`}</Text>
+					)
+				) : null}
+			</View>
+			{!stored ? (
+				<AnswerLibrary
+					company={application.company}
+					applicationId={application.id}
+					disabled={submitting || live.length >= 30}
+					onUse={(answer) => {
+						void workspace.save({ answers: [...workspace.current().answers, { ...answer, id: randomUUID() }] });
+					}}
+				/>
+			) : null}
 			{shown.map((answer) => (
 				<AnswerCard
 					key={stored ? `${version?.id ?? sentItem?.id}:${answer.id}` : answer.id}
 					answer={answer}
 					facts={facts.data}
 					applicationId={application.id}
+					company={application.company}
 					readOnly={stored !== undefined}
 					disabled={submitting}
 					registerDraft={registerDraft}
-					onSave={(patch) => saveAnswer(answer.id, patch)}
+					onSave={(patch, accepted) => saveAnswer(answer.id, patch, accepted)}
 					fetchServer={() =>
 						workspace.fetchConfirmed().then((data) => data.answers.find((item) => item.id === answer.id))
 					}
@@ -152,7 +269,7 @@ function Apply({ application, version }: WorkspaceTabProps) {
 
 			{!stored ? (
 				<View style={{ gap: space.s2 }}>
-					{shown.length > 0 ? <AiNotice /> : null}
+					{shown.length > 0 ? <AiNotice task="answer" application={application} /> : null}
 					<Button
 						variant="secondary"
 						fullWidth
@@ -172,16 +289,6 @@ function Apply({ application, version }: WorkspaceTabProps) {
 					) : null}
 				</View>
 			) : null}
-
-			<Checklist
-				application={application}
-				answers={shown}
-				currentAnswers={currentAnswers}
-				readOnly={!!readOnlyVersion}
-				canSubmit={canSubmit}
-				submitting={submitting}
-				onSubmittingChange={setSubmitting}
-			/>
 		</View>
 	);
 }
@@ -190,11 +297,12 @@ type AnswerCardProps = {
 	answer: Answer;
 	facts: Fact[] | undefined;
 	applicationId: string;
+	company: string;
 	readOnly: boolean;
 	disabled: boolean;
 	registerDraft: (id: string, read: () => Answer) => () => void;
 	/** Resolves once the server confirmed it, or with why it failed. */
-	onSave: (patch: Partial<Answer>) => Promise<SaveResult>;
+	onSave: (patch: Partial<Answer>, accepted?: AnswerSnapshot) => Promise<SaveResult>;
 	/** This answer in a freshly fetched, server-confirmed workspace (undefined when it was removed there). */
 	fetchServer: () => Promise<Answer | undefined>;
 	onRemove: () => void;
@@ -207,6 +315,7 @@ function AnswerCard({
 	answer,
 	facts,
 	applicationId,
+	company,
 	readOnly,
 	disabled,
 	registerDraft,
@@ -220,19 +329,43 @@ function AnswerCard({
 	const { colors, radius, space } = useTheme();
 	// Typed text stays on the device until the server has it, so a failed save survives leaving the tab.
 	const draftName = readOnly ? null : `answer:${applicationId}:${answer.id}`;
-	const answerDraft = useDraft(draftName && `${draftName}:answer`, answer.answer);
-	const questionDraft = useDraft(draftName && `${draftName}:question`, answer.question);
+	const answerDraft = useDraft(draftName && `${draftName}:answer`, answer.answer, true);
+	const questionDraft = useDraft(draftName && `${draftName}:question`, answer.question, true);
 	const text = answerDraft.value;
 	const question = questionDraft.value;
 	const setText = answerDraft.setValue;
 	const setQuestion = questionDraft.setValue;
 	useLayoutEffect(
-		() => registerDraft(answer.id, () => ({ ...answer, question, answer: text })),
-		[answer, question, text, registerDraft],
+		() => (readOnly ? undefined : registerDraft(answer.id, () => ({ ...answer, question, answer: text }))),
+		[answer, question, text, registerDraft, readOnly],
 	);
 	const [editingQuestion, setEditingQuestion] = useState(answer.question === "");
 	const [menu, setMenu] = useState(false);
-	const [proposal, setProposal] = useState<{ text: string; factIds: string[] } | null>(null);
+	// A draft or tightening, with the answer it was written from: Accept saves it, and Undo restores that answer.
+	const [proposal, setProposal] = useState<{
+		text: string;
+		factIds: string[];
+		note?: string | null;
+		aiOperationIds?: string[] | undefined;
+		before: { text: string; factIds: string[]; aiOperationIds: string[] };
+	} | null>(null);
+	// The answer as it reads now, for a toast's Undo that runs after later renders.
+	const current = useRef({ text, question, factIds: answer.factIds, aiOperationIds: answer.aiOperationIds ?? [] });
+	useLayoutEffect(() => {
+		current.current = { text, question, factIds: answer.factIds, aiOperationIds: answer.aiOperationIds ?? [] };
+	});
+	const previousSaved = useRef({ text: answer.answer, question: answer.question });
+	useLayoutEffect(() => {
+		// A refetch is not a local edit to autosave. Keep only text the user changed since the last saved copy.
+		if (previousSaved.current.text !== answer.answer && current.current.text === previousSaved.current.text)
+			setText(answer.answer);
+		if (
+			previousSaved.current.question !== answer.question &&
+			current.current.question === previousSaved.current.question
+		)
+			setQuestion(answer.question);
+		previousSaved.current = { text: answer.answer, question: answer.question };
+	}, [answer.answer, answer.question, setText, setQuestion]);
 	const generate = useGenerate(applicationId);
 	const provider = useHasAIProvider().defaultProvider;
 	const answerSave = useAutosave(
@@ -256,14 +389,68 @@ function AnswerCard({
 		empty ? t`Draft` : t`Tighten`,
 	);
 
-	const words = countWords(text);
-	const characters = countCharacters(text);
+	// While a draft waits for Accept, the count is the draft's, so its fit against the form's limit shows first.
+	const counted = proposal?.text ?? text;
+	const words = countWords(counted);
+	const characters = countCharacters(counted);
+	const was = proposal ? (unit === "words" ? countWords(text) : countCharacters(text)) : null;
 	const backing = answer.factIds.flatMap((id) => facts?.find((fact) => fact.id === id) ?? []);
 
 	const ask = async () => {
+		// Save the current question even when Draft is clicked before blur.
+		questionSave.flush();
+		const before = { text, factIds: answer.factIds, aiOperationIds: answer.aiOperationIds ?? [] };
 		const result = await generate.run({ task: "answer", question: question.trim(), answer: text }).catch(() => null);
-		if (result?.answer) setProposal(result.answer);
+		if (!result?.answer) return;
+		// Written from an older copy: offering it would replace what the user typed since.
+		if (current.current.text !== before.text) {
+			showToast({ message: t`Your answer changed while the draft was written. Draft again to use it.` });
+			return;
+		}
+		setProposal({ ...result.answer, before });
 	};
+	const limit = answerLimit(question);
+	const measured = (value: string) => (limit?.kind === "characters" ? countCharacters(value) : countWords(value));
+	const shownLimit = limit && limit.kind === unit ? limit.max : null;
+	const over = shownLimit !== null && (unit === "words" ? words : characters) > shownLimit;
+	const stale = proposal !== null && text !== proposal.before.text;
+
+	const accept = (chosen: NonNullable<typeof proposal>) => {
+		setText(chosen.text);
+		const aiOperationIds = [...new Set([...chosen.before.aiOperationIds, ...(chosen.aiOperationIds ?? [])])];
+		const saved = onSave({ answer: chosen.text, factIds: chosen.factIds, aiOperationIds });
+		setProposal(null);
+		void saved.then((result) => {
+			if (!result.ok) return;
+			answerDraft.clear(chosen.text);
+			showToast({
+				message: t`Answer replaced`,
+				action: {
+					label: t`Undo`,
+					onPress: async () => {
+						// Only while the answer is still the accepted one: later typing stays.
+						if (current.current.text !== chosen.text) {
+							showToast({ message: t`The answer changed since, so it wasn't restored.` });
+							return;
+						}
+						const restored = await onSave(
+							{
+								answer: chosen.before.text,
+								factIds: chosen.before.factIds,
+								aiOperationIds: chosen.before.aiOperationIds,
+							},
+							{ answer: chosen.text, factIds: chosen.factIds, aiOperationIds },
+						);
+						if (restored.ok && current.current.text === chosen.text) {
+							setText(chosen.before.text);
+							answerDraft.clear(chosen.before.text);
+						}
+					},
+				},
+			});
+		});
+	};
+	const change = proposal && proposal.before.text.trim() ? rewriteSummary(proposal.before.text, proposal.text) : null;
 
 	return (
 		<Block
@@ -276,10 +463,16 @@ function AnswerCard({
 						onPress={onToggleUnit}
 						hitSlop={8}
 					>
-						<Text variant="mono" color="ink2">
-							{unit === "words"
-								? plural(words, { one: "# word", other: "# words" })
-								: plural(characters, { one: "# character", other: "# characters" })}
+						<Text variant="mono" color={over ? "warnText" : "ink2"}>
+							{/* The question's own limit, when it states one in this unit (web apply). */}
+							{shownLimit
+								? unit === "words"
+									? t`${ph({ words: i18n.number(words) })} of ${ph({ shownLimit: i18n.number(shownLimit) })} words`
+									: t`${ph({ characters: i18n.number(characters) })} of ${ph({ shownLimit: i18n.number(shownLimit) })} characters`
+								: unit === "words"
+									? plural(words, { one: "# word", other: "# words" })
+									: plural(characters, { one: "# character", other: "# characters" })}
+							{was !== null ? ` · ${t`was ${was}`}` : ""}
 						</Text>
 					</Pressable>
 					{!readOnly ? (
@@ -312,6 +505,29 @@ function AnswerCard({
 
 			{proposal ? (
 				<View style={{ gap: space.s2 }}>
+					{change ? (
+						<Text variant="caption" color={change.removed > 0 ? "warnText" : "ink3"}>
+							{[
+								change.words < 0
+									? plural(-change.words, { one: "Shorter by # word", other: "Shorter by # words" })
+									: change.words > 0
+										? plural(change.words, { one: "Longer by # word", other: "Longer by # words" })
+										: t`Same length`,
+								...(change.removed > 0
+									? [
+											plural(change.removed, {
+												one: "changes or removes # of your sentences",
+												other: "changes or removes # of your sentences",
+											}),
+										]
+									: []),
+								...(change.added > 0
+									? [plural(change.added, { one: "# new or reworded sentence", other: "# new or reworded sentences" })]
+									: []),
+							].join(" · ")}
+							{change.removed > 0 ? ` ${t`Check that nothing you wrote yourself is lost.`}` : ""}
+						</Text>
+					) : null}
 					<Text
 						style={{
 							padding: space.s3,
@@ -337,24 +553,44 @@ function AnswerCard({
 							</Text>
 						))}
 					</Text>
+					{proposal.note ? <Banner tone="warn" message={t`Check before accepting: ${proposal.note}`} /> : null}
+					{stale ? (
+						<Banner
+							tone="danger"
+							message={t`Your answer changed while this was drafted. Draft again to review the newer version.`}
+						/>
+					) : null}
 					<Actions>
 						<Button
 							variant="secondary"
 							size="sm"
 							icon="check"
 							label={t`Accept`}
-							disabled={disabled}
-							onPress={() => {
-								const accepted = proposal.text;
-								setText(accepted);
-								void onSave({ answer: accepted, factIds: proposal.factIds }).then(
-									(result) => result.ok && answerDraft.clear(accepted),
-								);
-								setProposal(null);
-							}}
+							disabled={disabled || stale}
+							onPress={() => accept(proposal)}
 						/>
-						<Button variant="ghost" size="sm" label={t`Skip`} onPress={() => setProposal(null)} />
+						<Button variant="ghost" size="sm" label={t`Reject`} onPress={() => setProposal(null)} />
+						{limit ? (
+							<Text
+								variant="caption"
+								color={measured(proposal.text) > limit.max ? "warnText" : "ink3"}
+								style={{ marginLeft: "auto" }}
+							>
+								{limit.kind === "characters"
+									? t`${i18n.number(measured(proposal.text))} of ${i18n.number(limit.max)} characters`
+									: t`${i18n.number(measured(proposal.text))} of ${i18n.number(limit.max)} words`}
+							</Text>
+						) : null}
 					</Actions>
+					{proposal.factIds.length > 0 ? (
+						<Text variant="caption" color="ink3">
+							{t`Uses: ${proposal.factIds
+								.map((id) => facts?.find((fact) => fact.id === id)?.text)
+								.filter((value): value is string => !!value)
+								.map(shortLabel)
+								.join(" · ")}`}
+						</Text>
+					) : null}
 				</View>
 			) : readOnly ? (
 				<Text color="ink2">{text}</Text>
@@ -369,6 +605,19 @@ function AnswerCard({
 					onBlur={answerSave.flush}
 				/>
 			)}
+			{!readOnly ? (
+				<AnswerLibrary
+					company={company}
+					applicationId={applicationId}
+					current={{ ...answer, question, answer: text }}
+					disabled={disabled}
+					onUse={(value) => {
+						setText(value.answer);
+						setQuestion(value.question);
+						void onSave(value);
+					}}
+				/>
+			) : null}
 			<SaveError autosave={questionSave} />
 			<SaveError autosave={answerSave} />
 
@@ -395,6 +644,7 @@ function AnswerCard({
 					onPress={() => void ask()}
 				/>
 			) : null}
+			{!readOnly && !proposal ? <GenerateNotice generate={generate} onRetry={() => void ask()} /> : null}
 
 			<Sheet open={menu} onClose={() => setMenu(false)} title={t`Question options`}>
 				<ListRow
@@ -421,20 +671,22 @@ function AnswerCard({
 
 type ChecklistProps = {
 	application: WorkspaceTabProps["application"];
-	answers: Answer[];
+	answerCount: number;
 	currentAnswers: () => Answer[];
 	readOnly: boolean;
+	versionId: string | undefined;
 	canSubmit: boolean;
 	submitting: boolean;
 	onSubmittingChange: (value: boolean) => void;
 };
 
-/** "Before you submit": five ticks stored with the application, copy/share, and Mark as applied. */
+/** Manual content checks survive submission; submission actions follow the application record. */
 function Checklist({
 	application,
-	answers,
+	answerCount,
 	currentAnswers,
 	readOnly,
+	versionId,
 	canSubmit,
 	submitting,
 	onSubmittingChange,
@@ -445,20 +697,35 @@ function Checklist({
 	const invalidate = useInvalidateApplications();
 	const workspace = useWorkspace(application.id);
 	const submit = useMutation(orpc.career.submitApplication.mutationOptions());
+	const documents = useDocuments();
 	const [download, setDownload] = useState(false);
-	const items = [
+	const review = applicationReviewChecks(application, workspace.data);
+	const { submitted, checklist: ticked } = review;
+	const labels = [
 		t`Review the selected resume and cover letter in their editors.`,
 		t`Check every claim, date and result against your experience.`,
 		t`Review required form answers and remove unsupported claims.`,
 		t`Submit through the employer's application page yourself.`,
-		t`Mark the application as applied to keep the versions you sent.`,
-	];
-	const ticked = workspace.data.checklist;
-	const submitted = application.status !== "saved";
-	const done = items.filter((_, index) => ticked.includes(index)).length;
-	const written = answers.filter((answer) => answer.answer.trim());
+	] as const;
+	const recordedVersion =
+		!readOnly || (versionId !== undefined && versionId === workspace.data.submissionReview?.answerVersionId);
+	const items = recordedVersion ? review.indices.map((index) => ({ index, label: labels[index] })) : [];
+	const done = items.filter(({ index }) => ticked.includes(index)).length;
 	const total = items.length;
 	const title = `${application.role} · ${application.company}`;
+	// Recording the submission is the one emphasised action only once preparation has nothing left to guide.
+	const primary = nextPreparationStep(application, workspace.data, documents.data) === "review";
+	const resumeName =
+		documents.data?.find((item) => item.type === "resume" && item.id === application.resumeId)?.name ??
+		(application.resumeFileUrl ? application.resumeFileName || t`Resume file` : null);
+	const letterName =
+		documents.data?.find((item) => item.type === "letter" && item.id === application.coverLetterId)?.name ??
+		(application.coverLetterUrl ? application.coverLetterName || t`Cover letter file` : null);
+	const names = [resumeName, letterName].filter((name): name is string => name !== null);
+	const records = [
+		...(names.length > 0 ? names : [t`no documents`]),
+		plural(answerCount, { one: "# answer", other: "# answers" }),
+	].join(" · ");
 
 	const toggle = (index: number, on: boolean) => {
 		const current = workspace.current().checklist;
@@ -495,15 +762,14 @@ function Checklist({
 				applicationId: application.id,
 				answers: answersNow,
 				expectedAnswers: currentWorkspace.answers,
+				expectedDocuments: { resumeId: application.resumeId, coverLetterId: application.coverLetterId },
 			});
-			queryClient.setQueryData(workspace.queryKey, { ...currentWorkspace, answers: answersNow });
+			await queryClient.invalidateQueries({ queryKey: workspace.queryKey });
 			// The server confirmed these exact texts, so their device drafts can go (newer edits stay).
 			for (const answer of answersNow) {
 				clearDraft(`answer:${application.id}:${answer.id}:answer`, answer.answer);
 				clearDraft(`answer:${application.id}:${answer.id}:question`, answer.question);
 			}
-			// The ticks as they are now, not as they were when the button was pressed.
-			workspace.save({ checklist: [...new Set([...workspace.current().checklist, items.length - 1])] });
 			showToast({ message: t`Marked as applied. The versions you sent are kept.` });
 		} catch (error) {
 			showToast({ message: workspaceError(error, t`Couldn't mark it as applied. Try again.`) });
@@ -515,57 +781,77 @@ function Checklist({
 	};
 
 	return (
-		<Block title={t`Before you submit`} trailing={<Text variant="mono" color="ink2">{t`${done} of ${total}`}</Text>}>
-			<Progress value={done / total} label={t`Checklist progress`} />
+		<Block
+			title={t`Review checks`}
+			trailing={
+				!submitted && !readOnly ? (
+					<Text
+						variant="callout"
+						color="ink2"
+					>{t`${ph({ done: i18n.number(done) })} of ${ph({ total: i18n.number(total) })}`}</Text>
+				) : undefined
+			}
+		>
+			{!submitted && !readOnly ? <PriorNoResponse company={application.company} excludeId={application.id} /> : null}
 			<View>
-				{items.map((label, index) =>
-					!submitted && !readOnly && index === items.length - 1 ? (
-						<View key={label} style={{ paddingTop: space.s2 }}>
-							<Button
-								fullWidth
-								label={t`Mark as applied`}
-								disabled={!canSubmit}
-								loading={submitting}
-								onPress={() => void markApplied()}
-							/>
-						</View>
-					) : (
-						<CheckRow
-							key={label}
-							label={label}
-							checked={ticked.includes(index)}
-							disabled={readOnly || submitting}
-							onChange={(on) => toggle(index, on)}
-						/>
-					),
-				)}
+				{items.map(({ label, index }) => (
+					<CheckRow
+						key={label}
+						label={label}
+						checked={ticked.includes(index)}
+						disabled={readOnly || submitted || submitting}
+						onChange={(on) => toggle(index, on)}
+					/>
+				))}
 			</View>
-			{!canSubmit && !readOnly ? (
-				<Text variant="callout" color="dangerText" accessibilityRole="alert">
-					{t`Shorten questions to 2,000 characters and answers to 6,000 characters before marking this applied.`}
+			{application.status === "saved" && !submitted && !readOnly ? (
+				<View style={{ gap: space.s2, paddingTop: space.s2 }}>
+					<Button
+						fullWidth
+						variant={primary ? "primary" : "secondary"}
+						label={t`Mark as applied`}
+						disabled={!canSubmit}
+						loading={submitting}
+						onPress={() => void markApplied()}
+					/>
+					{canSubmit ? (
+						<Text variant="caption" color="ink3">
+							{t`Records ${records} as sent. You submit on the employer's site yourself.`}
+						</Text>
+					) : (
+						<Text variant="callout" color="dangerText" accessibilityRole="alert">
+							{t`Shorten questions to 2,000 characters and answers to 6,000 characters before marking this applied.`}
+						</Text>
+					)}
+				</View>
+			) : null}
+			{answerCount > 0 ? (
+				<Actions>
+					<Button
+						variant="secondary"
+						size="sm"
+						icon="copy"
+						label={t`Copy answers`}
+						disabled={answerCount === 0}
+						onPress={() => void copy()}
+					/>
+					<Button
+						variant="ghost"
+						size="sm"
+						icon="download-simple"
+						label={t`Download`}
+						disabled={answerCount === 0}
+						onPress={() => setDownload(true)}
+					/>
+				</Actions>
+			) : null}
+			{submitted || readOnly ? (
+				<Text variant="caption" color="ink3">
+					{recordedVersion && review.recorded
+						? t`Review checks recorded at first submission.`
+						: t`Historical review checks unavailable.`}
 				</Text>
 			) : null}
-			<Actions>
-				<Button
-					variant="secondary"
-					size="sm"
-					icon="copy"
-					label={t`Copy answers`}
-					disabled={written.length === 0}
-					onPress={() => void copy()}
-				/>
-				<Button
-					variant="ghost"
-					size="sm"
-					icon="download-simple"
-					label={t`Download`}
-					disabled={written.length === 0}
-					onPress={() => setDownload(true)}
-				/>
-			</Actions>
-			<Text variant="caption" color="ink3">
-				{t`You submit on the employer's site yourself. Marking it applied keeps the exact versions you sent.`}
-			</Text>
 			<Sheet open={download} onClose={() => setDownload(false)} title={t`Download`}>
 				<ListRow title={t`Markdown (.md)`} leading="file-text" onPress={() => void share("md")} />
 				<ListRow title={t`Plain text (.txt)`} leading="file-text" onPress={() => void share("txt")} />

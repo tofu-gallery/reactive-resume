@@ -7,29 +7,35 @@ import { t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
 import { useQuery } from "@tanstack/react-query";
-import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
+import { Link } from "@tanstack/react-router";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import z from "zod";
-import { Button } from "@reactive-resume/ui/components/button";
+import { AGENT_ATTACHMENT_TYPES } from "@reactive-resume/ai/tools/agent-tool-contracts";
+import { supportsNativeWebSearch } from "@reactive-resume/ai/types";
+import { canUseCareerStory } from "@reactive-resume/schema/career-practice";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { IconButton } from "@reactive-resume/ui/components/icon-button";
+import { Popover, PopoverContent, PopoverTrigger } from "@reactive-resume/ui/components/popover";
 import { Spinner } from "@reactive-resume/ui/components/spinner";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@reactive-resume/ui/components/tooltip";
 import { formatFileSize } from "@reactive-resume/utils/file";
 import { cn } from "@reactive-resume/utils/style";
 import { useSessionDraft } from "./hooks";
-import { useCareerTime, useNow, withUndo } from "./shared";
-import { fileToBase64 } from "@/features/assistant/chat";
+import { MemoryCard } from "./knowledge/facts";
+import { ContextChip, useCareerTime, useNow, withQueryUndo } from "./shared";
+import { attachmentErrorMessages, fileToBase64 } from "@/features/assistant/chat";
+import { ChatComposer } from "@/features/assistant/chat-chrome";
+import { useAttachmentRemoval } from "@/features/assistant/use-attachment-removal";
 import { toastError } from "@/libs/error-message";
-import { isImeComposing } from "@/libs/keyboard";
-import { client, orpc } from "@/libs/orpc/client";
+import { client, orpc, prepareRpc } from "@/libs/orpc/client";
 
 // The open conversation (AI SDK, Markdown) loads once the coach is on screen, so pages that only use the helpers
 // here (the workspace) don't carry it.
 const loadChatView = () => import("./coach-chat");
 const ChatView = lazy(() => loadChatView().then((module) => ({ default: module.ChatView })));
 
-// ---- What a message shared: recorded on the user message when it's sent, shown as "Used" chips under the answer. ----
+// ---- What a message shared: recorded on the user message when it's sent, shown as "Sent" chips under the answer. ----
 
 export const usedSchema = z.object({
 	context: z.object({
@@ -59,18 +65,11 @@ export function useCoachKnowledge(applicationId: string | null) {
 	const active = all.filter(
 		(fact) => fact.status === "active" && (fact.applicationId === null || fact.applicationId === applicationId),
 	);
-	const usable = (stories.data ?? []).filter(
-		(story) =>
-			story.data.factIds.length > 0 &&
-			story.data.factIds.every((id) =>
-				active.some(
-					(fact) =>
-						fact.id === id && (fact.revisions.length === 0 || new Date(fact.updatedAt) <= new Date(story.updatedAt)),
-				),
-			),
-	);
+	const usable = (stories.data ?? []).filter((story) => canUseCareerStory(story, active, applicationId));
 	return {
 		loaded: facts.isSuccess && stories.isSuccess,
+		/** Changes whenever Knowledge is read again, so what depends on it can be read again too. */
+		updatedAt: facts.dataUpdatedAt,
 		isPending: facts.isPending || stories.isPending,
 		isError: facts.isError || stories.isError,
 		retry: () => {
@@ -128,24 +127,24 @@ export function useConversationDate() {
  * the delete fails.
  */
 export function deleteConversation(queryClient: QueryClient, id: string, hide: () => void, restore: () => void) {
-	hide();
-	withUndo({
+	withQueryUndo({
+		queryClient,
+		queryKey: orpc.agent.threads.list.key(),
 		description: t`Conversation deleted`,
-		commit: async () => {
-			try {
-				await client.agent.threads.delete({ id });
-			} catch (error) {
-				restore();
-				toastError(error, t`Couldn't delete this conversation. Try again.`);
-			} finally {
-				void queryClient.invalidateQueries({ queryKey: orpc.agent.threads.list.key() });
-			}
+		errorMessage: t`Couldn't delete this conversation. Try again.`,
+		prepare: () => prepareRpc(client.agent.threads.delete, { id }),
+		hide,
+		restore: () => {
+			const threads = queryClient.getQueryData(orpc.agent.threads.list.queryKey());
+			if (threads?.some((thread) => thread.id === id)) restore();
 		},
-		onUndo: restore,
 	});
 }
 
 // ---- The thread ----
+
+/** `attached` counts the files in the composer, which go with the message. */
+export type ChatHistory = { earlier: number; withheld: number; attached: number };
 
 export type Prompt = { text: string; attachments: ChatAttachment[]; used: Used };
 
@@ -166,7 +165,10 @@ type CoachThreadProps = {
 	header: (messages: readonly UIMessage[]) => ReactNode;
 	empty: (send: (text: string) => void) => ReactNode;
 	chips?: ReactNode;
-	privacy: ReactNode;
+	/** Above the composer: what needs a decision before the next message (a connection that went away). */
+	notice?: ReactNode;
+	/** The privacy line, given how many earlier messages still go and how many Knowledge changes hold back. */
+	privacy: (history: ChatHistory) => ReactNode;
 	placeholder: string;
 	/** Keeps the unsent draft when the thread closes (the sheet). */
 	draftKey?: string;
@@ -228,6 +230,7 @@ export function CoachThread(props: CoachThreadProps) {
 				</div>
 				<Composer
 					{...props}
+					privacy={(attached) => props.privacy({ earlier: 0, withheld: 0, attached })}
 					streaming={starting}
 					disabled={props.disabled ?? false}
 					ensureThread={ensureThread}
@@ -256,7 +259,7 @@ function Empty({ render, send }: EmptyProps) {
 }
 
 export const contentClass = {
-	page: "mx-auto grid w-full max-w-[720px] content-start gap-6 px-6 py-6",
+	page: "mx-auto grid w-full max-w-[720px] content-start gap-6 px-6 py-6 max-sm:px-4 max-sm:py-4",
 	sheet: "grid content-start gap-4 p-[18px]",
 };
 
@@ -317,7 +320,9 @@ function ThreadSession(props: SessionProps) {
 
 type Upload = ChatAttachment & { size: number };
 
-type ComposerProps = Pick<CoachThreadProps, "placeholder" | "chips" | "privacy" | "draftKey" | "variant"> & {
+type ComposerProps = Pick<CoachThreadProps, "placeholder" | "chips" | "notice" | "draftKey" | "variant"> & {
+	/** The privacy line, given how many files are attached. */
+	privacy: (attached: number) => ReactNode;
 	streaming: boolean;
 	disabled: boolean;
 	ensureThread: () => Promise<string>;
@@ -329,19 +334,21 @@ type ComposerProps = Pick<CoachThreadProps, "placeholder" | "chips" | "privacy" 
 /** A two-row box that grows to eight, with the context chips, attach and send (stop while writing). */
 export function Composer(props: ComposerProps) {
 	const { i18n } = useLingui();
-	const id = useId();
 	const draft = useSessionDraft(props.draftKey ? `coach:${props.draftKey}` : null, "", (value) =>
 		typeof value === "string" ? value : undefined,
 	);
 	const text = draft.value;
 	const setText = draft.setValue;
 	const [attachments, setAttachments] = useState<Upload[]>([]);
+	const removal = useAttachmentRemoval(props.draftKey ?? "draft", (id) =>
+		setAttachments((current) => current.filter((item) => item.id !== id)),
+	);
 	const [uploading, setUploading] = useState(false);
 	const fileInput = useRef<HTMLInputElement>(null);
 
 	const submit = async () => {
 		const value = text.trim();
-		if (!value || props.streaming || props.disabled || uploading) return;
+		if (!value || props.streaming || props.disabled || uploading || removal.isPending) return;
 		const sent = await props.onSend(
 			value,
 			attachments.map(({ size: _size, ...attachment }) => attachment),
@@ -370,7 +377,7 @@ export function Composer(props: ComposerProps) {
 			);
 			setAttachments((current) => [...current, ...uploaded]);
 		} catch (error) {
-			toastError(error, t`Couldn't attach the file. Try again.`);
+			toastError(error, t`Couldn't attach the file. Try again.`, { byCode: attachmentErrorMessages() });
 		} finally {
 			setUploading(false);
 			if (fileInput.current) fileInput.current.value = "";
@@ -378,35 +385,23 @@ export function Composer(props: ComposerProps) {
 	};
 
 	const page = props.variant === "page";
-	const sendLabel = props.streaming ? t`Stop` : t`Send`;
 
 	return (
-		<div className={page ? "border-t border-line px-6 py-3" : "px-3.5 pt-2 pb-3.5"}>
+		<div className={page ? "border-t border-line px-6 py-3 max-sm:px-3 max-sm:py-2" : "px-3.5 pt-2 pb-3.5"}>
 			<div className={cn("grid gap-2", page && "mx-auto w-full max-w-[720px]")}>
-				<div className="grid rounded-xl border border-line-2 bg-raised transition-colors duration-quick focus-within:border-accent">
-					<label htmlFor={id} className="sr-only">
-						<Trans>Message the coach</Trans>
-					</label>
-					<textarea
-						id={id}
-						value={text}
-						disabled={props.disabled}
-						placeholder={props.placeholder}
-						onChange={(event) => setText(event.target.value)}
-						onKeyDown={(event) => {
-							if (event.key === "Enter" && !event.shiftKey && !isImeComposing(event)) {
-								event.preventDefault();
-								void submit();
-							}
-							if (event.key === "Escape" && props.streaming) {
-								event.preventDefault();
-								props.onStop();
-							}
-						}}
-						className="field-sizing-content max-h-[200px] min-h-[68px] w-full resize-none bg-transparent px-4 pt-3 pb-1.5 text-base leading-[22px] outline-none placeholder:text-ink-3 disabled:opacity-60 md:text-[15px]"
-					/>
-					<div className="flex items-end gap-1.5 px-3 pb-2.5">
-						<div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+				{props.notice}
+				<ChatComposer
+					label={t`Message the coach`}
+					placeholder={props.placeholder}
+					value={text}
+					onValueChange={setText}
+					disabled={props.disabled}
+					sendDisabled={!text.trim() || props.disabled || uploading || removal.isPending}
+					streaming={props.streaming}
+					onSend={() => void submit()}
+					onStop={props.onStop}
+					chips={
+						<>
 							{props.chips}
 							{attachments.map((attachment) => (
 								<span
@@ -420,52 +415,148 @@ export function Composer(props: ComposerProps) {
 									<button
 										type="button"
 										aria-label={t`Remove ${attachment.filename}`}
-										onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+										onClick={() => void removal.remove(attachment.id)}
+										disabled={props.disabled || props.streaming || uploading || removal.isPending}
 										className="grid size-6 place-items-center rounded-sm text-ink-3 transition-colors duration-quick hover:bg-hover hover:text-ink"
 									>
 										<Icon name="x" size={14} />
 									</button>
 								</span>
 							))}
-						</div>
-						<IconButton
-							icon="paperclip"
-							label={t`Attach a file`}
-							size="icon-sm"
-							disabled={props.disabled || uploading}
-							loading={uploading}
-							className="text-ink-2"
-							onClick={() => fileInput.current?.click()}
-						/>
-						<input
-							ref={fileInput}
-							type="file"
-							multiple
-							className="hidden"
-							onChange={(event) => void upload(event.target.files)}
-						/>
-						<Tooltip>
-							<TooltipTrigger
-								render={
-									<Button
-										size="icon-sm"
-										aria-label={sendLabel}
-										disabled={!props.streaming && (props.disabled || uploading)}
-										onClick={props.streaming ? props.onStop : () => void submit()}
-										className="rounded-lg"
-									/>
-								}
-							>
-								{/* Stop is the one filled glyph: a solid square. */}
-								<Icon name={props.streaming ? "stop" : "arrow-up"} filled={props.streaming} size={18} />
-							</TooltipTrigger>
-							<TooltipContent>{sendLabel}</TooltipContent>
-						</Tooltip>
-					</div>
-				</div>
-				{props.privacy}
+						</>
+					}
+					actions={
+						<>
+							<IconButton
+								icon="paperclip"
+								label={t`Attach a file`}
+								size="icon-sm"
+								disabled={props.disabled || uploading || removal.isPending}
+								loading={uploading}
+								className="text-ink-2"
+								onClick={() => fileInput.current?.click()}
+							/>
+							<input
+								ref={fileInput}
+								type="file"
+								multiple
+								accept={[...AGENT_ATTACHMENT_TYPES, ".md", ".docx"].join(",")}
+								className="hidden"
+								onChange={(event) => void upload(event.target.files)}
+							/>
+						</>
+					}
+				/>
+				{props.privacy(attachments.length)}
 			</div>
 		</div>
+	);
+}
+
+// ---- Composer parts shared by Career → Coach and the workspace sheet ----
+
+/** What the coach may keep from this message, where the user types, with the mode one tap away. */
+export function MemoryNote({ knowledge }: { knowledge: boolean }) {
+	const { data: profile } = useQuery(orpc.career.profile.queryOptions());
+	if (!profile) return null;
+	const note = !knowledge
+		? t`With Knowledge off, nothing you write is remembered.`
+		: {
+				ask: t`The coach asks before remembering facts you state.`,
+				auto: t`The coach remembers facts you state, and tells you.`,
+				off: t`The coach doesn't remember anything you write.`,
+			}[profile.memoryMode];
+	return (
+		<>
+			{note}{" "}
+			<Popover>
+				<PopoverTrigger
+					render={
+						<button type="button" className="font-medium text-ink-2 underline underline-offset-2 hover:text-ink" />
+					}
+				>
+					<Trans context="Change what the coach remembers">Change</Trans>
+				</PopoverTrigger>
+				<PopoverContent align="start" className="w-[min(420px,calc(100vw-2rem))] p-2">
+					<MemoryCard />
+				</PopoverContent>
+			</Popover>
+		</>
+	);
+}
+
+/** A failed configured service can still be retried through an explicitly approved native AI search. */
+export function useWebSearch(provider: RouterOutput["aiProviders"]["list"][number] | undefined) {
+	const status = useQuery(orpc.webAccess.status.queryOptions());
+	const failure = status.data?.testResult?.search.error;
+	const eligible = !!provider && supportsNativeWebSearch(provider) && (failure === "auth" || failure === "quota");
+	const capabilities = useQuery({ ...orpc.ai.capabilities.queryOptions(), enabled: eligible });
+	const fallbackLabel = eligible && capabilities.data?.nativeWebSearch === 1 ? provider.label : undefined;
+	return { status, canSearch: status.data?.search === true || !!fallbackLabel, fallbackLabel };
+}
+
+type WebResearchChipProps = {
+	fallbackLabel?: string | undefined;
+	status: { data?: { search: boolean } | undefined; isPending: boolean; isError: boolean; refetch: () => unknown };
+	pressed: boolean;
+	onPressedChange: (pressed: boolean) => void;
+};
+
+/**
+ * Web research needs a search service. Without one the chip is a way to set it up, not a switch that claims to send
+ * searches anywhere; reading links the user pastes doesn't need it.
+ */
+export function WebResearchChip({ status, pressed, onPressedChange, fallbackLabel }: WebResearchChipProps) {
+	const nativeSearchLabel = fallbackLabel ?? "";
+	if (status.data?.search || fallbackLabel)
+		return (
+			<ContextChip
+				pressed={pressed}
+				onPressedChange={onPressedChange}
+				label={t`Web research`}
+				tooltip={
+					fallbackLabel
+						? t`Retry with ${nativeSearchLabel}`
+						: t`Lets the coach search public pages through your web search service`
+				}
+				offIcon="globe-hemisphere-west"
+			/>
+		);
+	const chip =
+		"touch-target inline-flex h-7 items-center gap-1 rounded-sm border border-dashed border-line px-[9px] text-xs font-medium text-ink-3";
+	if (status.isPending || status.isError)
+		return (
+			<Tooltip>
+				<TooltipTrigger
+					render={
+						<button
+							type="button"
+							aria-disabled={status.isPending}
+							onClick={() => status.isError && void status.refetch()}
+							className={chip}
+						/>
+					}
+				>
+					<Icon name={status.isError ? "arrow-clockwise" : "globe-hemisphere-west"} size={16} />
+					{status.isError ? t`Web research · Retry` : t`Web research`}
+				</TooltipTrigger>
+				<TooltipContent>
+					{status.isError ? t`Couldn't check for a web search service. Retry.` : t`Checking for a web search service…`}
+				</TooltipContent>
+			</Tooltip>
+		);
+	return (
+		<Tooltip>
+			<TooltipTrigger render={<Link to="/dashboard/settings/ai" className={cn(chip, "hover:text-ink-2")} />}>
+				<Icon name="globe-hemisphere-west" size={16} />
+				<Trans>Web research · Set up</Trans>
+			</TooltipTrigger>
+			<TooltipContent>
+				<Trans>
+					Connect a search service in Settings to research the web. The coach can still read public links you paste.
+				</Trans>
+			</TooltipContent>
+		</Tooltip>
 	);
 }
 

@@ -2,7 +2,7 @@ import type { ResumeRenderOptions } from "../context";
 import type { PageMap } from "../page-map";
 import type { ConvertedDocument } from "./to-forme";
 import type { ElementInfo, RenderWithLayoutResult } from "@formepdf/core";
-import type { FormeDocument } from "@formepdf/react";
+import type { FormeDocument, FormeNode, FormeStyle } from "@formepdf/react";
 import type { ResumeData } from "@reactive-resume/schema/resume/data";
 import type { Template } from "@reactive-resume/schema/templates";
 import type { Locale } from "@reactive-resume/utils/locale";
@@ -67,6 +67,69 @@ export function lostCharacters(warnings: readonly string[]): string[] | null {
 	return [...new Set(lost.flatMap((warning) => warning.match(/"[^"]*" \(U\+[0-9A-F]+\)/g) ?? []))];
 }
 
+const uncoveredCharacters = (warnings: readonly string[]) =>
+	new Set((lostCharacters(warnings) ?? []).map((character) => character.slice(1, character.lastIndexOf('"'))));
+
+/** Substitute in render-owned text only, asking the same engine which fonts actually need the replacement. */
+async function substituteMissingGlyphs(
+	document: FormeDocument,
+	characters: ReadonlySet<string>,
+	draw: (document: FormeDocument) => Promise<RenderWithLayoutResult>,
+	cache: Map<string, Set<string>>,
+) {
+	const groups = new Map<string, { style: FormeStyle; characters: Set<string>; text: { content: string }[] }>();
+	const collect = (text: { content: string }, inherited: FormeStyle) => {
+		const candidates = [...text.content].filter((character) => characters.has(character));
+		if (candidates.length === 0) return;
+		const style = {
+			fontFamily: inherited.fontFamily ?? "Helvetica",
+			fontWeight: inherited.fontWeight ?? 400,
+			fontStyle: inherited.fontStyle ?? "Normal",
+		};
+		const key = JSON.stringify(style);
+		let group = groups.get(key);
+		if (!group) groups.set(key, (group = { style, characters: new Set(), text: [] }));
+		for (const character of candidates) group.characters.add(character);
+		group.text.push(text);
+	};
+	const visit = (node: FormeNode, inherited: FormeStyle) => {
+		const style = { ...inherited, ...node.style };
+		const { kind } = node;
+		if (kind.type === "Text" || kind.type === "Heading") {
+			if (kind.runs?.length) for (const run of kind.runs) collect(run, { ...style, ...run.style });
+			else collect(kind, style);
+		}
+		for (const child of node.children) visit(child, style);
+	};
+	for (const child of document.children) visit(child, document.defaultStyle ?? {});
+	let changed = false;
+	for (const [key, group] of groups) {
+		const content = [...group.characters].sort().join("");
+		const cacheKey = `${key}:${content}`;
+		let missing = cache.get(cacheKey);
+		if (!missing) {
+			const probe = await draw({
+				...document,
+				children: [
+					{
+						kind: { type: "Page", config: document.defaultPage },
+						style: {},
+						children: [{ kind: { type: "Text", content }, style: group.style, children: [] }],
+					},
+				],
+			});
+			missing = uncoveredCharacters(probe.warnings);
+			cache.set(cacheKey, missing);
+		}
+		for (const text of group.text) {
+			const replacement = [...text.content].map((character) => (missing.has(character) ? "?" : character)).join("");
+			changed ||= replacement !== text.content;
+			text.content = replacement;
+		}
+	}
+	return changed;
+}
+
 /** Every character in the document's strings, sorted: its text, plus style values and links, which cost little. */
 function documentText(document: FormeDocument): string {
 	const characters = new Set<string>();
@@ -121,17 +184,106 @@ function unplacedBlocks(layout: RenderWithLayoutResult["layout"]): string[] {
 	return [...missing];
 }
 
+/** Measure stable keep-with-next space; oversized descriptions still split after their first line. */
+function entryPaginationRepairs(layout: RenderWithLayoutResult["layout"], splitItems: ReadonlySet<number>) {
+	const headers = new Map<
+		string,
+		{ page: number; lastPage: number; top: number; bottom: number; height: number; available: number }
+	>();
+	const bodies = new Map<string, { page: number; y: number; height: number; lineHeight: number }>();
+	for (const [pageIndex, page] of layout.pages.entries()) {
+		const visit = (element: ElementInfo, parentSource?: ElementInfo["sourceLocation"]) => {
+			const source = element.sourceLocation ?? parentSource;
+			if (source && !offPage(element.y) && !offPage(element.height)) {
+				const key = source.file.replace(/^(rr-node:|rr-in:)/, "");
+				const item = key.match(/^(.+\/section-items\/item-[^/]+)/)?.[1];
+				if (item && element.kind === "Text" && key.startsWith(`${item}/item-header`)) {
+					const header = headers.get(item);
+					if (!header)
+						headers.set(item, {
+							page: pageIndex,
+							lastPage: pageIndex,
+							top: element.y,
+							bottom: element.y + element.height,
+							height: 0,
+							available: page.contentHeight,
+						});
+					else {
+						if (header.lastPage === pageIndex) {
+							header.top = Math.min(header.top, element.y);
+							header.bottom = Math.max(header.bottom, element.y + element.height);
+						} else {
+							header.height += header.bottom - header.top;
+							header.lastPage = pageIndex;
+							header.top = element.y;
+							header.bottom = element.y + element.height;
+						}
+					}
+				} else if (
+					item &&
+					!key.startsWith(`${item}/item-header`) &&
+					!bodies.has(item) &&
+					(source.column === LIST_ROLE.item || (element.kind === "Text" && source.column !== LIST_ROLE.marker))
+				) {
+					const lineHeight = element.style.fontSize * element.style.lineHeight;
+					bodies.set(item, {
+						page: pageIndex,
+						y: element.y,
+						lineHeight,
+						height:
+							source.column === LIST_ROLE.item && !splitItems.has(source.line - 1)
+								? element.height + element.style.margin.top + element.style.margin.bottom
+								: lineHeight,
+					});
+				}
+			}
+			for (const child of element.children) visit(child, source);
+		};
+		for (const element of page.elements) visit(element);
+	}
+	const presenceAhead = new Map<string, number>();
+	const orphans: string[] = [];
+	for (const [key, header] of headers) {
+		const body = bodies.get(key);
+		if (!body) continue;
+		const headerKey = `${key}/item-header`;
+		const gap = body.page === header.lastPage ? Math.max(0, body.y - header.bottom) : body.lineHeight;
+		const ahead = body.height + gap;
+		if (header.height + header.bottom - header.top + ahead <= header.available) {
+			presenceAhead.set(headerKey, ahead);
+			if (body.page > header.page) orphans.push(headerKey);
+		}
+	}
+	return { orphans, presenceAhead };
+}
+
 const isFixed = (element: ElementInfo): boolean =>
 	element.sourceLocation?.file === FIXED_SOURCE || element.children.some(isFixed);
 
-/** List items needing a page break to keep their marker and full row height (see `LIST_ROLE`). */
-function listItemsNeedingBreak(layout: RenderWithLayoutResult["layout"]): number[] {
+/** Flow constraints for large items, and marker/row repairs for items that still split (see `LIST_ROLE`). */
+function listPaginationRepairs(layout: RenderWithLayoutResult["layout"]) {
 	const markerPage = new Map<number, number>();
 	const contentPage = new Map<number, number>();
 	const itemPage = new Map<number, number>();
+	const split = new Set<number>();
+	const oversized = new Set<number>();
+	const contentPages = new Map<number, Set<number>>();
 	layout.pages.forEach((page, pageIndex) => {
-		const visit = (element: ElementInfo) => {
+		const visit = (element: ElementInfo, availableHeight: number, parentSource?: ElementInfo["sourceLocation"]) => {
 			const source = element.sourceLocation;
+			const inheritedSource = source ?? parentSource;
+			if (inheritedSource?.column === LIST_ROLE.content && element.kind === "Text" && !offPage(element.y)) {
+				const pages = contentPages.get(inheritedSource.line) ?? new Set<number>();
+				pages.add(pageIndex);
+				contentPages.set(inheritedSource.line, pages);
+			}
+			const { margin, padding, borderWidth } = element.style;
+			if (source?.column === LIST_ROLE.item) {
+				const height = element.height + margin.top + margin.bottom;
+				// Prefer splitting large rows for page fill; only rows exceeding a fresh page cannot stay whole.
+				if (height > availableHeight / 4) split.add(source.line - 1);
+				if (height > availableHeight) oversized.add(source.line - 1);
+			}
 			const pages =
 				source?.column === LIST_ROLE.marker
 					? markerPage
@@ -142,16 +294,21 @@ function listItemsNeedingBreak(layout: RenderWithLayoutResult["layout"]): number
 							: null;
 			// Forme leaves some fragments of a splitting box at y ±Number.MAX_VALUE; they aren't on this page.
 			if (source && pages && !pages.has(source.line) && !offPage(element.y)) pages.set(source.line, pageIndex);
-			element.children.forEach(visit);
+			const innerHeight = availableHeight - padding.top - padding.bottom - borderWidth.top - borderWidth.bottom;
+			for (const child of element.children) visit(child, innerHeight, inheritedSource);
 		};
-		page.elements.forEach(visit);
+		for (const element of page.elements) visit(element, page.contentHeight);
 	});
-	return [...markerPage].flatMap(([line, page]) => {
-		const content = contentPage.get(line) ?? page;
-		// Forme can move both companions to a new page but drop their row, reserving only the marker's line height.
-		const detached = page > 0 && content === page && itemPage.get(line) !== page;
-		return content > page || detached ? [line - 1] : [];
-	});
+	const breakBefore = [...markerPage]
+		.flatMap(([line, page]) => {
+			const content = contentPage.get(line) ?? page;
+			// Forme can move both companions to a new page but drop their row, reserving only the marker's line height.
+			const detached = page > 0 && content === page && itemPage.get(line) !== page;
+			return content > page || detached ? [line - 1] : [];
+		})
+		.sort((a, b) => a - b);
+	const unsplit = [...contentPages].flatMap(([line, pages]) => (pages.size === 1 ? [line - 1] : []));
+	return { split, oversized, breakBefore, unsplit };
 }
 
 /**
@@ -231,16 +388,23 @@ export async function renderResumeElement(
 	]);
 
 	const breakBeforeListItems = new Set<number>();
+	const splitListItems = new Set<number>();
 	const breakBeforeNodes = new Set<string>();
+	const presenceAheadNodes = new Map<string, number>();
 	// Every pass draws the same text, so the fonts are prepared once, from the first pass's document.
 	let formeFonts: typeof fonts | undefined;
+	const missingGlyphs = new Set<string>();
+	const missingGlyphWarnings = new Set<string>();
+	const glyphSubstitutions = new Map<string, Set<string>>();
 	const layOutOnce = async (keepNestedRowsWhole: boolean) => {
 		const convert = (freeFormHeights?: (number | undefined)[]) =>
 			toFormeDocument(tree, {
 				images,
 				keepNestedRowsWhole,
 				breakBeforeListItems,
+				splitListItems,
 				breakBeforeNodes,
+				presenceAheadNodes,
 				freeFormHeights,
 			});
 		// Forme rewrites the font entries it's given (bytes to base64), so each render gets its own.
@@ -254,7 +418,21 @@ export async function renderResumeElement(
 						)
 					: fonts;
 			}
-			return engine.renderSerializedDocWithLayout({ ...document, fonts: formeFonts.map((font) => ({ ...font })) });
+			const preparedFonts = formeFonts;
+			const draw = (input: FormeDocument) =>
+				engine.renderSerializedDocWithLayout({ ...input, fonts: preparedFonts.map((font) => ({ ...font })) });
+			if (missingGlyphs.size) await substituteMissingGlyphs(document, missingGlyphs, draw, glyphSubstitutions);
+			let result = await draw(document);
+			const uncovered = uncoveredCharacters(result.warnings);
+			if (uncovered.size) {
+				for (const character of uncovered) missingGlyphs.add(character);
+				for (const warning of result.warnings)
+					if (uncoveredCharacters([warning]).size) missingGlyphWarnings.add(warning);
+				// shortcut: Forme 0.29 measures missing glyphs before substituting "?"; remove this retry when fixed upstream.
+				if (await substituteMissingGlyphs(document, missingGlyphs, draw, glyphSubstitutions))
+					result = await draw(document);
+			}
+			return result;
 		};
 		let converted = convert();
 		let result = await render(converted);
@@ -274,27 +452,64 @@ export async function renderResumeElement(
 		return { result, warnings: converted.warnings };
 	};
 
-	// Explicit breaks keep markers with their first line and restore rows lost when an item moves to a new page.
-	// Breaks move what follows, so a few passes settle it; each item is repaired at most once.
+	// Flow constraints remain valid when earlier rows move: batch repairs of rows that fit a fresh page. Only
+	// oversized rows need positional repairs, whose later break positions must be rechecked after each move.
 	const layOut = async (keepNestedRowsWhole: boolean) => {
-		for (let pass = 0; ; pass++) {
+		breakBeforeListItems.clear();
+		splitListItems.clear();
+		const whole = new Set<number>();
+		let measuredOversized: ReadonlySet<number> | undefined;
+		for (;;) {
 			const laidOut = await layOutOnce(keepNestedRowsWhole);
-			const needsBreak = listItemsNeedingBreak(laidOut.result.layout).filter((item) => !breakBeforeListItems.has(item));
-			if (needsBreak.length === 0 || pass === 3) return laidOut;
-			for (const item of needsBreak) breakBeforeListItems.add(item);
+			const repairs = listPaginationRepairs(laidOut.result.layout);
+			// Capture full intrinsic heights before reopening rows; later fragments do not measure the whole row.
+			const oversized = (measuredOversized ??= repairs.oversized);
+			let changed = false;
+			for (const item of repairs.split) {
+				if (whole.has(item) || splitListItems.has(item)) continue;
+				splitListItems.add(item);
+				changed = true;
+			}
+			if (changed) continue;
+			if (repairs.breakBefore.some((item) => !oversized.has(item))) {
+				// Reserve fitting rows already in one piece too, so later rows do not repeat the same defect after reflow.
+				// Preserve genuine continuations: their content already spans pages without leaving its marker behind.
+				for (const item of [...repairs.breakBefore, ...repairs.unsplit]) {
+					if (oversized.has(item) || whole.has(item) || !splitListItems.has(item)) continue;
+					whole.add(item);
+					splitListItems.delete(item);
+					changed = true;
+				}
+			}
+			if (changed) continue;
+			// shortcut: oversized rows need sequential marker repair until Forme supports atomic first fragments.
+			const first = repairs.breakBefore.find((item) => oversized.has(item) && !breakBeforeListItems.has(item));
+			if (first === undefined) {
+				if (repairs.breakBefore.some((item) => !oversized.has(item)) && !misplacesABox(laidOut.result))
+					throw new Error("The PDF engine could not keep a list marker with its content.");
+				return laidOut;
+			}
+			breakBeforeListItems.add(first);
 		}
 	};
 
 	let { result, warnings } = await layOut(false);
-	if (misplacesABox(result)) ({ result, warnings } = await layOut(true));
-	// ponytail: three repairs cap rendering cost; remove this workaround when Forme fixes nested pagination.
+	let keepNestedRowsWhole = misplacesABox(result);
+	if (keepNestedRowsWhole) ({ result, warnings } = await layOut(true));
+	// shortcut: three repairs cap rendering cost until Forme supports keep-with-next and reliable nested pagination.
 	for (let pass = 0; pass < 3; pass++) {
 		const first = unplacedBlocks(result.layout).find((key) => !breakBeforeNodes.has(key));
-		if (!first) break;
-		// Retry the first failed block from a fresh page; later failures may recover without extra breaks.
-		breakBeforeNodes.add(first);
-		({ result, warnings } = await layOut(true));
+		const headers = entryPaginationRepairs(result.layout, splitListItems);
+		const reserveHeaders = headers.orphans.length > 0 && presenceAheadNodes.size === 0;
+		if (!first && !reserveHeaders) break;
+		// Reserve all first fragments together: the constraint remains valid after earlier entries move.
+		if (reserveHeaders) for (const [key, height] of headers.presenceAhead) presenceAheadNodes.set(key, height);
+		if (first) breakBeforeNodes.add(first);
+		keepNestedRowsWhole ||= first !== undefined || misplacesABox(result);
+		({ result, warnings } = await layOut(keepNestedRowsWhole));
 	}
+	if (entryPaginationRepairs(result.layout, splitListItems).orphans.length > 0)
+		warnings.push("render defect: the engine couldn't keep an entry header with its content");
 	if (misplacesABox(result))
 		warnings.push("render defect: the engine couldn't place a box; a page may be laid out wrong");
 
@@ -303,6 +518,8 @@ export async function renderResumeElement(
 		pageMap: extractPageMap(result.layout),
 		missingFonts: [...new Set(missing)],
 		layout: result.layout,
-		warnings: [...fontWarnings, ...imageWarnings, ...warnings, ...result.warnings],
+		warnings: [
+			...new Set([...fontWarnings, ...imageWarnings, ...warnings, ...result.warnings, ...missingGlyphWarnings]),
+		],
 	};
 }

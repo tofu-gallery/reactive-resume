@@ -1,16 +1,21 @@
+import { t } from "@lingui/core/macro";
+import { ORPCError } from "@orpc/client";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import z from "zod";
+import { toast } from "@reactive-resume/ui/components/toast";
+import { EditorPending } from "./-components/editor-pending";
 import { EditorShell } from "./-components/editor-shell";
 import { useBuilderResumeUpdateSubscription, useResumeCleanup, useResumeStore } from "@/features/resume/builder/draft";
 import { EDITOR_MODES } from "@/features/resume/editor/store";
 import { orpc } from "@/libs/orpc/client";
-import { createNoindexFollowMeta } from "@/libs/seo";
+import { getPageTitle, createNoindexFollowMeta } from "@/libs/seo";
 
 const searchSchema = z.object({
 	// Write is the default and stays out of the URL.
 	mode: z.enum(EDITOR_MODES).optional().catch(undefined),
+	checkTab: z.enum(["issues", "match", "writing"]).optional().catch(undefined),
 	// Opens History on this version, read-only; Applications' "Open" on what was sent links here.
 	version: z.string().optional().catch(undefined),
 	// Opens the assistant on a conversation ("new" for a fresh one).
@@ -25,6 +30,7 @@ const searchSchema = z.object({
 
 export const Route = createFileRoute("/builder/$resumeId")({
 	component: RouteComponent,
+	pendingComponent: EditorPending,
 	validateSearch: searchSchema,
 	beforeLoad: ({ context, location }) => {
 		if (!context.session) throw redirect({ to: "/auth/login", search: { callbackURL: location.href }, replace: true });
@@ -36,20 +42,49 @@ export const Route = createFileRoute("/builder/$resumeId")({
 		void import("./-components/page-canvas");
 		void import("@/features/resume/preview/preview.browser");
 
-		const resume = await context.queryClient.ensureQueryData(
-			orpc.resume.getById.queryOptions({ input: { id: params.resumeId } }),
-		);
+		const resume = await context.queryClient
+			.ensureQueryData(orpc.resume.getById.queryOptions({ input: { id: params.resumeId } }))
+			.catch((error: unknown) => {
+				// A stale or mistyped link: Documents, saying why, rather than an error page whose Try again can't help.
+				if (error instanceof ORPCError && error.code === "NOT_FOUND") {
+					return null;
+				}
+				throw error;
+			});
 
-		return { name: resume.name };
+		return resume ? { name: resume.name } : null;
 	},
 	head: ({ loaderData }) => ({
 		meta: loaderData
-			? [{ title: `${loaderData.name} - Reactive Resume` }, createNoindexFollowMeta()]
+			? [{ title: getPageTitle(loaderData.name) }, createNoindexFollowMeta()]
 			: [createNoindexFollowMeta()],
 	}),
 });
 
 function RouteComponent() {
+	return Route.useLoaderData() ? <ResumeEditor /> : <UnavailableResume />;
+}
+
+function UnavailableResume() {
+	const navigate = Route.useNavigate();
+	const notified = useRef(false);
+	useEffect(() => {
+		let active = true;
+		// The destination explanation waits for the root toaster's sibling mount effect.
+		queueMicrotask(() => {
+			if (!active || notified.current) return;
+			notified.current = true;
+			toast.add({ type: "error", description: t`That resume isn't available. It may have been deleted.` });
+			void navigate({ to: "/dashboard", replace: true });
+		});
+		return () => {
+			active = false;
+		};
+	}, [navigate]);
+	return null;
+}
+
+function ResumeEditor() {
 	const { resumeId } = Route.useParams();
 	const { data: resume } = useSuspenseQuery(orpc.resume.getById.queryOptions({ input: { id: resumeId } }));
 	const initializeResumeStore = useResumeStore((state) => state.initialize);
@@ -57,9 +92,16 @@ function RouteComponent() {
 	const isReady = useResumeStore((state) => state.isReady);
 	const initializedResumeId = useResumeStore((state) => state.resumeId);
 	const isInitialized = isReady && initializedResumeId === resumeId;
+	const name = useResumeStore((state) =>
+		state.resume && state.resume.id === resumeId ? state.resume.name : resume.name,
+	);
 
 	useResumeCleanup();
 	useBuilderResumeUpdateSubscription();
+
+	useEffect(() => {
+		document.title = getPageTitle(name);
+	}, [name]);
 
 	useEffect(() => {
 		if (isInitialized) return;
@@ -82,7 +124,7 @@ function RouteComponent() {
 		resume,
 	]);
 
-	if (!isInitialized) return null;
+	if (!isInitialized) return <EditorPending />;
 
 	return <EditorShell />;
 }

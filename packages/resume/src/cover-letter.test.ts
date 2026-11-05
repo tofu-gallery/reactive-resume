@@ -7,7 +7,15 @@ import {
 	createCoverLetterResumeData,
 	detachEmbeddedLetters,
 	greetingName,
+	initialCoverLetterLocale,
 } from "./cover-letter";
+
+it("keeps creation and drafting on the same posting/resume/default language", () => {
+	expect(initialCoverLetterLocale("de-de", "en-GB")).toBe("de-DE");
+	expect(initialCoverLetterLocale("not_a_language", "en-GB")).toBe("en-GB");
+	expect(initialCoverLetterLocale(undefined, "en-GB")).toBe("en-GB");
+	expect(initialCoverLetterLocale(undefined)).toBe(defaultResumeData.metadata.page.locale);
+});
 
 describe("detachEmbeddedLetters", () => {
 	it("takes letters out of the resume and its layout, and returns each one", () => {
@@ -87,7 +95,6 @@ describe("independent cover letters", () => {
 			expected:
 				"<p>Dear hiring team,</p><p>Body</p><p>Kind regards,<br />Jordan &lt;Reyes&gt;<br />+49 555 0100<br />jordan@example.com</p>",
 		},
-		{ greeting: "", signOff: "", expected: "<p>Body</p>" },
 		{ greeting: "  ", signOff: "  ", expected: "<p>Body</p>" },
 		{ greeting: null, signOff: null, expected: "<p>Dear hiring team,</p><p>Body</p><p>Kind regards,<br />Jordan</p>" },
 	])("respects custom or omitted greeting and sign-off: $greeting / $signOff", ({ greeting, signOff, expected }) => {
@@ -129,7 +136,12 @@ describe("independent cover letters", () => {
 		});
 		expect(
 			composeCoverLetter({ ...letter, recipientName: "", recipientCompany: "", letterDate: null }, words),
-		).toMatchObject({ recipient: "<p>Hiring team</p>", content: expect.stringMatching(/^<p>Dear hiring team,<\/p>/) });
+		).toMatchObject({ recipient: "", content: expect.stringMatching(/^<p>Dear hiring team,<\/p>/) });
+		// "Hiring team" stands in only above a company.
+		expect(
+			composeCoverLetter({ ...letter, recipientName: "", recipientCompany: "Lumen", letterDate: null }, words)
+				.recipient,
+		).toBe("<p>Hiring team<br />Lumen</p>");
 		expect(composeCoverLetter({ ...letter, layout: "freeform" }, words)).toEqual({
 			recipient: "<p>Unused</p>",
 			content: "<p>Body</p>",

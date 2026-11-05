@@ -1,6 +1,7 @@
 import type { ResumeData } from "./data";
 import type { EndpointReading, ParsedPeriod, PeriodEndpoint } from "./period";
 import z from "zod";
+import expectedLabels from "./expected-labels.json";
 import { ONGOING_TOKENS_BY_LANGUAGE, readPeriod, readSingleDate } from "./period";
 import presentLabels from "./present-labels.json";
 
@@ -20,11 +21,18 @@ export const resumeDatesSchema = z
 			.describe("When it started, or the date itself for single-date entries (awards, certifications, publications)."),
 		end: yearMonthSchema.nullable().catch(null).describe("When it ended. Null while ongoing or for single dates."),
 		present: z.boolean().catch(false).describe("Whether it's ongoing, printed as 'Present'."),
+		expected: z
+			.boolean()
+			.optional()
+			.catch(undefined)
+			.describe(
+				"Whether the end date is still to come, such as a degree in progress: printed as 'Expected May 2027'. Ignored while present is true.",
+			),
 		raw: z
 			.string()
 			.optional()
 			.describe(
-				"The original text when it couldn't be read exactly, such as 'Summer 2016'. It's printed as written until the dates are edited, which removes it.",
+				"Custom date text, also used for imported text that could not be read exactly. Printed verbatim, overriding start/end formatting. Preserve it when editing other fields; remove it only when the user chooses preset date fields.",
 			),
 	})
 	.describe(
@@ -32,6 +40,10 @@ export const resumeDatesSchema = z
 	);
 
 export type ResumeDates = z.infer<typeof resumeDatesSchema>;
+
+/** Nonempty custom text without a parsed start cannot support timeline checks or date sorting. */
+export const hasUnreadableDateText = (dates: ResumeDates | undefined): boolean =>
+	Boolean(dates?.raw?.trim()) && !dates?.start;
 
 /** How dates print: Mar 2022, March 2022, 03/2022 or 2022-03. */
 export const dateFormatSchema = z.enum(["short", "long", "numeric", "iso"]);
@@ -43,6 +55,12 @@ export const DEFAULT_DATE_FORMAT: DateFormat = "short";
 export const EMPTY_RESUME_DATES: ResumeDates = { start: null, end: null, present: false };
 
 const labels: Record<string, string> = presentLabels;
+const expected: Record<string, string> = expectedLabels;
+
+/** "Expected" in a resume's locale, before an end date still to come; English until a locale translates it. */
+export function getExpectedLabel(locale: string): string {
+	return expected[locale] || "Expected";
+}
 
 /**
  * "Present" in a resume's locale, as dates print it. Locales without a translation yet fall back to the
@@ -69,7 +87,8 @@ export const resumeDatesToPeriod = (dates: ResumeDates): ParsedPeriod | null =>
 	dates.start
 		? {
 				start: toEndpoint(dates.start),
-				...(dates.end ? { end: toEndpoint(dates.end) } : {}),
+				// An end kept while Present is on (so switching it off restores the date) isn't part of the period.
+				...(dates.end && !dates.present ? { end: toEndpoint(dates.end) } : {}),
 				ongoing: dates.present,
 			}
 		: null;
@@ -83,9 +102,26 @@ const isExact = (reading: EndpointReading | undefined) =>
 
 /**
  * Reads a legacy date text into structured dates. Exact readings (years, months by name or number, and
- * "Present") drop the text; approximate or unreadable ones keep it in `raw`, which asks for a review and
- * prints as written until then.
+ * "Present") drop the text; approximate or unreadable ones keep it in `raw`, which prints verbatim and remains editable as custom text.
  */
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The Expected label (in the locale, or English) right after a period's dash, with the space that follows it. */
+const expectedEndPattern = (locale: string) =>
+	new RegExp(
+		`(?<=[–—-]\\s*)(?:${[...new Set([getExpectedLabel(locale), "Expected"])].map(escapeRegExp).join("|")})\\s+`,
+		"iu",
+	);
+
+/** A period's text without the Expected label before its end, and the label match when there was one. */
+function withoutExpectedLabel(value: string, locale: string) {
+	const expected = expectedEndPattern(locale).exec(value);
+	const unlabeled = expected
+		? value.slice(0, expected.index) + value.slice(expected.index + expected[0].length)
+		: value;
+	return { expected, unlabeled };
+}
+
 export function readLegacyDates(text: string, options: { locale: string; single: boolean }): ResumeDates {
 	const value = text.trim();
 	if (!value) return { ...EMPTY_RESUME_DATES };
@@ -97,13 +133,16 @@ export function readLegacyDates(text: string, options: { locale: string; single:
 		return isExact(reading) ? dates : { ...dates, raw: value };
 	}
 
-	const reading = readPeriod(value, options.locale, [getPresentLabel(options.locale)]);
+	// "Sep 2023 – Expected May 2027", as an expected end date prints: read the date, and keep that it's still to come.
+	const { expected, unlabeled } = withoutExpectedLabel(value, options.locale);
+	const reading = readPeriod(unlabeled, options.locale, [getPresentLabel(options.locale)]);
 	if (!reading?.start) return { ...EMPTY_RESUME_DATES, raw: value };
 
 	const dates: ResumeDates = {
 		start: toYearMonth(reading.start.endpoint),
 		end: reading.end ? toYearMonth(reading.end.endpoint) : null,
 		present: reading.ongoing,
+		...(expected && reading.end && !reading.ongoing ? { expected: true } : {}),
 	};
 	return isExact(reading.start) && isExact(reading.end) ? dates : { ...dates, raw: value };
 }
@@ -116,7 +155,9 @@ export function inferDateFormat(texts: readonly string[], locale: string): DateF
 	const votes: Record<DateFormat, number> = { short: 0, long: 0, numeric: 0, iso: 0 };
 
 	for (const text of texts) {
-		const reading = readPeriod(text, locale) ?? { start: readSingleDate(text, locale) ?? undefined };
+		// An expected end ("Sep 2023 – Expected May 2027") votes like any other end date.
+		const { unlabeled } = withoutExpectedLabel(text, locale);
+		const reading = readPeriod(unlabeled, locale) ?? { start: readSingleDate(unlabeled, locale) ?? undefined };
 		for (const endpoint of [reading.start, "end" in reading ? reading.end : undefined]) {
 			const style = endpoint?.style;
 			if (style === "short" || style === "long" || style === "numeric" || style === "iso") votes[style] += 1;
@@ -185,6 +226,8 @@ export type DateFormatOptions = {
 	format?: DateFormat | undefined;
 	/** Defaults to "Present" in the locale. */
 	presentLabel?: string | undefined;
+	/** Defaults to "Expected" in the locale. */
+	expectedLabel?: string | undefined;
 };
 
 const monthFormatters = new Map<string, Intl.DateTimeFormat>();
@@ -203,10 +246,37 @@ function formatMonth(year: number, month: number, locale: string, style: "short"
 	return formatter.format(Date.UTC(year, month - 1, 1));
 }
 
-/** One date in the chosen format: Mar 2022, March 2022, 03/2022 or 2022-03. Year-only dates print the year. */
+const yearFormatters = new Map<string, Intl.NumberFormat>();
+
+// A year in the digits the locale's month dates use, so "2019" sits beside "أبريل ٢٠١٩" as "٢٠١٩". Only the digits
+// change, one by one: the year stays the one the user entered, leading zeros and all, in any calendar.
+function formatYear(yearText: string, locale: string) {
+	let formatter = yearFormatters.get(locale);
+	if (!formatter) {
+		let numberingSystem = "latn";
+		try {
+			numberingSystem = new Intl.DateTimeFormat(locale, { year: "numeric" }).resolvedOptions().numberingSystem;
+		} catch {
+			// An unknown locale prints Latin digits, as its month dates do.
+		}
+		formatter = new Intl.NumberFormat("en-US", { numberingSystem, useGrouping: false });
+		yearFormatters.set(locale, formatter);
+	}
+	const digits = formatter;
+	return yearText.replace(/\d/g, (digit) => digits.format(Number(digit)));
+}
+
+/**
+ * One date in the chosen format: Mar 2022, March 2022, 03/2022 or 2022-03. Year-only dates print the year, in the
+ * same digits as the month formats' years.
+ */
 export function formatYearMonth(value: YearMonth, { locale, format = DEFAULT_DATE_FORMAT }: DateFormatOptions) {
 	const [yearText, monthText] = value.split("-");
-	if (!monthText) return yearText ?? value;
+	if (!monthText) {
+		const year = Number(yearText);
+		if (!yearText || !Number.isInteger(year) || format === "iso" || format === "numeric") return yearText ?? value;
+		return formatYear(yearText, locale);
+	}
 
 	const year = Number(yearText);
 	const month = Number(monthText);
@@ -216,18 +286,18 @@ export function formatYearMonth(value: YearMonth, { locale, format = DEFAULT_DAT
 }
 
 /**
- * Dates as they print: "Mar 2022 – Present", "2014 – 2018" or one date. Dates that still carry `raw` (text that
- * couldn't be read exactly) print that text as written until someone reviews them.
+ * Dates as they print: "Mar 2022 – Present", "2014 – 2018" or one date. Dates carrying `raw` (custom or imported text) print that text verbatim, regardless of the selected format.
  */
 export function formatResumeDates(dates: ResumeDates, options: DateFormatOptions): string {
 	if (dates.raw !== undefined) return dates.raw;
 
 	const start = dates.start ? formatYearMonth(dates.start, options) : "";
+	const endDate = dates.end ? formatYearMonth(dates.end, options) : "";
 	const end = dates.present
 		? (options.presentLabel ?? getPresentLabel(options.locale))
-		: dates.end
-			? formatYearMonth(dates.end, options)
-			: "";
+		: endDate && dates.expected
+			? `${options.expectedLabel ?? getExpectedLabel(options.locale)} ${endDate}`
+			: endDate;
 
 	return start && end ? `${start} – ${end}` : start || end;
 }
@@ -241,7 +311,12 @@ export function formatResumeDates(dates: ResumeDates, options: DateFormatOptions
  */
 export function syncResumeDates(data: ResumeData) {
 	const { locale, dateFormat } = data.metadata.page;
-	const options: DateFormatOptions = { locale, format: dateFormat, presentLabel: getPresentLabel(locale) };
+	const options: DateFormatOptions = {
+		locale,
+		format: dateFormat,
+		presentLabel: getPresentLabel(locale),
+		expectedLabel: getExpectedLabel(locale),
+	};
 
 	forEachDatedEntry(data, (entry, field) => {
 		const text = getLegacyDateText(entry, field);

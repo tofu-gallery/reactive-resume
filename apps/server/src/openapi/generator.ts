@@ -1,9 +1,15 @@
 import type { OpenAPI } from "@orpc/openapi";
 import { OpenAPIGenerator } from "@orpc/openapi";
-import { JSON_SCHEMA_INPUT_REGISTRY, JSON_SCHEMA_REGISTRY, ZodToJsonSchemaConverter } from "@orpc/zod/zod4";
+import {
+	JSON_SCHEMA_INPUT_REGISTRY,
+	JSON_SCHEMA_OUTPUT_REGISTRY,
+	JSON_SCHEMA_REGISTRY,
+	ZodToJsonSchemaConverter,
+} from "@orpc/zod/zod4";
 import { downloadResumePdfProcedure } from "@reactive-resume/api/features/resume/export";
 import { restAliases } from "@reactive-resume/api/rest";
 import router from "@reactive-resume/api/routers";
+import { careerProfileDataSchema } from "@reactive-resume/schema/career";
 import { resumeDataSchema } from "@reactive-resume/schema/resume/data";
 import { createResumeDataJsonSchema } from "@reactive-resume/schema/resume/json-schema";
 import { writableResumeDataSchema } from "@reactive-resume/schema/resume/write";
@@ -23,6 +29,9 @@ type ResumeDataInputJsonSchema = Parameters<typeof JSON_SCHEMA_INPUT_REGISTRY.ad
 JSON_SCHEMA_INPUT_REGISTRY.add(resumeDataSchema, resumeDataInputSchema as unknown as ResumeDataInputJsonSchema);
 JSON_SCHEMA_INPUT_REGISTRY.add(writableResumeDataSchema, resumeDataInputSchema as unknown as ResumeDataInputJsonSchema);
 JSON_SCHEMA_REGISTRY.add(searchRegionsSchema.unwrap().unwrap(), { uniqueItems: true });
+JSON_SCHEMA_OUTPUT_REGISTRY.add(careerProfileDataSchema, {
+	required: Object.keys(careerProfileDataSchema.parse({})),
+});
 const importResumeInputSchema = openAPIRouter.resume.import["~orpc"].inputSchema;
 if (importResumeInputSchema) {
 	JSON_SCHEMA_INPUT_REGISTRY.add(importResumeInputSchema, {
@@ -82,9 +91,37 @@ const healthResponseSchema = {
 		uptime: { type: "string" },
 		database: healthDependencySchema,
 		storage: healthDependencySchema,
+		redis: {
+			...healthDependencySchema,
+			description: "Present only when REDIS_URL is configured. An unhealthy Redis makes the overall status unhealthy.",
+		},
 	},
 	required: ["service", "version", "revision", "status", "timestamp", "uptime", "database", "storage"],
 } satisfies OpenAPI.SchemaObject;
+
+type Procedure = { "~orpc": { handler?: unknown; route: { operationId?: string } } };
+
+function procedures(tree: unknown): Procedure[] {
+	if (!tree || typeof tree !== "object") return [];
+	if ("~orpc" in tree) return [tree as Procedure];
+	return Object.values(tree).flatMap(procedures);
+}
+
+/**
+ * Operations that have a resource-oriented alias in `restAliases`: the alias reuses the same handler under a new
+ * path, so the original is the legacy spelling. Generated clients see it as deprecated; the route keeps working.
+ */
+function legacyOperationIds() {
+	const aliases = procedures(restAliases);
+	const aliasHandlers = new Set(aliases.map((alias) => alias["~orpc"].handler));
+	const aliasIds = new Set(aliases.map((alias) => alias["~orpc"].route.operationId));
+	return new Set(
+		procedures(router)
+			.filter((procedure) => aliasHandlers.has(procedure["~orpc"].handler))
+			.map((procedure) => procedure["~orpc"].route.operationId)
+			.filter((id): id is string => !!id && !aliasIds.has(id)),
+	);
+}
 
 export async function generateOpenApiSpec({ appUrl, version }: GenerateOpenApiSpecOptions) {
 	const spec = await openAPIGenerator.generate(openAPIRouter, {
@@ -158,11 +195,13 @@ export async function generateOpenApiSpec({ appUrl, version }: GenerateOpenApiSp
 			(Array.isArray(value.anyOf) && value.anyOf.every(isVoid))
 		);
 	};
+	const legacy = legacyOperationIds();
 	for (const [path, item] of Object.entries(spec.paths ?? {})) {
 		if (!item || path === "/api/health") continue;
 		for (const method of ["get", "post", "put", "patch", "delete"] as const) {
 			const operation = item[method];
 			if (!operation) continue;
+			if (operation.operationId && legacy.has(operation.operationId)) operation.deprecated = true;
 			const body = operation.requestBody;
 			if (body && !("$ref" in body) && body.content["multipart/form-data"]) {
 				const json = body.content["application/json"]?.schema;

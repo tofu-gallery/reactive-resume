@@ -1,4 +1,5 @@
-import type { Application } from "@/features/applications/types";
+import type { ApplicationLane } from "@/features/applications/lanes";
+import type { Application, ApplicationSummary } from "@/features/applications/types";
 import type { ReminderTarget } from "@/features/reminders";
 import type {
 	ApplicationClosedReason,
@@ -10,13 +11,22 @@ import { openBrowserAsync } from "expo-web-browser";
 import { useState } from "react";
 import { Linking, View } from "react-native";
 import { contactSchema } from "@reactive-resume/schema/applications/data";
+import { followUpInstant, isDateOnlyFollowUp } from "@reactive-resume/schema/applications/follow-up";
+import { postingReadReceipt } from "@reactive-resume/schema/applications/posting-source";
+import { fromZonedDateTime } from "@reactive-resume/utils/timezone";
 import { WallClockField } from "./date-field";
-import { followUpReminder, leadLabel, useDocuments, useUserTime } from "./hooks";
+import { followUpReminder, leadLabel, useDocuments, useNow, useUserTime } from "./hooks";
 import { followUpDay } from "@/features/applications-board/calendar";
 import { applicationError } from "@/features/applications/error";
-import { useApplicationMutations } from "@/features/applications/queries";
+import { LaneNotice } from "@/features/applications/lane-notice";
+import { useApplicationLanes } from "@/features/applications/lane-queries";
+import { getLaneLabel, laneInput, resolveLane } from "@/features/applications/lanes";
+import { PriorNoResponse } from "@/features/applications/prior-no-response";
+import { applicationDetailQueryKey, useApplication, useApplicationMutations } from "@/features/applications/queries";
+import { useAcceptedPrompt } from "@/features/applications/stage-actions";
 import { CLOSED_REASONS, getClosedReasonLabel } from "@/features/applications/stages";
-import { DEFAULT_LEAD, followUpStart, REMINDER_LEADS, useReminders } from "@/features/reminders";
+import { client, prepareRpc, useUndoRows } from "@/features/career/hooks";
+import { DEFAULT_LEAD, REMINDER_LEADS, useReminders, zonedParts } from "@/features/reminders";
 import {
 	Banner,
 	Button,
@@ -35,82 +45,114 @@ import {
 } from "@/ui";
 
 type SheetBaseProps = { open: boolean; onClose: () => void };
-type ApplicationSheetProps = SheetBaseProps & { application: Application };
+type ApplicationActionSheetProps = SheetBaseProps & {
+	application: ApplicationSummary;
+	lane?: ApplicationLane | undefined;
+};
+type ApplicationContentSheetProps = SheetBaseProps & { application: Application };
 
 const today = () => new Date().toLocaleDateString("en-CA");
 
-/** "Close this application": one reason, kept for Insights. */
-export function CloseSheet({ application, open, onClose }: ApplicationSheetProps) {
+/** Closing preserves the explicit lane/outcome choice; drafts reset each time the sheet opens. */
+export function CloseSheet({ application, lane, open, onClose }: ApplicationActionSheetProps) {
+	const { t } = useLingui();
+	return (
+		<Sheet open={open} onClose={onClose} title={t`Mark as closed`}>
+			{open ? <CloseForm application={application} lane={lane} onClose={onClose} /> : null}
+		</Sheet>
+	);
+}
+
+function CloseForm({ application, lane: initialLane, onClose }: Omit<ApplicationActionSheetProps, "open">) {
 	const { t } = useLingui();
 	const { space } = useTheme();
 	const { update } = useApplicationMutations();
-	const [reason, setReason] = useState<ApplicationClosedReason>("not-selected");
-
+	const lanes = useApplicationLanes();
+	const acceptedPrompt = useAcceptedPrompt();
+	// Closing from Offer is usually accepting it, so that's the default there.
+	const [reason, setReason] = useState<ApplicationClosedReason>(
+		application.status === "offer" ? "accepted" : "not-selected",
+	);
+	const [laneId, setLaneId] = useState(initialLane?.id ?? "");
+	const selectedLane = lanes.active.find((item) => item.id === laneId && item.category === "closed");
+	const lane = selectedLane ?? resolveLane(lanes.lanes, { status: "closed" });
+	const laneAvailable = !laneId || !!selectedLane;
 	return (
-		<Sheet
-			open={open}
-			onClose={onClose}
-			title={t`Close this application`}
-			footer={
-				<View style={{ gap: space.s2 }}>
-					<Button
-						fullWidth
-						size="lg"
-						label={t`Close application`}
-						onPress={() => {
-							onClose();
-							update.mutate(
-								{ id: application.id, status: "closed", closedReason: reason },
-								{
-									onSuccess: () => showToast({ message: t`Application closed` }),
-									onError: (error) => showToast({ message: applicationError(error) }),
-								},
-							);
-						}}
+		<View style={{ gap: space.s3, paddingHorizontal: space.s4 }}>
+			<LaneNotice unavailable={!laneAvailable} />
+			<SelectSheet
+				label={t`Lane`}
+				value={laneId || lane.id}
+				options={lanes.active
+					.filter((item) => item.category === "closed")
+					.map((item) => ({ value: item.id, label: getLaneLabel(item) }))}
+				onChange={setLaneId}
+				disabled={!lanes.ready || update.isPending}
+			/>
+			{!lane.closedReason &&
+				CLOSED_REASONS.map((value) => (
+					<ListRow
+						key={value}
+						title={getClosedReasonLabel(value)}
+						leading={value === reason ? "check-circle" : "circle"}
+						selected={value === reason}
+						onPress={() => setReason(value)}
 					/>
-					<Button fullWidth variant="secondary" label={t`Cancel`} onPress={onClose} />
-				</View>
-			}
-		>
-			{CLOSED_REASONS.map((value) => (
-				<ListRow
-					key={value}
-					title={getClosedReasonLabel(value)}
-					leading={value === reason ? "check-circle" : "circle"}
-					selected={value === reason}
-					onPress={() => setReason(value)}
-				/>
-			))}
-			<Text variant="callout" color="ink3" style={{ paddingHorizontal: space.s4 }}>
-				{t`The reason is kept for Insights. Linked documents aren't touched.`}
-			</Text>
-		</Sheet>
+				))}
+			<Text variant="callout" color="ink3">{t`The reason is kept for Insights. Linked documents aren't touched.`}</Text>
+			<Button
+				fullWidth
+				size="lg"
+				label={t`Mark as closed`}
+				loading={update.isPending}
+				disabled={!lanes.ready || !laneAvailable}
+				onPress={() =>
+					update.mutate(
+						{ id: application.id, ...laneInput(lane, lanes.supported), closedReason: lane.closedReason ?? reason },
+						{
+							onSuccess: () => {
+								onClose();
+								if ((lane.closedReason ?? reason) === "accepted") acceptedPrompt(application);
+								else showToast({ message: t`Application closed` });
+							},
+							onError: (error) => showToast({ message: applicationError(error) }),
+						},
+					)
+				}
+			/>
+			<Button fullWidth variant="secondary" label={t`Cancel`} onPress={onClose} />
+		</View>
 	);
 }
 
 /** Saved → Applied: the date and the documents actually sent; their current versions are kept. */
-export function MarkAppliedSheet({ application, open, onClose }: ApplicationSheetProps) {
+export function MarkAppliedSheet({ application, lane, open, onClose }: ApplicationActionSheetProps) {
 	const { t } = useLingui();
 	return (
 		<Sheet open={open} onClose={onClose} title={t`Mark as applied`}>
-			{open ? <MarkAppliedForm application={application} onClose={onClose} /> : null}
+			{open ? <MarkAppliedForm application={application} lane={lane} onClose={onClose} /> : null}
 		</Sheet>
 	);
 }
 
-function MarkAppliedForm({ application, onClose }: Omit<ApplicationSheetProps, "open">) {
+function MarkAppliedForm({ application, lane: initialLane, onClose }: Omit<ApplicationActionSheetProps, "open">) {
 	const { t } = useLingui();
 	const { space } = useTheme();
 	const { update } = useApplicationMutations();
+	const detail = useApplication(application.id);
 	const documents = useDocuments();
 	const [date, setDate] = useState(today);
+	const lanes = useApplicationLanes();
+	const [laneId, setLaneId] = useState(initialLane?.id ?? "");
+	const selectedLane = lanes.active.find((item) => item.id === laneId && item.category === "applied");
+	const lane = selectedLane ?? resolveLane(lanes.lanes, { status: "applied" });
+	const laneAvailable = !laneId || !!selectedLane;
 	const [resumeId, setResumeId] = useState(application.resumeId ?? "");
 	const [letterId, setLetterId] = useState(application.coverLetterId ?? "");
 	const [resumeFileSent, setResumeFileSent] = useState(true);
 	const [letterFileSent, setLetterFileSent] = useState(true);
-	const none = { value: "", label: t`None` };
 	const options = (type: "resume" | "letter") => [
-		none,
+		{ value: "", label: type === "resume" ? t`No resume selected` : t`No cover letter selected` },
 		...(documents.data ?? [])
 			.filter((document) => document.type === type)
 			.map((document) => ({ value: document.id, label: document.name })),
@@ -121,6 +163,17 @@ function MarkAppliedForm({ application, onClose }: Omit<ApplicationSheetProps, "
 			<Text color="ink2">
 				{t`Confirm submission and choose the documents you actually sent. Their current versions will be saved.`}
 			</Text>
+			<LaneNotice unavailable={!laneAvailable} />
+			<PriorNoResponse company={application.company} excludeId={application.id} onOpen={onClose} />
+			<SelectSheet
+				label={t`Lane`}
+				value={laneId || lane.id}
+				options={lanes.active
+					.filter((item) => item.category === "applied")
+					.map((item) => ({ value: item.id, label: getLaneLabel(item) }))}
+				onChange={setLaneId}
+				disabled={!lanes.ready || update.isPending}
+			/>
 			<WallClockField label={t`Application date`} mode="date" value={date} onChange={setDate} />
 			<SelectSheet
 				label={t`Resume submitted (optional)`}
@@ -134,17 +187,17 @@ function MarkAppliedForm({ application, onClose }: Omit<ApplicationSheetProps, "
 				options={options("letter")}
 				onChange={setLetterId}
 			/>
-			{application.resumeFileUrl ? (
+			{detail.data?.resumeFileUrl ? (
 				<ListRow
-					title={t`Submitted attached resume: ${application.resumeFileName ?? "PDF"}`}
+					title={t`Submitted attached resume: ${detail.data.resumeFileName ?? "PDF"}`}
 					trailing={
 						<Switch label={t`Submitted attached resume`} value={resumeFileSent} onValueChange={setResumeFileSent} />
 					}
 				/>
 			) : null}
-			{application.coverLetterUrl ? (
+			{detail.data?.coverLetterUrl ? (
 				<ListRow
-					title={t`Submitted attached cover letter: ${application.coverLetterName ?? "PDF"}`}
+					title={t`Submitted attached cover letter: ${detail.data.coverLetterName ?? "PDF"}`}
 					trailing={
 						<Switch
 							label={t`Submitted attached cover letter`}
@@ -154,18 +207,25 @@ function MarkAppliedForm({ application, onClose }: Omit<ApplicationSheetProps, "
 					}
 				/>
 			) : null}
+			{detail.isError ? (
+				<Banner
+					tone="danger"
+					message={t`Couldn't load this. Check your connection and try again.`}
+					action={{ label: t`Retry loading applications`, onPress: () => void detail.refetch() }}
+				/>
+			) : null}
 			{update.error ? <Banner tone="danger" message={t`Couldn't record submission. Try again.`} /> : null}
 			<Button
 				fullWidth
 				size="lg"
 				label={t`Confirm applied`}
 				loading={update.isPending}
-				disabled={!date}
+				disabled={!date || !detail.data || !lanes.ready || !laneAvailable}
 				onPress={() =>
 					update.mutate(
 						{
 							id: application.id,
-							status: "applied",
+							...laneInput(lane, lanes.supported),
 							stageEnteredAt: date,
 							resumeId: resumeId || null,
 							coverLetterId: letterId || null,
@@ -182,7 +242,7 @@ function MarkAppliedForm({ application, onClose }: Omit<ApplicationSheetProps, "
 }
 
 /** The follow-up: a day and what to do, shown as the next step until done, with an optional local reminder. */
-export function FollowUpSheet({ application, open, onClose }: ApplicationSheetProps) {
+export function FollowUpSheet({ application, open, onClose }: ApplicationActionSheetProps) {
 	const { t } = useLingui();
 	return (
 		<Sheet open={open} onClose={onClose} title={t`Follow-up`}>
@@ -191,7 +251,7 @@ export function FollowUpSheet({ application, open, onClose }: ApplicationSheetPr
 	);
 }
 
-function FollowUpForm({ application, onClose }: Omit<ApplicationSheetProps, "open">) {
+function FollowUpForm({ application, onClose }: Omit<ApplicationActionSheetProps, "open">) {
 	const { t } = useLingui();
 	const { space } = useTheme();
 	const { timeZone } = useUserTime();
@@ -199,20 +259,25 @@ function FollowUpForm({ application, onClose }: Omit<ApplicationSheetProps, "ope
 	const reminders = useReminders(application.id);
 	const existing = reminders.leadFor({ kind: "follow-up", applicationId: application.id });
 	const [date, setDate] = useState(() =>
-		// Web stores the bare date at UTC midnight; read it as that date, not the evening before west of UTC.
-		application.followUpAt ? followUpDay(application.followUpAt, timeZone) : "",
+		// Legacy date-only records retain their selected calendar day.
+		application.followUpAt ? followUpDay(application.followUpAt, timeZone, application.followUpDateOnly) : "",
+	);
+	const [time, setTime] = useState(() =>
+		application.followUpAt
+			? zonedParts(followUpInstant(application, timeZone) ?? application.followUpAt, timeZone).time
+			: "09:00",
 	);
 	const [note, setNote] = useState(application.followUpNote ?? "");
 	const [remind, setRemind] = useState<boolean | null>(null);
 	const reminderOn = remind ?? existing !== null;
 
-	const save = (followUpAt: Date | null) =>
+	const save = (followUpAt: Date | null, followUpDateOnly = false) =>
 		update.mutate(
-			{ id: application.id, followUpAt, followUpNote: followUpAt ? note.trim() || null : null },
+			{ id: application.id, followUpAt, followUpDateOnly, followUpNote: followUpAt ? note.trim() || null : null },
 			{
 				onSuccess: async (saved) => {
 					onClose();
-					const target = followUpReminder(saved);
+					const target = followUpReminder(saved, timeZone);
 					if (target && reminderOn) {
 						const result = await reminders.turnOn(target, 0);
 						if (result === "denied")
@@ -232,10 +297,11 @@ function FollowUpForm({ application, onClose }: Omit<ApplicationSheetProps, "ope
 		<View style={{ gap: space.s3, paddingHorizontal: space.s4 }}>
 			<Text color="ink2">{t`A reminder to check in, shown as the next step until you do.`}</Text>
 			<WallClockField label={t`Date`} mode="date" value={date} onChange={setDate} />
+			<WallClockField label={t`Time`} mode="time" value={time} onChange={setTime} />
 			<TextField label={t`What to do`} value={note} placeholder={t`Email the recruiter`} onChangeText={setNote} />
 			<ListRow
 				title={t`Remind me on this device`}
-				subtitle={t`At 09:00 that day (${timeZone}).`}
+				subtitle={`${time} · ${timeZone}`}
 				trailing={<Switch label={t`Remind me on this device`} value={reminderOn} onValueChange={setRemind} />}
 			/>
 			<Button
@@ -245,8 +311,15 @@ function FollowUpForm({ application, onClose }: Omit<ApplicationSheetProps, "ope
 				loading={update.isPending}
 				disabled={!date}
 				onPress={() => {
-					const at = followUpStart(date, timeZone);
-					if (at) save(at);
+					const original = followUpInstant(application, timeZone);
+					const clock = original ? zonedParts(original, timeZone) : null;
+					const unchanged = !!original && date === clock?.date && time === clock?.time;
+					const at =
+						unchanged && application.followUpAt
+							? new Date(application.followUpAt)
+							: fromZonedDateTime(date, time, timeZone);
+					if (at) save(at, unchanged && isDateOnlyFollowUp(application));
+					else showToast({ message: t`This date or time does not exist in your timezone. Choose another time.` });
 				}}
 			/>
 			{application.followUpAt ? (
@@ -333,7 +406,7 @@ export function ReminderSheet({ target, subtitle, open, onClose, onShareIcs }: R
 }
 
 /** The saved posting: its link, provenance, what it asks for, and its editable text. */
-export function PostingSheet({ application, open, onClose }: ApplicationSheetProps) {
+export function PostingSheet({ application, open, onClose }: ApplicationContentSheetProps) {
 	return (
 		<Sheet open={open} onClose={onClose} detents={[0.9]} title={`${application.role} · ${application.company}`}>
 			{open ? <PostingBody application={application} onClose={onClose} /> : null}
@@ -341,12 +414,16 @@ export function PostingSheet({ application, open, onClose }: ApplicationSheetPro
 	);
 }
 
-function PostingBody({ application, onClose }: Omit<ApplicationSheetProps, "open">) {
-	const { t } = useLingui();
+function PostingBody({ application, onClose }: Omit<ApplicationContentSheetProps, "open">) {
+	const now = useNow();
+	const { t, i18n } = useLingui();
 	const { space } = useTheme();
 	const { update } = useApplicationMutations();
 	const [text, setText] = useState(application.jobDescription ?? "");
 	const source = application.postingSource;
+	const receipt = postingReadReceipt(source, i18n.locale, now.getTime());
+	const readAt = receipt?.readAt;
+	const sourceHost = receipt?.sourceHost ?? t`the posting page`;
 	const sourceUrl = application.sourceUrl;
 
 	return (
@@ -356,7 +433,9 @@ function PostingBody({ application, onClose }: Omit<ApplicationSheetProps, "open
 				<Text variant="callout" color="ink3">
 					{source.method === "paste"
 						? t`Pasted description`
-						: t`Retrieved ${source.retrievedAt} using ${source.method}. Retrieval time does not establish origin freshness.`}
+						: readAt
+							? t`Read ${readAt} from ${sourceHost}. The employer may have changed it since.`
+							: t`The employer may have changed it since.`}
 				</Text>
 			) : null}
 			{source?.truncated || source?.completeness === "incomplete" ? (
@@ -399,16 +478,30 @@ function PostingBody({ application, onClose }: Omit<ApplicationSheetProps, "open
 const EMPTY_CONTACT = { name: "", role: "", type: "", email: "", phone: "" };
 
 /** Contacts: the list with remove, and a form to add one, checked with the API's schema before saving. */
-export function ContactsSheet({ application, open, onClose }: ApplicationSheetProps) {
+const contactKey = (contact: Contact) =>
+	JSON.stringify([contact.name, contact.role ?? "", contact.type ?? "", contact.email ?? "", contact.phone ?? ""]);
+const sameContact = (a: Contact | undefined, b: Contact | undefined) => !!a && !!b && contactKey(a) === contactKey(b);
+
+export function ContactsSheet({ application, open, onClose }: ApplicationContentSheetProps) {
 	const { t } = useLingui();
 	const { space } = useTheme();
 	const { update } = useApplicationMutations();
 	const [draft, setDraft] = useState(EMPTY_CONTACT);
 	const [error, setError] = useState("");
+	// The contact being corrected: its position, and what it said when the form opened (web contacts.tsx).
+	const [editing, setEditing] = useState<{ index: number; original: Contact } | null>(null);
+	const undo = useUndoRows();
+	const contactId = (contact: Contact, index: number) => JSON.stringify([index, contactKey(contact)]);
+	const contacts = application.contacts.filter((contact, index) => !undo.hidden.includes(contactId(contact, index)));
 	const save = (contacts: Contact[], onSuccess = () => {}) =>
 		update.mutate(
 			{ id: application.id, contacts },
-			{ onSuccess, onError: () => showToast({ message: t`Couldn't save the contacts. Try again.` }) },
+			{
+				onSuccess: () => {
+					onSuccess();
+				},
+				onError: () => showToast({ message: t`Couldn't save the contacts. Try again.` }),
+			},
 		);
 	const set = (key: keyof typeof EMPTY_CONTACT) => (value: string) => {
 		setError("");
@@ -417,34 +510,90 @@ export function ContactsSheet({ application, open, onClose }: ApplicationSheetPr
 	const add = () => {
 		const parsed = contactSchema.safeParse(draft);
 		if (!parsed.success) return setError(t`Enter a valid email address.`);
-		save([...application.contacts, parsed.data], () => setDraft(EMPTY_CONTACT));
+		// Saved by position: if the list changed since the form opened, that position may be someone else now.
+		if (editing && !sameContact(application.contacts[editing.index], editing.original))
+			return setError(t`This contact changed somewhere else. Cancel and edit it again.`);
+		const next =
+			editing === null
+				? [...application.contacts, parsed.data]
+				: application.contacts.map((contact, index) => (index === editing.index ? parsed.data : contact));
+		save(next, () => {
+			setDraft(EMPTY_CONTACT);
+			setEditing(null);
+		});
+	};
+	const edit = (index: number) => {
+		const contact = application.contacts[index];
+		if (!contact) return;
+		setError("");
+		setEditing({ index, original: contact });
+		setDraft({
+			name: contact.name,
+			role: contact.role,
+			type: contact.type,
+			email: contact.email,
+			phone: contact.phone,
+		});
+	};
+	const remove = (index: number) => {
+		const contact = application.contacts[index];
+		if (!contact) return;
+		if (editing) {
+			setEditing(null);
+			setDraft(EMPTY_CONTACT);
+			setError("");
+		}
+		undo.remove(
+			contactId(contact, index),
+			t`Removed ${contact.name}`,
+			() => {
+				if (!application.contactsVersion) throw new Error(t`Couldn't save the contacts. Try again.`);
+				return prepareRpc(client.applications.deleteContact, {
+					id: application.id,
+					index,
+					expectedVersion: application.contactsVersion,
+				});
+			},
+			applicationDetailQueryKey(application.id),
+		);
 	};
 
 	return (
 		<Sheet open={open} onClose={onClose} detents={[0.9]} title={t`Contacts`}>
-			{application.contacts.length === 0 ? (
+			{contacts.length === 0 ? (
 				<Text color="ink3" style={{ paddingHorizontal: space.s4 }}>
 					{t`No contacts yet.`}
 				</Text>
 			) : null}
-			{application.contacts.map((contact, index) => (
-				<ListRow
-					key={`${contact.name}-${index}`}
-					title={contact.type ? `${contact.name} · ${contact.type}` : contact.name}
-					subtitle={[contact.role, contact.email, contact.phone].filter(Boolean).join(" · ") || undefined}
-					{...(contact.email ? { onPress: () => void Linking.openURL(`mailto:${contact.email}`) } : {})}
-					trailing={
-						<IconButton
-							icon="x"
-							label={t`Remove ${contact.name}`}
-							disabled={update.isPending}
-							onPress={() => save(application.contacts.filter((_, i) => i !== index))}
+			{application.contacts.map(
+				(contact, index) =>
+					!undo.hidden.includes(contactId(contact, index)) && (
+						<ListRow
+							key={`${contact.name}-${index}`}
+							title={contact.type ? `${contact.name} · ${contact.type}` : contact.name}
+							subtitle={[contact.role, contact.email, contact.phone].filter(Boolean).join(" · ") || undefined}
+							{...(contact.email ? { onPress: () => void Linking.openURL(`mailto:${contact.email}`) } : {})}
+							trailing={
+								<View style={{ flexDirection: "row" }}>
+									<IconButton
+										icon="pencil-simple"
+										label={t`Edit ${contact.name}`}
+										disabled={update.isPending || undo.hidden.length > 0}
+										onPress={() => edit(index)}
+									/>
+									<IconButton
+										icon="x"
+										label={t`Remove ${contact.name}`}
+										disabled={update.isPending || undo.hidden.length > 0}
+										onPress={() => remove(index)}
+									/>
+								</View>
+							}
 						/>
-					}
-				/>
-			))}
+					),
+			)}
 			<View style={{ gap: space.s3, paddingHorizontal: space.s4, paddingTop: space.s3 }}>
-				<Text variant="label">{t`Add contact`}</Text>
+				<Text variant="label">{editing === null ? t`Add contact` : t`Edit contact`}</Text>
 				<TextField label={t`Name`} value={draft.name} onChangeText={set("name")} />
 				<TextField label={t`Role (optional)`} value={draft.role} onChangeText={set("role")} />
 				<TextField label={t`Label`} value={draft.type} placeholder={t`Recruiter`} onChangeText={set("type")} />
@@ -471,11 +620,22 @@ export function ContactsSheet({ application, open, onClose }: ApplicationSheetPr
 				<Button
 					fullWidth
 					size="lg"
-					label={t`Add contact`}
+					label={editing === null ? t`Add contact` : t`Save contact`}
 					loading={update.isPending}
-					disabled={!draft.name.trim()}
+					disabled={!draft.name.trim() || undo.hidden.length > 0}
 					onPress={add}
 				/>
+				{editing !== null ? (
+					<Button
+						fullWidth
+						variant="ghost"
+						label={t`Cancel`}
+						onPress={() => {
+							setEditing(null);
+							setDraft(EMPTY_CONTACT);
+						}}
+					/>
+				) : null}
 			</View>
 		</Sheet>
 	);
@@ -492,7 +652,9 @@ type TimelineEntrySheetProps = SheetBaseProps & {
 export function TimelineEntrySheet({ entry, open, saving, onClose, onSave, onDelete }: TimelineEntrySheetProps) {
 	const { t } = useLingui();
 	const { space } = useTheme();
-	const [date, setDate] = useState(() => (entry ? new Date(entry.at).toISOString().slice(0, 10) : ""));
+	const [date, setDate] = useState(() =>
+		entry && !(entry.type === "stage" && entry.dateUnknown) ? new Date(entry.at).toISOString().slice(0, 10) : "",
+	);
 	const [text, setText] = useState(entry?.type === "note" ? entry.text : "");
 
 	return (

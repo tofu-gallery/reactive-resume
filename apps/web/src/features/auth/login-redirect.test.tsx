@@ -17,14 +17,16 @@ const mocks = vi.hoisted(() => ({
 	verifyTotp: vi.fn(),
 	verifyBackupCode: vi.fn(),
 	signup: vi.fn(),
+	requestPasswordReset: vi.fn(),
 	continueOAuth: vi.fn(),
 	queryClient: { invalidateQueries: vi.fn(async () => {}) },
 }));
 
 vi.mock("@tanstack/react-query", () => ({
-	useQuery: () => ({
-		data: { google: "Google", github: "GitHub", linkedin: "LinkedIn", custom: "SSO", passkey: true },
-	}),
+	useQuery: (options: { queryKey?: unknown[] }) =>
+		options.queryKey?.[0] === "oauth-client-name"
+			? { data: "Docs example client" }
+			: { data: { google: "Google", github: "GitHub", linkedin: "LinkedIn", custom: "SSO", passkey: true } },
 	useQueryClient: () => mocks.queryClient,
 	useMutation: () => ({ mutate: vi.fn(), isPending: false }),
 }));
@@ -32,6 +34,7 @@ vi.mock("@tanstack/react-router", () => ({
 	useSearch: () => ({ callbackURL: mocks.callbackURL }),
 	useRouter: () => ({ navigate: mocks.navigate, invalidate: mocks.invalidate }),
 	useNavigate: () => mocks.navigate,
+	useRouteContext: () => ({ flags: { smtpEnabled: true } }),
 	Link: ({ to, search: _search, ...props }: ComponentProps<"a"> & { to: string; search?: unknown }) => (
 		// oxlint-disable-next-line jsx-a11y/anchor-has-content -- The Link mock forwards children through props.
 		<a href={to} {...props} />
@@ -40,6 +43,7 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("@/libs/orpc/client", () => ({ orpc: { auth: { providers: { list: { queryOptions: () => ({}) } } } } }));
 vi.mock("@/libs/auth/client", () => ({
 	authClient: {
+		requestPasswordReset: mocks.requestPasswordReset,
 		signUp: { email: mocks.signup },
 		oauth2: { continue: mocks.continueOAuth },
 		twoFactor: { verifyTotp: mocks.verifyTotp, verifyBackupCode: mocks.verifyBackupCode },
@@ -48,6 +52,7 @@ vi.mock("@/libs/auth/client", () => ({
 }));
 vi.mock("@reactive-resume/ui/components/toast", () => ({ toast: { add: vi.fn(), close: vi.fn() } }));
 
+import { ForgotPasswordPage } from "./pages/forgot-password";
 import { LoginPage } from "./pages/login";
 import { RegisterPage } from "./pages/register";
 import { VerifyTwoFactorBackupPage, VerifyTwoFactorPage } from "./pages/verify-2fa";
@@ -65,6 +70,7 @@ beforeEach(() => {
 		mocks.verifyTotp,
 		mocks.verifyBackupCode,
 		mocks.signup,
+		mocks.requestPasswordReset,
 		mocks.continueOAuth,
 	])
 		signIn.mockResolvedValue({ data: {}, error: null });
@@ -138,6 +144,11 @@ describe("OAuth callback after sign-in", () => {
 		);
 	});
 
+	it("names the application waiting for the sign-in", () => {
+		renderLogin();
+		expect(screen.getByText("Sign in to connect Docs example client.")).toBeTruthy();
+	});
+
 	it("resumes the callback after passkey sign-in", async () => {
 		renderLogin();
 		fireEvent.click(screen.getByRole("button", { name: "Passkey" }));
@@ -193,6 +204,25 @@ describe("OAuth callback after two-factor verification", () => {
 				expect.objectContaining({ code: "82cNK-qaOiN", trustDevice: false }),
 			),
 		);
+	});
+
+	// Older backup codes mix cases; a lower-case entry that didn't match gets one retry in capitals, not a lockout.
+	it("retries a lower-case backup code once in capitals", async () => {
+		mocks.verifyBackupCode.mockResolvedValueOnce({ data: null, error: { code: "INVALID_BACKUP_CODE" } });
+		const { container } = render(
+			<I18nProvider i18n={i18n}>
+				<VerifyTwoFactorBackupPage />
+			</I18nProvider>,
+		);
+		const input = container.querySelector<HTMLInputElement>('input[name="code"]');
+		const form = container.querySelector("form");
+		if (!input || !form) throw new Error("Verification form is missing");
+		fireEvent.change(input, { target: { value: "abcde12345" } });
+		fireEvent.submit(form);
+		await waitFor(() =>
+			expect(mocks.navigate).toHaveBeenCalledWith({ href: mocks.callbackURL, reloadDocument: true, replace: true }),
+		);
+		expect(mocks.verifyBackupCode.mock.calls.map(([options]) => options.code)).toEqual(["abcde-12345", "ABCDE-12345"]);
 	});
 
 	it.each([false, true])("trusts the device only when selected (backup: %s)", async (backup) => {
@@ -283,4 +313,45 @@ describe("OAuth account creation", () => {
 		expect(mocks.signup.mock.calls[0]?.[0]).not.toHaveProperty("oauth_query");
 		expect(mocks.signup).toHaveBeenCalledWith(expect.objectContaining({ name: "A" }));
 	});
+	it("signs up without a username and goes straight to the page that sent them", async () => {
+		mocks.signup.mockResolvedValueOnce({ data: { token: "session" }, error: null });
+		const { container } = render(
+			<I18nProvider i18n={i18n}>
+				<RegisterPage disableEmailAuth={false} />
+			</I18nProvider>,
+		);
+		for (const [name, value] of Object.entries({
+			name: "New User",
+			email: "new@example.com",
+			password: "password123",
+		})) {
+			const input = container.querySelector(`input[name="${name}"]`);
+			if (!input) throw new Error(`Missing ${name} field`);
+			fireEvent.change(input, { target: { value } });
+		}
+		const form = container.querySelector("form");
+		if (!form) throw new Error("Missing registration form");
+		fireEvent.submit(form);
+		await waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith(expect.objectContaining({ replace: true })));
+		// Empty asks the server to make the username from the email address.
+		expect(mocks.signup).toHaveBeenCalledWith(expect.objectContaining({ username: "", email: "new@example.com" }));
+		expect(screen.queryByText("Your account is ready")).toBeNull();
+	});
+});
+
+it("focuses the replacement password-reset heading once and preserves subsequent action focus", async () => {
+	render(
+		<I18nProvider i18n={i18n}>
+			<ForgotPasswordPage />
+		</I18nProvider>,
+	);
+	fireEvent.change(screen.getByRole("textbox", { name: "Email address" }), { target: { value: "maya@example.com" } });
+	fireEvent.click(screen.getByRole("button", { name: "Send reset link" }));
+	const heading = await screen.findByRole("heading", { name: "Check your email" });
+	expect(document.activeElement).toBe(heading);
+	const resend = screen.getByRole("button", { name: "Send again" });
+	resend.focus();
+	fireEvent.click(resend);
+	await waitFor(() => expect(mocks.requestPasswordReset).toHaveBeenCalledTimes(2));
+	expect(document.activeElement).toBe(resend);
 });

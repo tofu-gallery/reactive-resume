@@ -1,4 +1,5 @@
 import type { IconName } from "@reactive-resume/ui/components/icon";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useQuery } from "@tanstack/react-query";
@@ -6,10 +7,13 @@ import { createFileRoute, Link, Outlet, useMatchRoute } from "@tanstack/react-ro
 import { m } from "motion/react";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { cn } from "@reactive-resume/utils/style";
+import { useRemoving } from "@/features/career/removing";
 import { D2, EASE } from "@/libs/motion";
 import { orpc } from "@/libs/orpc/client";
+import { getPageTitle } from "@/libs/seo";
 
 export const Route = createFileRoute("/dashboard/career/knowledge")({
+	head: () => ({ meta: [{ title: getPageTitle(t`Knowledge`) }] }),
 	component: KnowledgeLayout,
 });
 
@@ -29,6 +33,7 @@ function KnowledgeLayout() {
 	const matchRoute = useMatchRoute();
 	const facts = useQuery(orpc.career.facts.queryOptions({ input: { applicationId: null, all: true } }));
 	const stories = useQuery(orpc.career.stories.queryOptions({ input: { applicationId: null } }));
+	const removing = useRemoving((state) => state.ids);
 	const sections: Section[] = [
 		{
 			to: "/dashboard/career/knowledge/facts",
@@ -42,7 +47,8 @@ function KnowledgeLayout() {
 			match: "/dashboard/career/knowledge/stories",
 			icon: "book-open",
 			label: t`Stories`,
-			count: stories.data?.length,
+			// Stories being deleted (Undo still offered) are already gone from the list: leave them out here too.
+			count: stories.data?.filter((story) => !removing.has(story.id)).length,
 		},
 		{
 			to: "/dashboard/career/knowledge/preferences",
@@ -84,7 +90,9 @@ function KnowledgeLayout() {
 								<Icon name={section.icon} size={18} className="relative hidden md:block" />
 								<span className="relative md:flex-1">{section.label}</span>
 								{section.count !== undefined && (
-									<span className="relative hidden font-mono text-xs text-ink-3 md:inline">{section.count}</span>
+									<span className="relative hidden font-mono text-xs text-ink-3 md:inline">
+										{i18n.number(section.count)}
+									</span>
 								)}
 							</Link>
 						);

@@ -1,0 +1,69 @@
+import type { CareerWorkspace } from "../career";
+import type { ApplicationStatus, ApplicationTimelineEntry } from "./data";
+import { hasApplicationSubmission } from "./data";
+
+type PreparationApplication = {
+	status: ApplicationStatus;
+	activity: readonly ApplicationTimelineEntry[];
+	jobDescription: string | null;
+	resumeId: string | null;
+	coverLetterId: string | null;
+	resumeFileUrl: string | null;
+	coverLetterUrl: string | null;
+};
+
+/** Persisted indices never move when a document or answer subject is absent. */
+export function applicationReviewChecks(application: PreparationApplication, workspace: CareerWorkspace) {
+	const review = workspace.submissionReview;
+	const submitted = review !== undefined || hasApplicationSubmission(application);
+	const documents = submitted
+		? review?.documents === true
+		: Boolean(
+				application.resumeId || application.coverLetterId || application.resumeFileUrl || application.coverLetterUrl,
+			);
+	const answers = submitted ? review?.answers === true : workspace.answers.length > 0;
+	return {
+		submitted,
+		recorded: review != null,
+		checklist: submitted ? (review?.checklist ?? []) : workspace.checklist,
+		indices: ([0, 1, 2, 3] as const).filter((index) =>
+			index === 0 ? documents : index === 1 ? documents || answers : index === 2 ? answers : !submitted,
+		),
+	};
+}
+
+/** Guidance only: the existing review checks are user acknowledgements, never proof of submission or quality. */
+export function nextPreparationStep(
+	application: PreparationApplication,
+	workspace: Pick<CareerWorkspace, "checklist" | "answers" | "submissionReview">,
+	documents?: readonly { id: string; type: "resume" | "letter" }[],
+) {
+	if (workspace.submissionReview !== undefined || hasApplicationSubmission(application)) return "submitted";
+	if (application.status === "closed") return "closed";
+	if (!application.jobDescription?.trim()) return "posting";
+	const selected = (type: "resume" | "letter", id: string | null) =>
+		id && (!documents || documents.some((document) => document.type === type && document.id === id));
+	if (!selected("resume", application.resumeId) && !application.resumeFileUrl) return "resume";
+	if (!workspace.checklist.includes(1)) return "tailor";
+	// Document review also acknowledges that an optional letter is unnecessary.
+	if (!selected("letter", application.coverLetterId) && !application.coverLetterUrl && !workspace.checklist.includes(0))
+		return "letter";
+	if (
+		workspace.answers.some((answer) => !answer.question.trim() || !answer.answer.trim()) ||
+		(workspace.answers.length > 0 && !workspace.checklist.includes(2))
+	)
+		return "answers";
+	return "review";
+}
+
+/**
+ * Tailoring edits the copy made for this job, never a base resume other jobs share. True only once the documents are
+ * loaded and the selected resume was made for this application; until then the step offers the copy instead.
+ */
+export function isJobCopy(
+	application: { id: string; resumeId: string | null },
+	documents?: readonly { id: string; type: "resume" | "letter"; application: { id: string } | null }[],
+) {
+	const resume = documents?.find((document) => document.type === "resume" && document.id === application.resumeId);
+	return resume?.application?.id === application.id;
+}

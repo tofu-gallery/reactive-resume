@@ -143,6 +143,19 @@ Existing v5 migrations stay unchanged. The v6 changes are consolidated in `20261
 | Assistant       | Adds conversations about letters and counts of proposed and accepted edits.                                                                                                                                                                   |
 | Web access      | Creates `web_access_credentials` directly for encrypted per-user connections.                                                                                                                                                                 |
 
+### Sharing updates in v6.0.7
+
+Upgrading from an earlier v6 release adds the `custom_domain` table and the resume columns
+`show_in_search_engines`, `hide_contact_details` and `is_primary`. Startup applies this additional migration;
+take a fresh database backup before upgrading. Existing public links and download settings remain, while search
+indexing, contact hiding and primary status default to off.
+
+Public links now open responsive web pages, with PDF as a separate download. New addresses have a 64-character
+limit; unchanged legacy addresses keep working. `APP_ALIAS_URL` is optional, and users' custom domains require
+both domain variables plus a configured reverse proxy and certificates. See
+[Sharing domains](/self-hosting/sharing-domains) for the upgrade checks and setup. Deploy the backend before
+updating mobile clients that depend on these controls.
+
 ### Cover letters leaving resumes
 
 In v5, a resume could hold cover letters as a section. The v6 migration moves each of them, hidden ones included, into a saved letter:
@@ -156,7 +169,7 @@ From then on, any resume that reaches the server with a cover-letter section, th
 
 ### Structured dates
 
-Dates on entries (experience and its roles, education, projects, volunteering, awards, certifications, and publications) are now stored as structured `dates`: a start and end year or year-month, and whether it's ongoing. No migration changes stored data for this. Instead, every read fills in `dates` from the old text, and every save writes the text (`period` or `date`) from `dates`. Text that couldn't be read exactly, such as "Summer 2016", keeps printing as typed until someone edits the date. The date format is inferred from how the dates were typed. See [Entering dates](/guides/entering-dates).
+Dates on entries (experience and its roles, education, projects, volunteering, awards, certifications, and publications) are now stored as structured `dates`: a start and end year or year-month, and whether it's ongoing. No migration changes stored data for this. Instead, every read fills in `dates` from the old text, and every save writes the text (`period` or `date`) from `dates`. Text that couldn't be read exactly, such as "Summer 2016", is kept as custom date text and keeps printing as typed. The date format is inferred from how the dates were typed. See [Entering dates](/guides/entering-dates).
 
 ### Trash
 
@@ -170,7 +183,7 @@ These v5 addresses redirect to their v6 place, so bookmarks and old links keep w
 | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `/dashboard/resumes`                                                                                 | `/dashboard?type=resume` (tags, sort, and list view carry over)                                           |
 | `/dashboard/cover-letters`                                                                           | `/dashboard?type=letter`                                                                                  |
-| `/dashboard/settings/profile`, `/dashboard/settings/authentication`                                  | `/dashboard/settings/account`                                                                             |
+| `/dashboard/settings/authentication`                                                                 | `/dashboard/settings/account`                                                                             |
 | `/dashboard/settings/integrations`, `/dashboard/settings/api-keys`, `/dashboard/settings/job-search` | `/dashboard/settings/ai`                                                                                  |
 | `/agent`                                                                                             | `/dashboard`                                                                                              |
 | `/agent/new?resumeId=<id>`                                                                           | `/builder/<id>?assistant=new` (or `/dashboard` without a resume)                                          |
@@ -184,7 +197,7 @@ Base paths, authentication, and API keys are unchanged. These changes can affect
 
 **Resume data**
 
-- Dated items carry `dates` (`start`, `end`, `present`, and `raw` for text that couldn't be read). Write `dates`. The text in `period` or `date` is rewritten from `dates` on every save, so a change to the text alone is overwritten. Items sent without `dates` get them from their text.
+- Dated items carry `dates` (`start`, `end`, `present`, and `raw` for custom date text or text that couldn't be read). Write `dates`. The text in `period` or `date` is rewritten from `dates` on every save, so a change to the text alone is overwritten. Items sent without `dates` get them from their text.
 - `metadata.page.dateFormat` (`short`, `long`, `numeric`, or `iso`) sets how dates print.
 - Resumes no longer hold `cover-letter` custom sections. Any you send are saved as letters and removed from the resume.
 
@@ -254,7 +267,7 @@ If you must keep data written since the upgrade, you can undo the migrations tha
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261001042749_v6_release/rollback.sql
    ```
 
-   The script puts letters back into the resumes they came from (one section per resume per run; run it again for a resume that had several), restores `application.archived` and `resume_version.label`, and turns closed applications back into `rejected` or archived. These steps run in one transaction.
+   The script puts letters back into the resumes they came from (one section per resume per run; run it again for a resume that had several), restores `application.archived` and `resume_version.label`, and turns closed applications back into `rejected` or archived. It removes the custom-stage write trigger so v5 can use its older status values; stage definitions and references remain. These steps run in one transaction.
 
 3. Start v5.
 

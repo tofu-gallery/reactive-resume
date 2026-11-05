@@ -161,7 +161,11 @@ type ReplyChange = { type: "stage"; stage: string } | { type: "follow-up" } | { 
 
 /** A stage the application is already at, or can't reach from Saved, is shown fixed: nothing to apply. */
 export const isFixedChange = (change: ReplyChange | undefined, status: string) =>
-	change?.type === "stage" && (change.stage === status || status === "saved");
+	change?.type === "stage" && change.stage === status;
+
+/** A stage move from Saved records the submission receipt in the same confirmed action. */
+export const needsSubmission = (change: ReplyChange | undefined, status: string) =>
+	status === "saved" && change?.type === "stage";
 
 /** The changes ticked by default: every one that isn't fixed. */
 export const openChanges = (changes: ReplyChange[], status: string) =>
@@ -205,7 +209,8 @@ export const RECORDING_OPTIONS = {
 } as const;
 
 /** "0:47" */
-export const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+export const clock = (seconds: number, locale: string) =>
+	`${new Intl.NumberFormat(locale, { useGrouping: false }).format(Math.floor(seconds / 60))}:${new Intl.NumberFormat(locale, { minimumIntegerDigits: 2, useGrouping: false }).format(seconds % 60)}`;
 
 /** The file extension for audio `voice.speak` returns, so the player recognises it. */
 export const speechExtension = (mediaType: string) =>
@@ -338,3 +343,7 @@ export function writeNumbersAsDigits(text: string) {
 		return percent ? `${value}%` : String(value);
 	});
 }
+
+/** A streaming or ready, unkept letter draft must be kept or discarded before leaving the editor. */
+export const draftNeedsLeaveGuard = (phase: "idle" | "streaming" | "ready" | "failed" | "unsaved") =>
+	phase === "streaming" || phase === "ready";

@@ -7,6 +7,26 @@ You have a job already and little time to scroll job boards. Set up a search onc
 
 Discovery reads new search results to check that they are individual open job postings. It skips results it cannot confirm as postings, including recognized closed roles. A posting can close after that check, so read it before applying. The number of new roles varies; there is no promised daily quota.
 
+**Remind me** uses the same follow-up date and note as the application. A follow-up set in application details appears in Today, and a Today reminder updates the application's Next step. Edit either location to change it. Delete clears both; Undo cancels the pending deletion. Pausing only stops delivery. Add a **Follow-up note** to remember what to ask. An existing reminder stays attached to its application; create a separate follow-up for another application.
+
+For a new reminder, **Follow-up note** starts from the selected application's most recent activity note, combined into one line. Review it before saving. An application that already has a follow-up keeps its saved note, including a blank note. Typing or clearing the field keeps your choice when details finish loading or you change applications or schedule kind. The web and native editors use the same defaults.
+
+Saving waits while the automatic note is loading. If loading fails without any saved detail, choose **Try again** or type your own note; you can also deliberately clear the field. A failed refresh keeps a previously loaded note. Unavailable interview briefings or offer terms do not hide known interview and follow-up dates in **Coming up**. An offer-read failure keeps a retry action alongside those dates; retry reloads offer deadlines.
+
+<Frame caption="A new reminder starts with an editable activity note. This example uses a fictional application.">
+  <img
+    src="/images/guides/career/reminder-activity-note.png"
+    alt="New schedule sheet with Remind me selected, the Follow-up note Email Maya about the next round, Fictional Reminder Labs application, date and UTC time, and Save schedule"
+  />
+</Frame>
+
+<Frame caption="Known follow-up dates stay available while offer terms cannot load. Try again reloads the missing offer read. This example uses a fictional application.">
+  <img
+    src="/images/guides/career/coming-up-offer-read-error.png"
+    alt="Coming up shows a November 5 follow-up for Fictional Offline Briefing, Email Maya, Open workspace and a load-error panel with Try again"
+  />
+</Frame>
+
 ## Set what you are looking for
 
 In **Career → Knowledge → Preferences**, record target roles, places, minimum base salary, maximum office days and what matters to you. These help explain matches and unknown details.
@@ -15,16 +35,38 @@ In **Career → Knowledge → Preferences**, record target roles, places, minimu
 
 Enter salary as a full amount, such as **95000**, rather than **95k**. Invalid shorthand stays visible until corrected. Choose **Any** for maximum office days when you have no requirement; it clears a previous choice.
 
-<Frame caption="Germany comes from the Europe/Berlin account timezone until you add or remove a country. Salary is a full amount, and this example allows at most two office days.">
+<Frame caption="Choose roles, locations and working preferences">
   <img
     src="/images/guides/career/preferences.png"
-    alt="Career Preferences with Berlin and Remote within Europe as places, Germany marked From your timezone under Where you're looking for work beside an Add a country picker, a 95000 euro annual minimum salary, two office days a week and an eight-week notice period"
+    alt="Career Preferences for a fictional gameplay role, remote and Berlin locations, priorities and pay requirements"
   />
 </Frame>
 
-Set your timezone in **Settings → Preferences**. Schedule times use that timezone.
+### Optional role suggestions
+
+**Suggest target roles (optional AI)** in Preferences lets you choose a tested AI connection, a resume to share, and whether to **Share enabled shared Knowledge**. Both context controls start off. Generation sends only the selected resume and up to 20 active shared facts; it does not send private application facts, your application profile, saved answers or other documents. The connection's label, provider and model identify the recipient; its service may charge.
+
+Role-suggestion approval covers the displayed connection, model and address. A request keeps its approved recipient. If saved settings or the key changed before the request starts, it sends nothing and asks you to refresh AI connections, choose the recipient again and approve a new request.
+
+Suggestions show the exact Knowledge statements or resume excerpt they cite. They are AI ideas, not verified qualifications or hiring predictions. Edit **Review target roles, one per line**, then choose **Use reviewed roles in preferences**. This replaces your target roles; wait for **Saved** before opening a new discovery schedule. Merely generating suggestions changes no preferences, search, schedule or evidence. You can always enter roles manually without AI. Corrected or switched-off resume sources cannot be replayed through this action; use enabled Knowledge or another resume instead. The selected connection must still be available when the server authorizes the request: switching it off or deleting it during preparation stops that request. Selected resume and Knowledge versions are checked again in that same short authorization step before sending. Changes while preparing roles require a new request; changes during generation discard the response. Switching off context after transmission cannot recall data already sent to your provider.
+
+<Frame caption="The fictional local connection receives only explicitly shared context. Platform engineer is an edited draft; preferences still use the previous roles until Use is selected and saved.">
+  <img
+    src="/images/guides/career/target-role-suggestions.png"
+    alt="Optional AI role suggestions with selected connection, no resume sharing, enabled shared Knowledge, cited user statement and edited Platform engineer role awaiting Use reviewed roles in preferences"
+  />
+</Frame>
+
+Set your timezone in **Settings → Preferences**. New schedules use that timezone. Existing exact-time and repeating schedules retain their saved timezone when edited. Date-only follow-ups from earlier app versions run at 09:00 in your current account timezone; changing it moves pending reminders with that clock. Already delivered follow-ups stay delivered.
 
 Discovery needs a web search connection or server-configured SearXNG search. Check **Settings → AI & developer → Web access**, or ask your installation's administrator if services are configured centrally. AI text coaching is a separate connection. It is not required just to schedule a discovery search.
+
+<Frame caption="A follow-up set on the fictional Lumen Health application appears in Today as the same reminder.">
+  <img
+    src="/images/guides/career/today-follow-up.png"
+    alt="Career Today with a one-time Lumen Health follow-up schedule"
+  />
+</Frame>
 
 ## Schedule the search
 
@@ -35,33 +77,39 @@ Discovery needs a web search connection or server-configured SearXNG search. Che
 5. Set **First run** and **Time**. For morning results, choose a morning time such as 08:00.
 6. Leave **Turn this schedule on** enabled and select **Save schedule**.
 
-<Frame caption="A focused search and a recurring time are enough to start. Results wait for your review; the schedule does not apply for jobs.">
+If search still needs a connection, choose **Set up web access** at the top or bottom of the form. Setup opens in place on web and native. Closing setup or saving a connection keeps your query, frequency, first-run date and time. Review the schedule and approve scheduled sharing before saving it; saving a connection alone does not start a search.
+
+<Frame caption="The fictional discovery draft stays intact after closing web setup. Review it before saving; discovery never applies for jobs.">
   <img
     src="/images/guides/career/discovery-schedule.jpg"
-    alt="Find roles schedule with a search based on preferences, daily or less frequent choices, first-run date, timezone-aware time and an enabled schedule switch"
+    alt="Find roles schedule with Platform engineer, Northwind Labs and Berlin query, Every 3 days selected, December 21 2030 first run at 09:35 UTC, enabled schedule switch and Set up web access actions"
   />
 </Frame>
 
-The server runs the schedule while your browser is closed. Search services may charge for usage. See [Schedule controls](/guides/career-workspace-reference#schedules) for delivery and email options.
+The server runs the schedule while your browser is closed. Only its saved query and search countries go to web search; discovery does not send resumes or Knowledge to that service. Found posting links are read by Reactive Resume and the sites being read, with the configured reader used when needed. The schedule names that reader before you enable it. Both search and reading services may charge for usage. Repeating schedules retain local wall-clock time across clock changes. A nonexistent time moves forward on a recurrence; an invalid initial time must be corrected before saving. Missed occurrences combine into one run, rather than replaying every missed search. See [Schedule controls](/guides/career-workspace-reference#schedules) for delivery and email options.
 
 ## Review the roles on Today
 
 When discovery finishes, **Needs you** tells you there are results to review. Under **New roles from your search**, each role has a summary, posting link and match details.
 
-<Frame caption="Review discovered roles alongside reminders. This demo shows two roles and paused schedules; unknown salary remains visible.">
+<Frame caption="Two fictional discovered roles selected for bulk triage. Source history, text matches and unknown salary or workplace details remain visible.">
   <img
     src="/images/guides/career/today.png"
-    alt="Today showing two discovered roles, match chips, Salary not listed, Track in Applications, Read posting and Not for me controls"
+    alt="Today showing fictional discovered roles with source, search and check times, phrase matches, keyword overlap, unknown salary and workplace chips, selection checkboxes and bulk triage controls"
   />
 </Frame>
 
-Read match chips as a starting point. **Salary not listed** or **Office days not stated** means the posting did not establish that detail. It is a question to resolve, not confirmation that your preference is met.
+Each card names its posting source and when the link was last seen in search. New discoveries also record the actual search query and posting check time. Earlier results explicitly mark missing provenance as unknown. A check is historical: the job may have changed or closed since then. Publication dates are not retained, and search coverage is incomplete.
+
+**Preference phrase matches** means the posting contains the significant words of a target role or location; **Keyword overlap** shows individual target-role words. Neither is an AI fit assessment, salary/workplace verification or eligibility check. **Salary not detected** and **Workplace arrangement unknown** flag details not established by conservative text checks. Search snippets alone never establish these details. Unknowns are questions to resolve, not confirmation that a preference is met.
 
 For each role:
 
 - **Read posting** to inspect the job before deciding.
 - **Track in Applications** to create a Saved application with its posting and match notes. This does not submit an application.
 - **Not for me** to dismiss it. Use **Undo** if you change your mind.
+
+Select individual role checkboxes or **Select all roles**, then **Track selected** or **Dismiss selected**. Each action succeeds or fails independently. A partial failure reports counts and keeps available failed roles selected for retry; successful roles leave the queue. Bulk dismiss is immediate; the individual **Not for me** action still offers Undo. Dismissed and already tracked links stay suppressed on later discovery runs. Tracking the same result twice returns the same saved application.
 
 Once tracked, [check Fit](/guides/checking-job-fit) using your experience, then prepare the application.
 

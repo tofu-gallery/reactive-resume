@@ -20,8 +20,8 @@ You can start from the application or from the calendar.
       </Step>
     </Steps>
 
-    <Frame caption="The Next step Edit menu">
-      <img src="/images/guides/scheduling-interviews/next-step-edit-menu.webp" alt="Next step card with the Edit menu open, listing Edit this interview…, Schedule an interview… and Set a follow-up…" />
+    <Frame caption="Edit the next interview or set a follow-up">
+      <img src="/images/guides/scheduling-interviews/next-step-edit-menu.webp" alt="Next-step Edit menu with Edit this interview, Schedule an interview and Set a follow-up" />
     </Frame>
 
   </Tab>
@@ -31,10 +31,10 @@ You can start from the application or from the calendar.
         In **Applications**, select the **Calendar** tab.
       </Step>
       <Step title="Start scheduling">
-        Select **Schedule interview**, or hover over a day and select **+** to start on that day.
+        Select **Schedule interview**. In the web app, you can also hover over a day and select **+** to start on that day.
       </Step>
       <Step title="Choose the application">
-        Under **Application**, pick the application the interview belongs to. Closed applications aren't listed.
+        Under **Application**, pick the application the interview belongs to. Closed applications aren't listed. In the native mobile app, select **Continue** to open the interview form.
       </Step>
     </Steps>
   </Tab>
@@ -63,14 +63,16 @@ You can also use **Next step → Edit** in an application workspace. Then fill i
   <Step title="Save">Select **Save interview**.</Step>
 </Steps>
 
-<Frame caption="The interview form separates the time, length, people and employer's preparation request. This fictional interview is being edited.">
+<Frame caption="Review interview details and timezone">
   <img
     src="/images/guides/career/interview.jpg"
-    alt="Edit interview form for Northstar Labs showing Behavioral, Date, Europe/Berlin time, a 45-minute length, two interviewers, preparation notes and Save interview"
+    alt="Edit interview dialog for fictional Northwind Games with type, date, time, timezone, length and preparation notes"
   />
 </Frame>
 
-The interview appears in the application's **Activity**, on the calendar, and as the **Next step** until it has finished. Scheduling an interview does not change the application's stage; move it to **Interview** when appropriate.
+The interview appears in the application's **Activity**, on the calendar, and as the **Next step** until it has finished. Interview times in **Next step**, **Activity** and **Calendar**, including day grouping and **Today**/**Tomorrow**, use your account timezone in **Settings → Preferences**, as **Career → Today** does. Stage changes and notes keep their recorded whole-day dates. Editing an interview keeps its saved timezone, and calendar export keeps the same instant.
+
+Scheduling an interview does not change the application's stage; move it to **Interview** when appropriate.
 
 ## Edit or delete an interview
 
@@ -78,29 +80,87 @@ Select the interview on the calendar, in **Upcoming interviews**, or in the appl
 
 A date and time skipped by a daylight-saving change is rejected. Pick a valid local time instead of accepting an automatic shift.
 
-To remove it, select **Delete**. The notice offers **Undo** for six seconds. Undo keeps the original round and its linked schedules. Removing an interview pauses its briefing schedules; rescheduling moves them to the new time. Check **Career → Today → Schedules** after a change.
+To remove it, select **Delete** (**Delete interview** in the native app). The notice offers **Undo** for six seconds. Undo keeps the original round and its linked schedules. Removing an interview pauses its briefing schedules; rescheduling moves them to the new time. Check **Career → Today → Schedules** after a change.
+
+The current application must load before the pending deletion is ready and its notice appears. Reloading, closing the tab or putting the native app in the background sends that acknowledged deletion. Undo cancels it and reloads the current application; a round already deleted in another session is not recreated. If that read fails, use **Retry** to refresh it. Device reminders are canceled only after the deletion succeeds.
+
+<Frame caption="Phone browser: the prepared interview deletion offers Undo">
+  <img
+    src="/images/guides/scheduling-interviews/interview-undo-ready.png"
+    alt="Phone browser Calendar with no upcoming interviews and an Interview deleted notice offering Undo above the navigation tabs"
+  />
+</Frame>
+
+<Frame caption="If Undo cannot reload the interview, Retry checks again before showing it.">
+  <img
+    src="/images/guides/scheduling-interviews/interview-undo-retry.png"
+    alt="Phone browser Calendar keeps interviews hidden while a Couldn't load. Try again. notice offers Retry"
+  />
+</Frame>
+
+After you save an edited interview, select **Update your calendar** in the notice to download its updated `.ics` file. After a deletion completes, select **Download cancellation** to download a cancellation for the same event. These actions are available on web and in the native app. Undo does not generate a cancellation. Deleting through **Activity** (**Timeline** in the native app) asks for confirmation instead of offering Undo, then offers the same cancellation action.
+
+<Frame caption="After changing an interview, download its updated calendar file from the save notice.">
+  <img
+    src="/images/guides/scheduling-interviews/phone-calendar-update.png"
+    alt="Phone browser Calendar with a fictional Calendar Protocol Labs interview at 3:30 PM and an Interview saved notice offering Update your calendar"
+  />
+</Frame>
+
+<Frame caption="A completed deletion offers a cancellation file for the original event.">
+  <img
+    src="/images/guides/scheduling-interviews/phone-calendar-cancellation.png"
+    alt="Phone browser Calendar with no remaining interviews and an Interview deleted notice offering Download cancellation"
+  />
+</Frame>
 
 ## Prepare for the round
 
-Open the application's workspace and choose **Prepare** for a timed plan, briefing and questions to ask. You can enable a morning briefing in advance, then use **Practice** to rehearse out loud. See [Get ready for interview day](/guides/preparing-for-interview-day).
+Open the application's workspace and choose **Interview prep** for a timed plan, briefing and questions to ask. You can enable a morning briefing in advance, then use **Practice** to rehearse out loud. See [Get ready for interview day](/guides/preparing-for-interview-day).
 
 ## Use the Calendar view
 
-The **Calendar** tab shows one month of interviews across all your applications.
+In the web app, the **Calendar** tab shows one month of interviews across your applications. It follows the current month in your account timezone until you browse to a month. **This month** restores that behavior.
 
 - Use the arrows to change month, and **This month** to come back to today.
 - Each day shows up to three interviews, with the time and company. Select **+_n_ more** to see the rest of a busy day.
 - **Upcoming interviews**, on the right, lists every interview that hasn't finished yet, grouped by day. Select a card to edit the interview, or **View application** to open the application.
 - The legend under the calendar shows the color of each interview type.
 
-<Frame caption="The Calendar view with upcoming interviews">
+<Frame caption="Calendar and upcoming interviews">
   <img
     src="/images/guides/scheduling-interviews/applications-calendar-view.webp"
-    alt="Calendar view for September 2026 with interview chips on several days, the Schedule interview button, and an Upcoming interviews list with cards for Northwind Games, Brightline Studios and Redwood Arcade"
+    alt="Applications Calendar with a month grid and a fictional upcoming technical interview listed with its time and duration"
   />
 </Frame>
 
-The calendar follows the page's search and **Show closed** settings, so interviews for closed applications are hidden unless **Show closed** is on. The Calendar view isn't available on phones; use each application's **Next step** instead.
+The web calendar follows the page's search and **Show closed applications** settings, so interviews for closed applications are hidden unless **Show closed applications** is on.
+
+### In a phone browser
+
+The **Calendar** tab stays available, including when you open a Calendar link directly. Instead of the month grid, **Upcoming interviews** lists every interview that hasn't finished yet, grouped by day, including appointments in later months. Month boundaries and day headings use your account timezone. Each card includes the time range, company, interview type and role.
+
+- Use the arrows to browse one month's interviews, including past appointments. **This month** returns to the current month and the full upcoming agenda.
+- Select a card to edit the interview, or **View application** to open its application details.
+- Select **Schedule interview** to add another appointment.
+
+<Frame caption="The phone agenda keeps interview dates, times and editing available without a desktop calendar grid. These fictional appointments span two months.">
+  <img
+    src="/images/guides/scheduling-interviews/phone-interview-agenda.png"
+    alt="Calendar on a phone browser showing October 2026 month navigation and upcoming Northstar Labs interviews under Tomorrow and Wednesday, November 4, with time ranges and View application"
+  />
+</Frame>
+
+### In the native mobile app
+
+Open **Applications** and choose **Calendar** in the view selector below the heading. Calendar is available on phones and tablets, alongside **List**, **Board** and **Insights**.
+
+- Use the arrows to change month, or **This month** to return to today. Until you browse or select a day, the calendar follows the current account date. **This month** resumes following it.
+- Select a day to see its interviews and follow-ups. On phones, dots mark days with events and the day's agenda appears below the month. On a wide tablet layout, the agenda appears beside it.
+- Select an interview or follow-up card to edit it, or **View application** to open its application details. **Coming up** lists upcoming events by day.
+- Select **Schedule interview**, choose an application and select **Continue** to open the interview form.
+
+The native calendar follows your application search and shows only open applications. It uses your account timezone to place events on their days.
 
 ## Set a follow-up reminder
 
@@ -111,17 +171,19 @@ A follow-up is a reminder to check in, for example to email the recruiter a week
     In the application's details, under **Next step**, select **Edit**, then **Set a follow-up…** (or **Change the
     follow-up…**).
   </Step>
-  <Step title="Pick a date and say what to do">
-    Choose a **Date** and, if you like, fill in **What to do**, such as "Email the recruiter". When you change an
-    existing follow-up, the fields start empty, so enter the date and note again.
+  <Step title="Pick a date, time and what to do">
+    Choose a **Date** and **Time** in your account timezone and, if you like, fill in **What to do**, such as "Email the
+    recruiter". Existing follow-ups open with their saved date, time and note. New follow-ups start at 09:00. If
+    daylight saving skips your selected time, choose another time before saving. Web and native editors use the same
+    rules.
   </Step>
   <Step title="Save">Select **Save**. To remove the reminder, select **Clear**.</Step>
 </Steps>
 
-<Frame caption="The Follow-up dialog">
+<Frame caption="Choose a valid date and time, then name a concrete follow-up action">
   <img
-    src="/images/guides/scheduling-interviews/follow-up-dialog.webp"
-    alt="Follow-up dialog with Date set to 03.10.2026, What to do set to Email the recruiter, and Clear and Save buttons"
+    src="/images/guides/scheduling-interviews/follow-up-dialog.png"
+    alt="Follow-up dialog for fictional Harbor Labs with Date, Time and What to do fields, showing 03:30 after a skipped daylight-saving hour"
   />
 </Frame>
 
@@ -131,11 +193,13 @@ The follow-up shows as the next step (unless an interview is coming up first) an
 
 When the next step is an interview or a follow-up, select **Add to calendar** under it. Reactive Resume downloads an `.ics` file named after the company and date. Open it to add the event to Apple Calendar, Google Calendar, Outlook or any other calendar app.
 
-The event includes the type of step, the role and company, and the start and end time. Interviews also include where and your notes. Follow-ups are added as 30-minute events at 9:00 on the chosen day.
+The event includes the type of step, the role and company, and the start and end time. Interviews also include the location, participants' names and roles, preparation notes, and a reminder one hour before the start. Follow-ups are 30-minute events at their saved time; date-only follow-ups use 09:00 in your account timezone.
 
 <Tip>
-  The `.ics` file is a one-time copy. If you change the interview in Reactive Resume later, download it again and update
-  the event in your calendar.
+  Calendar export is manual. Import **Update your calendar** or **Download cancellation** into your calendar app after
+  changing or deleting an interview. Files retain the original event identity and include a sequence number;
+  cancellation files mark that event cancelled and omit its reminder. Calendar apps handle imports differently, so check
+  the resulting event in your calendar. Reactive Resume does not sync directly with external calendars.
 </Tip>
 
 ## Related guides

@@ -19,6 +19,11 @@ const withLetter = () => {
 };
 
 describe("htmlToMarkdown", () => {
+	it("bounds repeated work and indentation across nested lists", () => {
+		const rows = "<li>line</li>".repeat(1000);
+		const nested = "<ul><li>parent".repeat(30) + `<ul>${rows}</ul>` + "</li></ul>".repeat(30);
+		expect(() => htmlToMarkdown(nested)).toThrow("too complex");
+	});
 	it("preserves numbered-list starts and inline formatting", () => {
 		expect(
 			htmlToMarkdown(
@@ -67,6 +72,7 @@ describe("buildMarkdown", () => {
 
 	it("ends with a single trailing newline and never contains raw HTML tags", () => {
 		expect(md.endsWith("\n")).toBe(true);
+		expect(md.endsWith("\n\n")).toBe(false);
 		expect(md).not.toMatch(/<[a-z][^>]*>/i);
 	});
 

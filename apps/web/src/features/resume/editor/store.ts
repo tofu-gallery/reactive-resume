@@ -5,13 +5,13 @@ import type { ResumeData } from "@reactive-resume/schema/resume/data";
 import type { Template } from "@reactive-resume/schema/templates";
 import { create } from "zustand/react";
 
-export const EDITOR_MODES = ["write", "design", "check"] as const;
+export const EDITOR_MODES = ["write", "design", "check", "share"] as const;
 export type EditorMode = (typeof EDITOR_MODES)[number];
 
-/** The Share & export sheet's tabs; each entry point opens its own. */
-export type ShareTab = "link" | "download" | "history";
+/** The Download & history sheet's tabs; each entry point opens its own. */
+export type SheetTab = "download" | "history";
 
-export type CheckTab = "issues" | "match" | "writing";
+type CheckTab = "issues" | "match" | "writing";
 
 /** Phones show one view at a time: the page, or one mode's panel. */
 export type MobileView = "page" | EditorMode;
@@ -21,6 +21,7 @@ export type WritingNote = {
 	location: string;
 	impact: "high" | "medium" | "low";
 	quote: string;
+	rewrite?: string;
 	note: string;
 	target: PageMapTarget | null;
 };
@@ -32,21 +33,23 @@ type WritingReview = { summary: string; strengths: readonly string[]; notes: rea
 export type EditorSelection = PageMapTarget;
 
 export const ZOOM_MIN = 0.6;
-export const ZOOM_MAX = 1.5;
+export const ZOOM_MAX = 3;
+/** Fit never draws the page larger than this, however wide the canvas: zooming in goes past it, up to ZOOM_MAX. */
+export const FIT_MAX = 1.5;
 export const ZOOM_STEP = 0.1;
 
 type EditorStore = {
 	/** The mode just picked, shown while `?mode=` catches up (every navigation refetches the session first). */
 	pendingMode: EditorMode | null;
 	selection: EditorSelection | null;
-	/** "fit" fits the page width to the canvas; otherwise an explicit scale between 60% and 150%. */
+	/** "fit" fits the page width to the canvas; otherwise an explicit scale between 60% and 300%. */
 	zoom: number | "fit";
 	/** Tablet only: the panel is a drawer over the page. */
 	drawerOpen: boolean;
 	/** Tablet in landscape: the panel sits beside the page instead of over it. */
 	drawerPinned: boolean;
-	/** The open tab of the Share & export sheet, or null while it's closed. */
-	shareTab: ShareTab | null;
+	/** The open tab of the Download & history sheet, or null while it's closed. */
+	sheetTab: SheetTab | null;
 	/** History: the version shown on the page, read-only, instead of the current resume. */
 	historyVersionId: string | null;
 	assistantOpen: boolean;
@@ -79,6 +82,11 @@ type EditorStore = {
 	 * counts renders, so Fit can wait for one.
 	 */
 	rendered: { pageCount: number; pageMap: PageMap | undefined; file: Blob | undefined; version: number };
+	/**
+	 * The last render of the resume as it is, without proposed edits marked on it: page fit is measured on this, so
+	 * struck-through old text doesn't count against the page while edits wait.
+	 */
+	fitRendered: { pageCount: number; pageMap: PageMap | undefined };
 	/** Phones: the view on screen; null until one is picked, which shows the current mode. */
 	mobileView: MobileView | null;
 	checkTab: CheckTab;
@@ -101,16 +109,18 @@ type EditorStore = {
 	exportReportOpen: boolean;
 	setZoom: (zoom: number | "fit") => void;
 	/** Opens the sheet on a tab, or closes it (which also returns the page to now). */
-	setShareTab: (tab: ShareTab | null) => void;
+	setSheetTab: (tab: SheetTab | null) => void;
 	setAssistantOpen: (open: boolean, instant?: boolean) => void;
 	setSectionOpen: (sectionId: string, open: boolean) => void;
 	markSectionAdded: (sectionId: string) => void;
-	setRendered: (render: { pageCount: number; pageMap: PageMap | undefined; file: Blob }) => void;
+	/** `marked`: the render shows proposed edits (or a template preview), so it doesn't measure fit. */
+	setRendered: (render: { pageCount: number; pageMap: PageMap | undefined; file: Blob }, marked?: boolean) => void;
 	setProposalStatus: (ids: readonly string[], status: Proposal["status"]) => void;
 	reset: () => void;
 };
 
-const clampZoom = (zoom: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(zoom * 100) / 100));
+/** Keep an explicit scale inside the editor's zoom bounds, at whole percentage steps. */
+export const clampZoom = (zoom: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(zoom * 100) / 100));
 
 export const isSameSelection = (a: EditorSelection | null, b: EditorSelection | null) => {
 	if (!a || !b) return a === b;
@@ -127,7 +137,7 @@ const initialState = {
 	zoom: "fit",
 	drawerOpen: false,
 	drawerPinned: false,
-	shareTab: null,
+	sheetTab: null,
 	historyVersionId: null,
 	assistantOpen: false,
 	assistantInstant: false,
@@ -143,6 +153,7 @@ const initialState = {
 	previewTemplate: null,
 	styleHighlight: [],
 	rendered: { pageCount: 0, pageMap: undefined, file: undefined, version: 0 },
+	fitRendered: { pageCount: 0, pageMap: undefined },
 	mobileView: null,
 	checkTab: "issues",
 	checkIssue: null,
@@ -158,7 +169,7 @@ const initialState = {
 export const useEditorStore = create<EditorStore>()((set) => ({
 	...initialState,
 	setZoom: (zoom) => set({ zoom: zoom === "fit" ? "fit" : clampZoom(zoom) }),
-	setShareTab: (shareTab) => set(shareTab ? { shareTab } : { shareTab, historyVersionId: null }),
+	setSheetTab: (sheetTab) => set(sheetTab ? { sheetTab } : { sheetTab, historyVersionId: null }),
 	setAssistantOpen: (assistantOpen, instant = false) => set({ assistantOpen, assistantInstant: instant }),
 	setSectionOpen: (sectionId, open) =>
 		set((state) => {
@@ -172,7 +183,11 @@ export const useEditorStore = create<EditorStore>()((set) => ({
 		set((state) =>
 			state.addedSections.includes(sectionId) ? state : { addedSections: [...state.addedSections, sectionId] },
 		),
-	setRendered: (render) => set((state) => ({ rendered: { ...render, version: state.rendered.version + 1 } })),
+	setRendered: (render, marked = false) =>
+		set((state) => ({
+			rendered: { ...render, version: state.rendered.version + 1 },
+			...(marked ? {} : { fitRendered: { pageCount: render.pageCount, pageMap: render.pageMap } }),
+		})),
 	setProposalStatus: (ids, status) =>
 		set((state) => ({
 			proposals: state.proposals.map((proposal) => (ids.includes(proposal.id) ? { ...proposal, status } : proposal)),

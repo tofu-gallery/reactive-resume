@@ -1,6 +1,64 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import { slugify } from "./slug";
-import { filterOptions, toUsername } from "./string";
+import {
+	buildConversationTitle,
+	filterOptions,
+	fitLabel,
+	getInitials,
+	isolate,
+	rewriteSummary,
+	toUsername,
+} from "./string";
+
+it("keeps optimistic and saved conversation titles on one normalized word-boundary rule", () => {
+	expect(buildConversationTitle(" \n ", "New conversation", 47)).toBe("New conversation");
+	expect(buildConversationTitle("  A   short\nrequest ", "", 47)).toBe("A short request");
+	expect(
+		buildConversationTitle(
+			"Please help me summarize my accomplishments for the fictional Cedar interview next week",
+			"",
+			47,
+		),
+	).toBe("Please help me summarize my accomplishments…");
+	expect(buildConversationTitle("ab😀c", "", 4)).toBe("ab…");
+});
+
+it("retains opaque pending request IDs across module restart until acknowledgement", async () => {
+	const values = new Map<string, string>();
+	const storage = {
+		getItem: (key: string) => values.get(key) ?? null,
+		setItem: (key: string, value: string) => {
+			values.set(key, value);
+		},
+		removeItem: (key: string) => {
+			values.delete(key);
+		},
+	};
+	const key = JSON.stringify(["offer-version", "account-a", { id: "original", base: 90000 }]);
+	const first = await import("./string");
+	const id = first.pendingRequestId(key, storage);
+	vi.resetModules();
+	const restarted = await import("./string");
+	expect(restarted.pendingRequestId(key, storage)).toBe(id);
+	expect([...values.keys()].join()).not.toMatch(/account-a|original/);
+	expect(restarted.pendingRequestId(key + "another-account", storage)).not.toBe(id);
+	restarted.settleRequestId(key, storage, id);
+	const next = restarted.pendingRequestId(key, storage);
+	expect(next).not.toBe(id);
+	restarted.settleRequestId(key, storage, id);
+	expect(restarted.pendingRequestId(key, storage)).toBe(next);
+	expect(() => restarted.pendingRequestId("corrupt", { ...storage, getItem: () => "invalid" })).toThrow(
+		"Invalid pending request ID",
+	);
+	expect(() =>
+		restarted.pendingRequestId("unwritable", {
+			...storage,
+			setItem: () => {
+				throw new Error("Disk full");
+			},
+		}),
+	).toThrow("Disk full");
+});
 
 describe("slugify", () => {
 	it("falls back to a non-empty slug for CJK input", () => {
@@ -9,14 +67,31 @@ describe("slugify", () => {
 });
 
 describe("toUsername", () => {
-	it("removes characters outside [a-z0-9._-]", () => {
+	it("removes characters outside [a-z0-9._-] and truncates to 64 characters", () => {
 		expect(toUsername("  John!@#Doe$%^  ")).toBe("johndoe");
 		expect(toUsername("john.doe_test-123")).toBe("john.doe_test-123");
+		expect(toUsername("a".repeat(100))).toHaveLength(64);
+	});
+});
+
+describe("fitLabel", () => {
+	it("leaves a short label alone", () => {
+		expect(fitLabel("Recruiter call", 18)).toBe("Recruiter call");
+		expect(fitLabel("Recruiter call", 14)).toBe("Recruiter call");
 	});
 
-	it("truncates to 64 characters max", () => {
-		const longName = "a".repeat(100);
-		expect(toUsername(longName)).toHaveLength(64);
+	it("ends a long narrow label with an ellipsis within the width budget", () => {
+		expect(fitLabel("a".repeat(20), 18)).toBe(`${"a".repeat(17)}…`);
+	});
+
+	it("counts wide glyphs as twice a narrow one", () => {
+		expect(fitLabel("漢".repeat(20), 18)).toBe(`${"漢".repeat(8)}…`);
+		expect(fitLabel("😀".repeat(20), 18)).toBe(`${"😀".repeat(8)}…`);
+	});
+
+	it("keeps a multi-code-point emoji cluster whole", () => {
+		const family = "👨‍👩‍👧‍👦";
+		expect(fitLabel(family.repeat(10), 18)).toBe(`${family.repeat(8)}…`);
 	});
 });
 
@@ -42,6 +117,14 @@ describe("filterOptions", () => {
 		expect(filterOptions(options, "d")).toEqual([]);
 	});
 
+	it("finds native language choices through hidden English and translated names", () => {
+		const french = { value: "fr-FR", label: "Français", keywords: ["French", "Französisch", "fr-FR"] };
+		for (const query of ["francais", "French", "franzosisch", "FR-FR"]) {
+			expect(filterOptions([french, ...options], query)).toContain(french);
+		}
+		expect(filterOptions([french], "Japanese")).toEqual([]);
+	});
+
 	it("matches independently of a Turkish runtime's default casing", () => {
 		const lower = String.prototype.toLocaleLowerCase;
 		const locale = vi.spyOn(String.prototype, "toLocaleLowerCase").mockImplementation(function (this: string) {
@@ -53,5 +136,30 @@ describe("filterOptions", () => {
 		} finally {
 			locale.mockRestore();
 		}
+	});
+});
+
+it("reports a rewrite's shorter length, the user's changed sentences and the new ones", () => {
+	const before = "I have used Figma daily since 2016. I co-organise the Berlin meetup.";
+	const after = "I have used Figma daily since 2016. I'd be excited to bring that to the team.";
+	expect(rewriteSummary(before, after)).toEqual({ words: 4, removed: 1, added: 1 });
+	expect(rewriteSummary(before, "I have used Figma daily since 2016.")).toEqual({ words: -5, removed: 1, added: 0 });
+});
+
+describe("isolate", () => {
+	it("wraps user text in first-strong isolate marks, so its direction stops at the text", () => {
+		expect(isolate("Lebenslauf (DE)")).toBe("\u2068Lebenslauf (DE)\u2069");
+		// The marks are invisible: a reader sees the text itself.
+		expect(isolate("Lebenslauf (DE)").replaceAll(/[\u2068\u2069]/g, "")).toBe("Lebenslauf (DE)");
+	});
+});
+
+describe("getInitials", () => {
+	it("takes the first letter of the first two names", () => {
+		expect(getInitials("ada lovelace byron")).toBe("AL");
+	});
+
+	it("keeps Arabic initials apart so they don't join into a word", () => {
+		expect(getInitials("ليلى حداد")).toBe("ل\u200cح");
 	});
 });

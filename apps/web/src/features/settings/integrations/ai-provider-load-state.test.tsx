@@ -13,6 +13,10 @@ vi.mock("@/libs/orpc/client", () => ({
 		aiProviders: {
 			list: { queryOptions: () => ({ queryKey: ["providers"], queryFn: api.list, retry: false }) },
 		},
+		career: {
+			facts: { queryOptions: () => ({ queryKey: ["facts"], queryFn: async () => [] }) },
+			stories: { queryOptions: () => ({ queryKey: ["stories"], queryFn: async () => [] }) },
+		},
 	},
 }));
 vi.mock("@tanstack/react-router", () => ({
@@ -24,6 +28,15 @@ import { AiNotice } from "@/features/career/workspace/fit";
 
 let client: QueryClient;
 const provider = { id: "saved", label: "Saved DeepSeek", enabled: true, testStatus: "success" };
+const application = {
+	id: "app",
+	resumeId: null,
+	coverLetterId: null,
+	jobDescription: "Build reliable services.",
+	requirements: [],
+	notes: null,
+	contacts: [],
+};
 function Wrapper({ children }: { children: ReactNode }) {
 	return (
 		<QueryClientProvider client={client}>
@@ -43,11 +56,11 @@ afterEach(() => {
 
 it("shows a recoverable lookup error instead of setup, then restores the saved provider after Retry", async () => {
 	api.list.mockRejectedValueOnce(new Error("Offline")).mockResolvedValueOnce([provider]);
-	render(<AiNotice />, { wrapper: Wrapper });
+	render(<AiNotice task="fit" application={application} />, { wrapper: Wrapper });
 	expect(screen.getByRole("status").textContent).toContain("Loading AI connections");
-	expect(screen.queryByRole("link", { name: /Connect an AI provider/ })).toBeNull();
+	expect(screen.queryByRole("button", { name: "Set up AI" })).toBeNull();
 	expect((await screen.findByRole("alert")).textContent).toContain("saved connections haven't changed");
-	expect(screen.queryByRole("link", { name: /Connect an AI provider/ })).toBeNull();
+	expect(screen.queryByRole("button", { name: "Set up AI" })).toBeNull();
 	fireEvent.click(screen.getByRole("button", { name: "Try again" }));
 	await screen.findByText(/to Saved DeepSeek/);
 	expect(screen.queryByRole("alert")).toBeNull();
@@ -57,7 +70,7 @@ it("shows a recoverable lookup error instead of setup, then restores the saved p
 it("offers setup only after a successful empty provider lookup", async () => {
 	api.list.mockResolvedValue([]);
 	render(<AiNotice />, { wrapper: Wrapper });
-	await screen.findByRole("link", { name: "Connect an AI provider in Settings" });
+	await screen.findByRole("button", { name: "Set up AI" });
 	expect(screen.queryByRole("alert")).toBeNull();
 });
 

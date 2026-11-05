@@ -1,8 +1,11 @@
 {
 	"$schema": "https://unpkg.com/knip@6/schema.json",
 	"tags": ["-lintignore"],
-	"ignoreBinaries": ["pdftotext"],
+	"ignoreBinaries": ["pdftotext", "mktemp"],
 	"workspaces": {
+		".": {
+			"entry": ["tests/e2e/autofill-prototype.mjs"]
+		},
 		"apps/mobile": {
 			"ignoreExportsUsedInFile": true,
 			"ignoreIssues": {
@@ -14,6 +17,7 @@
 				"scripts/**/*.{mjs,mts,tsx}",
 				"src/features/licences/generate.cjs",
 				"src/draft/index.ts",
+				"src/features/applications/next-step.ts",
 				"src/features/applications/stages.ts",
 				"src/features/assistant/chat-view.tsx",
 				"src/features/workspace/hooks.ts",
@@ -23,7 +27,13 @@
 			]
 		},
 		"apps/web": {
-			"entry": ["lingui.config.ts", "vitest.config.ts", "src/features/homepage/prerender.tsx"],
+			"entry": [
+				"lingui.config.ts",
+				"vitest.config.ts",
+				"vitest.setup.ts",
+				"src/features/homepage/prerender.tsx",
+				"src/features/auth/email-text.ts"
+			],
 			"vite": {
 				"config": []
 			},
@@ -68,8 +78,10 @@
 				"fast-png",
 				"fflate",
 				"ioredis",
+				"isbot",
 				"jose",
 				"jsonrepair",
+				"mdast-util-from-markdown",
 				"node-html-parser",
 				"nodemailer",
 				"ollama-ai-provider-v2",

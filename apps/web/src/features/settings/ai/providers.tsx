@@ -1,11 +1,13 @@
+import type { ProviderFields } from "./provider-fields";
 import type { RouterOutput } from "@/libs/orpc/client";
 import type { AIProvider } from "@reactive-resume/ai/types";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { ORPCError } from "@orpc/client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useId, useState } from "react";
-import { AI_PROVIDER_DEFAULT_BASE_URLS } from "@reactive-resume/ai/types";
+import { useId, useRef, useState } from "react";
+import { AI_PROVIDER_DEFAULT_BASE_URLS, getAIProviderSetupProblem } from "@reactive-resume/ai/defaults";
 import { Button } from "@reactive-resume/ui/components/button";
 import {
 	Dialog,
@@ -15,21 +17,22 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@reactive-resume/ui/components/dialog";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuTrigger,
+} from "@reactive-resume/ui/components/dropdown-menu";
 import { Icon } from "@reactive-resume/ui/components/icon";
-import { Input } from "@reactive-resume/ui/components/input";
 import { Label } from "@reactive-resume/ui/components/label";
 import { Spinner } from "@reactive-resume/ui/components/spinner";
 import { Switch } from "@reactive-resume/ui/components/switch";
 import { cn } from "@reactive-resume/utils/style";
-import {
-	describeTest,
-	keyEnding,
-	loadModelSuggestions,
-	modelsDevProviderIds,
-	providerDefaults,
-	providerLabel,
-	providerOptions,
-} from "./catalog";
+import { SettingsSection } from "../section";
+import { describeTest, keyEnding, providerDefaults, providerLabel, providerOptions } from "./catalog";
+import { NextSteps } from "./next-steps";
+import { ProviderFieldsForm } from "./provider-fields";
+import { providerTestError } from "./test-error";
 import { Combobox } from "@/components/ui/combobox";
 import { useClosingValue } from "@/hooks/use-closing-value";
 import { useConfirm } from "@/hooks/use-confirm";
@@ -38,42 +41,31 @@ import { orpc } from "@/libs/orpc/client";
 
 type SavedProvider = RouterOutput["aiProviders"]["list"][number];
 
-const secretInputProps = {
-	autoCorrect: "off",
-	autoCapitalize: "off",
-	spellCheck: false,
-	"data-lpignore": "true",
-	"data-1p-ignore": "true",
-	"data-bwignore": "true",
-} as const;
-
 const isConfigError = (error: unknown) => error instanceof ORPCError && error.code === "PRECONDITION_FAILED";
 
 export function ProvidersSection() {
-	const id = useId();
 	const { data: providers, isLoading, error } = useQuery(orpc.aiProviders.list.queryOptions());
 	const [adding, setAdding] = useState(false);
+	const [connectedId, setConnectedId] = useState<string | null>(null);
 	const [editing, setEditing] = useState<SavedProvider | null>(null);
 	const managed = providers?.find((provider) => provider.managed);
 	// The server lists the default first, so the first usable provider is the one every automatic choice uses.
 	const usable = providers?.filter((provider) => provider.enabled && provider.testStatus === "success") ?? [];
-	const defaultId = usable[0]?.id;
+	const defaultId = providers?.find((provider) => provider.isDefault)?.id;
 	const makeDefault = useMutation(orpc.aiProviders.setDefault.mutationOptions());
 
 	return (
-		<section aria-labelledby={`${id}-title`} className="overflow-hidden rounded-xl border border-line bg-surface">
-			<header className="grid gap-1 border-b border-line px-5 py-4 max-sm:px-4">
-				<h2 id={`${id}-title`} className="text-[17px] font-semibold">
-					<Trans>AI providers</Trans>
-				</h2>
-				<p className="max-w-[60ch] text-[13px] leading-5 text-ink-3">
-					<Trans>
-						Writing help, tailored suggestions and the assistant. The default provider is used wherever you don't pick
-						one. Your keys stay encrypted.
-					</Trans>
-				</p>
-			</header>
-			<div className="grid gap-4 p-5">
+		<SettingsSection
+			title={<Trans>AI providers</Trans>}
+			description={
+				<Trans>
+					Writing help, tailored suggestions and the assistant. The default provider is used wherever you don't pick
+					one. Your keys stay encrypted.
+				</Trans>
+			}
+		>
+			<div className="grid gap-4">
+				{usable.some((provider) => provider.id === connectedId) && <NextSteps onDismiss={() => setConnectedId(null)} />}
 				{managed ? (
 					<div className="flex items-center gap-3">
 						<ProviderLogo provider={managed.provider} className="size-10 rounded-lg bg-sunken" />
@@ -104,7 +96,7 @@ export function ProvidersSection() {
 							<ProviderRow
 								key={provider.id}
 								provider={provider}
-								isDefault={provider.id === defaultId && (providers?.length ?? 0) > 1}
+								isDefault={provider.isDefault}
 								onMakeDefault={
 									usable.length > 1 && provider.id !== defaultId && usable.includes(provider)
 										? () =>
@@ -123,6 +115,9 @@ export function ProvidersSection() {
 								onEdit={() => setEditing(provider)}
 							/>
 						))}
+						<p className="text-[13px] leading-5 text-ink-3">
+							<Trans>Your provider may charge your account for requests made with your API key.</Trans>
+						</p>
 						<button
 							type="button"
 							onClick={() => setAdding(true)}
@@ -134,7 +129,7 @@ export function ProvidersSection() {
 									<Trans>Add AI provider</Trans>
 								</span>
 								<span className="text-xs text-ink-3">
-									<Trans>Anthropic, Gemini, Ollama, OpenAI-compatible</Trans>
+									<Trans>OpenAI, Anthropic, Gemini, Ollama and more</Trans>
 								</span>
 							</span>
 						</button>
@@ -142,32 +137,31 @@ export function ProvidersSection() {
 				)}
 			</div>
 
-			<AddProviderDialog open={adding} onOpenChange={setAdding} />
-			<EditProviderDialog provider={editing} onClose={() => setEditing(null)} />
-		</section>
+			<AddProviderDialog
+				open={adding}
+				onOpenChange={setAdding}
+				onConnected={(provider) => {
+					if (
+						provider.enabled &&
+						!providers?.some((other) => other.id !== provider.id && other.testStatus === "success")
+					)
+						setConnectedId(provider.id);
+				}}
+			/>
+			<EditProviderDialog
+				provider={providers?.find((item) => item.id === editing?.id) ?? editing}
+				onClose={() => setEditing(null)}
+			/>
+		</SettingsSection>
 	);
 }
 
 type ProviderLogoProps = { provider: AIProvider; className?: string };
 
-function ProviderLogo({ provider, className }: ProviderLogoProps) {
-	const [failed, setFailed] = useState(false);
-	const id = modelsDevProviderIds[provider];
+function ProviderLogo({ className }: ProviderLogoProps) {
 	return (
 		<span aria-hidden className={cn("grid size-6 shrink-0 place-items-center", className)}>
-			{id && !failed ? (
-				<img
-					src={`https://models.dev/logos/${id}.svg`}
-					alt=""
-					width={24}
-					height={24}
-					className="size-5 object-contain brightness-0 dark:invert"
-					referrerPolicy="no-referrer"
-					onError={() => setFailed(true)}
-				/>
-			) : (
-				<Icon name="sparkle" size={20} />
-			)}
+			<Icon name="sparkle" size={20} />
 		</span>
 	);
 }
@@ -190,7 +184,12 @@ function useProviderTest() {
 		const started = performance.now();
 		try {
 			const tested = await test.mutateAsync({ id });
-			const next = describeTest(tested, performance.now() - started, { connected: t`Connected`, failed: t`Failed` });
+			const next = describeTest(
+				{ ...tested, testError: tested.testStatus === "failure" ? providerTestError(tested.testErrorKind) : null },
+				performance.now() - started,
+				{ connected: t`Connected`, failed: t`Failed` },
+				i18n.locale,
+			);
 			setResult(next);
 			return next;
 		} catch (error) {
@@ -219,7 +218,33 @@ type ProviderRowProps = {
 
 function ProviderRow({ provider, isDefault, onMakeDefault, makingDefault, onEdit }: ProviderRowProps) {
 	const test = useProviderTest();
-	const error = test.result ? test.result.error : provider.testStatus === "failure" ? provider.testError : null;
+	const queryClient = useQueryClient();
+	const confirm = useConfirm();
+	const remove = useMutation(orpc.aiProviders.delete.mutationOptions({ meta: { noInvalidate: true } }));
+	const error = test.result
+		? test.result.error
+		: provider.testStatus === "failure"
+			? providerTestError(provider.testErrorKind)
+			: null;
+
+	const askDelete = async () => {
+		if (
+			!(await confirm(t`Delete “${provider.label}”?`, {
+				description: t`Its saved key is deleted. Conversations using it need another provider.`,
+				confirmText: t`Delete provider`,
+				cancelText: t`Keep provider`,
+				variant: "danger",
+			}))
+		)
+			return;
+		remove.mutate(
+			{ id: provider.id },
+			{
+				onSuccess: () => void queryClient.invalidateQueries({ queryKey: orpc.aiProviders.list.key() }),
+				onError: (failure) => toastError(failure, t`Couldn't delete the provider. Try again.`),
+			},
+		);
+	};
 
 	return (
 		<div className="grid gap-2 rounded-lg border border-line p-3">
@@ -253,38 +278,61 @@ function ProviderRow({ provider, isDefault, onMakeDefault, makingDefault, onEdit
 						)}
 					</span>
 					<span className="text-xs break-all text-ink-2">{provider.model}</span>
+					{(provider.fastModel || provider.capableModel) && (
+						<span className="text-xs break-all text-ink-3">
+							<Trans>
+								Fast: {provider.fastModel ?? provider.model} · Capable: {provider.capableModel ?? provider.model}
+							</Trans>
+						</span>
+					)}
 					<span className="text-xs text-ink-3">
 						<Trans>Key ends in {keyEnding(provider.apiKeyPreview)}</Trans>
 					</span>
 				</span>
 				<div className="col-start-2 flex flex-wrap items-center gap-2 sm:ms-auto">
 					{onMakeDefault && (
-						<Button size="sm" variant="ghost" loading={makingDefault} onClick={onMakeDefault}>
+						<Button size="sm" variant="secondary" loading={makingDefault} onClick={onMakeDefault}>
 							<Trans>Make default</Trans>
 						</Button>
 					)}
-					<Button
-						size="sm"
-						variant="secondary"
-						aria-live="polite"
-						disabled={test.isPending}
-						className={cn(test.result?.ok && "text-accent-text", test.result && !test.result.ok && "text-danger-text")}
-						onClick={() => void test.run(provider.id)}
-					>
+					<Button size="sm" variant="secondary" disabled={test.isPending} onClick={() => void test.run(provider.id)}>
 						{test.isPending ? (
 							<>
 								<Spinner decorative className="size-3.5" />
 								<Trans>Testing…</Trans>
 							</>
 						) : (
-							(test.result?.label ?? <Trans>Test</Trans>)
+							<Trans>Test</Trans>
 						)}
 					</Button>
 					<Button size="sm" variant="ghost" onClick={onEdit}>
 						<Trans>Edit</Trans>
 					</Button>
+					<DropdownMenu>
+						<DropdownMenuTrigger
+							render={<Button size="sm" variant="ghost" aria-label={t`Provider options`} disabled={remove.isPending} />}
+						>
+							<Icon name="dots-three" />
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="end">
+							<DropdownMenuItem variant="destructive" onClick={() => void askDelete()}>
+								<Icon name="trash" />
+								<Trans>Delete provider</Trans>
+							</DropdownMenuItem>
+						</DropdownMenuContent>
+					</DropdownMenu>
 				</div>
 			</div>
+			{test.result?.ok && (
+				<p role="status" className="text-xs text-accent-text">
+					{test.result.label}
+				</p>
+			)}
+			{test.result?.ok && !provider.enabled && (
+				<p className="text-xs text-ink-3">
+					<Trans>The connection works. Turn on Use this provider to use it.</Trans>
+				</p>
+			)}
 			{error && (
 				<p role="alert" className="ms-12 text-xs text-danger-text">
 					{error}
@@ -294,171 +342,57 @@ function ProviderRow({ provider, isDefault, onMakeDefault, makingDefault, onEdit
 	);
 }
 
-type ProviderFields = { label: string; model: string; baseURL: string; apiKey: string };
-
-type ProviderFieldsProps = {
-	provider: AIProvider;
-	value: ProviderFields;
-	onChange: (value: ProviderFields) => void;
-	/** Editing: an empty key keeps the saved one. */
-	keyOptional?: boolean;
-	/** Editing with a new base URL: the saved key isn't sent there, so it's entered again. */
-	keyAgain?: boolean;
+type AddProviderDialogProps = {
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	onConnected: (provider: SavedProvider) => void;
 };
 
-function ProviderFieldsForm({ provider, value, onChange, keyOptional, keyAgain }: ProviderFieldsProps) {
-	const id = useId();
-	const set = (patch: Partial<ProviderFields>) => onChange({ ...value, ...patch });
-	const defaults = providerDefaults(provider);
-	const catalogId = modelsDevProviderIds[provider];
-	const {
-		data: catalog,
-		isPending: loadingModels,
-		isError: modelsUnavailable,
-	} = useQuery({
-		queryKey: ["models.dev"],
-		queryFn: ({ signal }) => loadModelSuggestions(signal),
-		enabled: catalogId !== null,
-		staleTime: 60 * 60 * 1000,
-		retry: false,
-	});
-	const models = catalogId ? (catalog?.[catalogId] ?? []) : [];
-
-	return (
-		<div className="grid gap-3 sm:grid-cols-2">
-			<div className="grid gap-1.5 sm:col-span-2">
-				<Label htmlFor={`${id}-key`}>
-					<Trans>API key</Trans>
-				</Label>
-				<Input
-					id={`${id}-key`}
-					type="password"
-					value={value.apiKey}
-					placeholder={
-						keyOptional && !keyAgain
-							? t`Leave empty to keep the saved key`
-							: provider === "ollama"
-								? t`Optional for local Ollama`
-								: undefined
-					}
-					required={keyAgain && provider !== "ollama"}
-					aria-describedby={keyAgain ? `${id}-key-hint` : undefined}
-					onChange={(event) => set({ apiKey: event.target.value })}
-					{...secretInputProps}
-				/>
-				{keyAgain && (
-					<p id={`${id}-key-hint`} className="text-xs leading-5 text-ink-3">
-						{provider === "ollama" ? (
-							<Trans>The saved key isn't sent to a new base URL. Enter it again if this server needs one.</Trans>
-						) : (
-							<Trans>The saved key isn't sent to a new base URL. Enter it again.</Trans>
-						)}
-					</p>
-				)}
-			</div>
-			<div className="grid gap-1.5 sm:col-span-2">
-				<Label htmlFor={`${id}-model`}>
-					<Trans>Model</Trans>
-				</Label>
-				<Input
-					id={`${id}-model`}
-					list={`${id}-models`}
-					aria-describedby={`${id}-model-hint`}
-					value={value.model}
-					placeholder={defaults.model || "gpt-4.1"}
-					onChange={(event) => set({ model: event.target.value })}
-					{...secretInputProps}
-				/>
-				<datalist id={`${id}-models`}>
-					{models.map((model) => (
-						<option key={model.id} value={model.id}>
-							{model.name}
-						</option>
-					))}
-				</datalist>
-				<p id={`${id}-model-hint`} className="text-xs leading-5 text-ink-3">
-					{!catalogId ? (
-						<Trans>Enter any model ID supported by your endpoint.</Trans>
-					) : modelsUnavailable ? (
-						<Trans>Model suggestions are unavailable. You can still enter any model ID.</Trans>
-					) : loadingModels ? (
-						<Trans>Loading model suggestions… You can also enter any model ID.</Trans>
-					) : models.length === 0 ? (
-						<Trans>No suggestions for this provider. Enter any model ID.</Trans>
-					) : (
-						<Trans>
-							Suggestions from{" "}
-							<a
-								href="https://models.dev/"
-								target="_blank"
-								rel="noopener noreferrer"
-								className="underline underline-offset-2 hover:text-ink"
-							>
-								models.dev
-							</a>
-							. You can also enter any model ID.
-						</Trans>
-					)}
-				</p>
-			</div>
-			<div className="grid gap-1.5 sm:col-span-2">
-				<Label htmlFor={`${id}-label`}>
-					<Trans>Name</Trans>
-				</Label>
-				<Input
-					id={`${id}-label`}
-					value={value.label}
-					placeholder={providerLabel(provider)}
-					onChange={(event) => set({ label: event.target.value })}
-				/>
-			</div>
-			<div className="grid gap-1.5 sm:col-span-2">
-				<Label htmlFor={`${id}-url`}>
-					<Trans>Base URL</Trans>
-				</Label>
-				<Input
-					id={`${id}-url`}
-					type="url"
-					value={value.baseURL}
-					placeholder={defaults.baseURL || "https://gateway.example.com/v1"}
-					onChange={(event) => set({ baseURL: event.target.value })}
-					{...secretInputProps}
-				/>
-			</div>
-		</div>
-	);
-}
-
-type AddProviderDialogProps = { open: boolean; onOpenChange: (open: boolean) => void };
-
 /** Every supported provider; saving tests the connection at once. */
-function AddProviderDialog({ open, onOpenChange }: AddProviderDialogProps) {
+function AddProviderDialog({ open, onOpenChange, onConnected }: AddProviderDialogProps) {
 	const id = useId();
 	const queryClient = useQueryClient();
 	const [provider, setProvider] = useState<AIProvider>("openai");
-	const [fields, setFields] = useState<ProviderFields>({ label: "", apiKey: "", ...providerDefaults("openai") });
+	const [fields, setFields] = useState<ProviderFields>({
+		label: "",
+		apiKey: "",
+		fastModel: "",
+		capableModel: "",
+		...providerDefaults("openai"),
+	});
 	const [failure, setFailure] = useState<string | null>(null);
 	const create = useMutation(orpc.aiProviders.create.mutationOptions({ meta: { noInvalidate: true } }));
+	const update = useMutation(orpc.aiProviders.update.mutationOptions({ meta: { noInvalidate: true } }));
+	const createdId = useRef<string | null>(null);
+	const busy = useRef(false);
 	const test = useMutation(orpc.aiProviders.test.mutationOptions({ meta: { noInvalidate: true } }));
 
 	const reset = () => {
+		createdId.current = null;
 		setProvider("openai");
-		setFields({ label: "", apiKey: "", ...providerDefaults("openai") });
+		setFields({ label: "", apiKey: "", fastModel: "", capableModel: "", ...providerDefaults("openai") });
 		setFailure(null);
 	};
 
 	const save = async () => {
+		if (busy.current) return;
+		busy.current = true;
 		setFailure(null);
 		const input = {
 			label: fields.label.trim() || providerLabel(provider),
 			provider,
 			model: fields.model.trim(),
+			fastModel: fields.fastModel.trim(),
+			capableModel: fields.capableModel.trim(),
 			baseURL: fields.baseURL.trim(),
 			apiKey: fields.apiKey.trim(),
 		};
 		let tested: Awaited<ReturnType<typeof test.mutateAsync>> | undefined;
 		try {
-			const created = await create.mutateAsync(input);
+			const created = createdId.current
+				? await update.mutateAsync({ id: createdId.current, ...input })
+				: await create.mutateAsync(input);
+			createdId.current = created.id;
 			tested = await test.mutateAsync({ id: created.id });
 		} catch (error) {
 			setFailure(
@@ -471,18 +405,20 @@ function AddProviderDialog({ open, onOpenChange }: AddProviderDialogProps) {
 				}),
 			);
 		}
+		busy.current = false;
 		void queryClient.invalidateQueries({ queryKey: orpc.aiProviders.list.key() });
 		if (!tested) return;
 		if (tested.testStatus === "success") {
+			onConnected(tested);
 			onOpenChange(false);
 		} else {
 			// The provider is saved either way; its row keeps the error and a Test button.
-			setFailure(tested.testError ?? t`The provider didn't answer. Check the key, the model and the base URL.`);
+			setFailure(providerTestError(tested.testErrorKind));
 		}
 	};
 
-	const pending = create.isPending || test.isPending;
-	const ready = Boolean((provider === "ollama" || fields.apiKey.trim()) && fields.model.trim());
+	const pending = create.isPending || update.isPending || test.isPending;
+	const ready = getAIProviderSetupProblem(provider, fields) === null;
 
 	return (
 		<Dialog
@@ -501,6 +437,7 @@ function AddProviderDialog({ open, onOpenChange }: AddProviderDialogProps) {
 					</DialogDescription>
 				</DialogHeader>
 				<form
+					noValidate
 					className="grid gap-3"
 					onSubmit={(event) => {
 						event.preventDefault();
@@ -529,11 +466,17 @@ function AddProviderDialog({ open, onOpenChange }: AddProviderDialogProps) {
 							onValueChange={(next) => {
 								if (!next) return;
 								setProvider(next);
-								setFields((current) => ({ ...current, ...providerDefaults(next) }));
+								setFields((current) => ({
+									...current,
+									...providerDefaults(next),
+									apiKey: "",
+									fastModel: "",
+									capableModel: "",
+								}));
 							}}
 						/>
 					</div>
-					<ProviderFieldsForm provider={provider} value={fields} onChange={setFields} />
+					<ProviderFieldsForm key={provider} provider={provider} value={fields} onChange={setFields} />
 					{failure && (
 						<p role="alert" className="text-sm text-danger-text">
 							{failure}
@@ -573,12 +516,17 @@ function EditProviderDialog({ provider, onClose }: EditProviderDialogProps) {
 
 type EditProviderFormProps = { provider: SavedProvider; onClose: () => void };
 
-function EditProviderForm({ provider, onClose }: EditProviderFormProps) {
+function EditProviderForm({ provider: opened, onClose }: EditProviderFormProps) {
 	const queryClient = useQueryClient();
 	const confirm = useConfirm();
+	// The saved provider as it is now, not as it was when the dialog opened: the switch shows what each save did.
+	const { data: providers } = useQuery(orpc.aiProviders.list.queryOptions());
+	const provider = providers?.find((item) => item.id === opened.id) ?? opened;
 	const [fields, setFields] = useState<ProviderFields>({
 		label: provider.label,
 		model: provider.model,
+		fastModel: provider.fastModel ?? "",
+		capableModel: provider.capableModel ?? "",
 		baseURL: provider.baseURL ?? AI_PROVIDER_DEFAULT_BASE_URLS[provider.provider] ?? "",
 		apiKey: "",
 	});
@@ -594,9 +542,14 @@ function EditProviderForm({ provider, onClose }: EditProviderFormProps) {
 	const apiKey = fields.apiKey.trim();
 	// The server won't send the saved key to a new address, so the key comes with it (Ollama may have none).
 	const keyMissing = newURL && provider.provider !== "ollama" && !apiKey;
+	const valid = getAIProviderSetupProblem(provider.provider, fields, !newURL) === null;
 	const changes = {
 		...(fields.label.trim() && fields.label.trim() !== provider.label ? { label: fields.label.trim() } : {}),
 		...(fields.model.trim() && fields.model.trim() !== provider.model ? { model: fields.model.trim() } : {}),
+		...(fields.fastModel.trim() !== (provider.fastModel ?? "") ? { fastModel: fields.fastModel.trim() } : {}),
+		...(fields.capableModel.trim() !== (provider.capableModel ?? "")
+			? { capableModel: fields.capableModel.trim() }
+			: {}),
 		// The provider rides along so validation accepts Ollama's empty key.
 		...(newURL ? { provider: provider.provider, baseURL: fields.baseURL.trim() } : {}),
 		...(newURL || apiKey ? { apiKey } : {}),
@@ -619,27 +572,48 @@ function EditProviderForm({ provider, onClose }: EditProviderFormProps) {
 		else setFailure(result.error ?? t`The provider didn't answer. Check the key, the model and the base URL.`);
 	};
 
-	const setEnabled = (enabled: boolean) =>
+	const setEnabled = (enabled: boolean) => {
+		setFailure(null);
 		update.mutate(
 			{ id: provider.id, enabled },
 			{
-				onSuccess: () => void invalidate(),
-				onError: (error) =>
-					setFailure(getOrpcErrorMessage(error, { fallback: t`Couldn't turn the provider on or off. Try again.` })),
+				onSuccess: (saved) => {
+					queryClient.setQueryData(orpc.aiProviders.list.queryKey(), (list) =>
+						list?.map((item) => (item.id === saved.id ? saved : item)),
+					);
+					void invalidate();
+				},
+				onError: (error) => {
+					setFailure(
+						getOrpcErrorMessage(error, {
+							fallback: t`Couldn't turn the provider on or off. Try again.`,
+							allowServerMessage: true,
+						}),
+					);
+					void invalidate();
+				},
 			},
 		);
+	};
 
 	return (
 		<>
 			<DialogHeader>
 				<DialogTitle>{provider.label}</DialogTitle>
-				<DialogDescription>{providerLabel(provider.provider)}</DialogDescription>
+				<DialogDescription>
+					{providerLabel(provider.provider)} ·{" "}
+					<Trans>
+						Changing the key, model or address pauses scheduled AI work. Re-enable each schedule to approve its
+						destination.
+					</Trans>
+				</DialogDescription>
 			</DialogHeader>
 			<form
+				noValidate
 				className="grid gap-4"
 				onSubmit={(event) => {
 					event.preventDefault();
-					if (changed && !keyMissing) void save();
+					if (changed && !keyMissing && valid) void save();
 				}}
 			>
 				<ProviderFieldsForm
@@ -682,6 +656,8 @@ function EditProviderForm({ provider, onClose }: EditProviderFormProps) {
 								!(await confirm(t`Delete “${provider.label}”?`, {
 									description: t`Its saved key is deleted. Conversations using it need another provider.`,
 									confirmText: t`Delete provider`,
+									cancelText: t`Keep provider`,
+									variant: "danger",
 								}))
 							)
 								return;
@@ -702,7 +678,7 @@ function EditProviderForm({ provider, onClose }: EditProviderFormProps) {
 					</Button>
 					<Button
 						type="submit"
-						disabled={!changed || keyMissing || update.isPending || test.isPending}
+						disabled={!changed || keyMissing || !valid || update.isPending || test.isPending}
 						loading={update.isPending || test.isPending}
 					>
 						<Trans>Save and test</Trans>

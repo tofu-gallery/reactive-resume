@@ -10,17 +10,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { createRouterClient } from "@orpc/server";
 
 const { dbMock, dbState } = vi.hoisted(() => {
-	const state = { rows: [] as Record<string, unknown>[] };
+	const state = { rows: [] as Record<string, unknown>[], requests: [] as Record<string, unknown>[] };
 
-	const selectChain = {
-		from: () => selectChain,
-		where: () => selectChain,
-		orderBy: async () => state.rows,
-		limit: async () => state.rows,
+	const select = () => {
+		let rows = state.rows;
+		const chain = {
+			from: (table: { id?: unknown }) => {
+				rows = table.id === "user.id" ? [{ id: "user-1", email: "kaushik@example.test" }] : state.rows;
+				return chain;
+			},
+			where: () => chain,
+			for: async () => rows,
+			orderBy: async () => rows,
+			limit: async () => rows,
+		};
+		return chain;
 	};
 
 	const db = {
-		select: () => selectChain,
+		select,
+		transaction: async (run: (tx: unknown) => Promise<unknown>) => run(db),
+		execute: async () => undefined,
+		insert: () => ({ values: async (values: Record<string, unknown>) => void state.requests.push(values) }),
 		update: () => ({
 			set: (values: Record<string, unknown>) => ({
 				where: () => {
@@ -36,14 +47,22 @@ const { dbMock, dbState } = vi.hoisted(() => {
 
 vi.mock("@reactive-resume/db/client", () => ({ db: dbMock }));
 vi.mock("@reactive-resume/db/schema", () => ({
-	aiProvider: { id: "ai_provider.id", userId: "ai_provider.user_id" },
+	aiProvider: {
+		id: "ai_provider.id",
+		userId: "ai_provider.user_id",
+		fastModel: "ai_provider.fast_model",
+		capableModel: "ai_provider.capable_model",
+		baseUrl: "ai_provider.base_url",
+	},
 	user: { id: "user.id" },
+	aiRequest: {},
 }));
 vi.mock("drizzle-orm", () => ({
 	and: (...conditions: unknown[]) => ({ conditions }),
 	asc: (value: unknown) => ({ value }),
 	desc: (value: unknown) => ({ value }),
 	eq: (left: unknown, right: unknown) => ({ left, right }),
+	isNull: (value: unknown) => ({ value }),
 	sql: () => ({}),
 }));
 
@@ -51,6 +70,7 @@ vi.mock("drizzle-orm", () => ({
 vi.mock("@reactive-resume/env/server", () => ({
 	env: {
 		APP_URL: "http://localhost:3000",
+		AUTH_SECRET: "synthetic-test-auth-secret",
 		ENCRYPTION_SECRET: "e2e-encryption-secret",
 		FLAG_ALLOW_UNSAFE_AI_BASE_URL: true,
 	},
@@ -75,6 +95,7 @@ const client = createRouterClient(aiProvidersRouter, {
 
 function seedProvider(overrides: Record<string, unknown> = {}) {
 	const credential = encryptCredential("sk-live-demo-key-1234");
+	dbState.requests = [];
 
 	dbState.rows = [
 		{
@@ -83,6 +104,8 @@ function seedProvider(overrides: Record<string, unknown> = {}) {
 			label: "My provider",
 			provider: "openai",
 			model: "gpt-4.1",
+			fastModel: null,
+			capableModel: null,
 			baseUrl: "https://api.openai.test/v1",
 			enabled: false,
 			isDefault: false,
@@ -130,6 +153,15 @@ describe("POST /ai-providers/{id}/test — end to end", () => {
 		expect(response.testError).toBe("OpenAI rejected the API key. Check the key and test again.");
 		expect(response.enabled).toBe(false);
 		expect(dbState.rows[0]?.testError).toBe("OpenAI rejected the API key. Check the key and test again.");
+		expect(dbState.requests).toEqual([
+			expect.objectContaining({
+				userId: "user-1",
+				providerId: "provider-1",
+				action: "provider-test",
+				provider: "openai",
+				model: "gpt-4.1",
+			}),
+		]);
 	});
 
 	it("never leaks the decrypted API key into the persisted error", async () => {
@@ -139,6 +171,66 @@ describe("POST /ai-providers/{id}/test — end to end", () => {
 
 		expect(response.testError).not.toContain("sk-live-demo-key-1234");
 		expect(response.testError).toContain("***");
+	});
+
+	it("tests every configured task model before the connection becomes ready", async () => {
+		seedProvider({ fastModel: "gpt-4.1-mini", capableModel: "gpt-4.1" });
+		const testedModels: string[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_url: string, init?: RequestInit) => {
+				const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+				if (body.model) testedModels.push(body.model);
+				return new Response(
+					JSON.stringify({
+						id: "chatcmpl-test",
+						object: "chat.completion",
+						created: 0,
+						model: body.model,
+						choices: [{ index: 0, message: { role: "assistant", content: "1" }, finish_reason: "stop" }],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}),
+		);
+
+		const response = await client.test({ id: "provider-1" });
+
+		expect(testedModels).toEqual(["gpt-4.1", "gpt-4.1-mini"]);
+		expect(dbState.requests.map((request) => request.model)).toEqual(testedModels);
+		expect(response.testStatus).toBe("success");
+		expect(response.enabled).toBe(true);
+	});
+
+	it("keeps the connection off when a configured task model is unsupported", async () => {
+		seedProvider({ fastModel: "not-a-real-model" });
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_url: string, init?: RequestInit) => {
+				const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+				if (body.model === "not-a-real-model")
+					return new Response(JSON.stringify({ error: { message: "The model does not exist." } }), {
+						status: 404,
+						headers: { "Content-Type": "application/json" },
+					});
+				return new Response(
+					JSON.stringify({
+						id: "chatcmpl-test",
+						object: "chat.completion",
+						created: 0,
+						model: body.model,
+						choices: [{ index: 0, message: { role: "assistant", content: "1" }, finish_reason: "stop" }],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}),
+		);
+
+		const response = await client.test({ id: "provider-1" });
+
+		expect(response.testStatus).toBe("failure");
+		expect(response.enabled).toBe(false);
+		expect(response.testError).toContain('"not-a-real-model"');
 	});
 
 	it("still rejects with BAD_REQUEST when the base URL is not permitted", async () => {

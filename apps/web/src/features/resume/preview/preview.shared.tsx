@@ -1,6 +1,9 @@
 import type { PageMap } from "@reactive-resume/pdf/page-map";
 import type { ResumeData } from "@reactive-resume/schema/resume/data";
 import type { CSSProperties, ReactNode } from "react";
+import { i18n } from "@lingui/core";
+import { ph } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Spinner } from "@reactive-resume/ui/components/spinner";
 import { cn } from "@reactive-resume/utils/style";
 import { DEFAULT_PDF_PAGE_SIZE, getResumePreviewGapValue, getScaledPreviewPageSize } from "./preview.shared.utils";
@@ -15,6 +18,8 @@ export type ResumePreviewProps = {
 	showPageNumbers?: boolean;
 	/** Letters show the sender's header, which a document with only a letter otherwise leaves out. */
 	includeCoverLetterHeader?: boolean;
+	/** The name of the text version screen readers read in place of the page images ("Resume content" by default). */
+	contentLabel?: string;
 	/** Drawn above each page (e.g. "Page 1 · Letter"). Replaces the small page-number caption. */
 	renderPageCaption?: (page: { pageNumber: number; totalPages: number }) => ReactNode;
 	/** Drawn over each page, in page-relative coordinates; receives the page map of the render on screen. */
@@ -24,7 +29,7 @@ export type ResumePreviewProps = {
 	onRender?: (render: { pageCount: number; pageMap: PageMap | undefined; file: Blob }) => void;
 };
 
-type ResumePreviewLoaderProps = Pick<ResumePreviewProps, "pageClassName" | "showPageNumbers"> & {
+type ResumePreviewLoaderProps = Pick<ResumePreviewProps, "pageClassName" | "showPageNumbers" | "data"> & {
 	pageCount?: number;
 	pageGap?: CSSProperties["gap"];
 	pageLayout?: "horizontal" | "vertical";
@@ -34,6 +39,7 @@ type ResumePreviewLoaderProps = Pick<ResumePreviewProps, "pageClassName" | "show
 };
 
 export function ResumePreviewLoader({
+	data,
 	pageCount = 1,
 	pageClassName,
 	pageGap = 16,
@@ -42,7 +48,9 @@ export function ResumePreviewLoader({
 	showPageNumbers = false,
 	failure,
 }: ResumePreviewLoaderProps) {
-	const pageSize = getScaledPreviewPageSize(DEFAULT_PDF_PAGE_SIZE, pageScale);
+	const { t } = useLingui();
+	const baseSize = data?.metadata.page.format === "letter" ? { width: 612, height: 792 } : DEFAULT_PDF_PAGE_SIZE;
+	const pageSize = getScaledPreviewPageSize(baseSize, pageScale);
 	const resolvedPageGap = getResumePreviewGapValue(pageGap);
 
 	return (
@@ -62,13 +70,19 @@ export function ResumePreviewLoader({
 					<figure key={pageNumber} className="shrink-0">
 						{showPageNumbers ? (
 							<figcaption className="mb-1 text-[0.625rem] font-medium text-ink-3">
-								Page {pageNumber} of {pageCount}
+								<Trans>
+									Page {ph({ pageNumber: i18n.number(pageNumber) })} of {ph({ pageCount: i18n.number(pageCount) })}
+								</Trans>
 							</figcaption>
 						) : null}
 
 						<div
 							role={failure ? undefined : "img"}
-							aria-label={failure ? undefined : `Loading resume page ${pageNumber} of ${pageCount}`}
+							aria-label={
+								failure
+									? undefined
+									: t`Loading resume page ${ph({ pageNumber: i18n.number(pageNumber) })} of ${ph({ pageCount: i18n.number(pageCount) })}`
+							}
 							style={pageSize}
 							className={cn(
 								"flex aspect-page items-center justify-center overflow-hidden rounded-md bg-white text-ink-3",

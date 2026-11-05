@@ -18,7 +18,13 @@ import { Input } from "@reactive-resume/ui/components/input";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { cn } from "@reactive-resume/utils/style";
 import { formatVersionMoment, formatVersionTime, getVersionDetail, getVersionTitle } from "./format";
-import { savePendingChanges, useCurrentResume, useResumeStore } from "@/features/resume/builder/draft";
+import { AiResultUsage } from "@/features/ai/usage";
+import {
+	savePendingChanges,
+	useCurrentResume,
+	useResumeStore,
+	withOwnServerWrite,
+} from "@/features/resume/builder/draft";
 import { useEditorStore } from "@/features/resume/editor/store";
 import { useConfirm, usePrompt } from "@/hooks/use-confirm";
 import { getResumeErrorMessage } from "@/libs/error-message";
@@ -47,7 +53,23 @@ export type HistorySource = {
 
 /** History for the resume in the editor. */
 export function HistoryTab() {
-	return <HistoryTimeline source={useResumeHistory()} />;
+	const resume = useCurrentResume();
+	const versionId = useEditorStore((state) => state.historyVersionId);
+	const version = useQuery({
+		...orpc.resume.getVersion.queryOptions({ input: { resumeId: resume.id, versionId: versionId ?? "" } }),
+		enabled: versionId !== null,
+	});
+	const selected = versionId && version.data?.id === versionId ? version.data : null;
+	return (
+		<>
+			{selected ? (
+				<AiResultUsage usage={selected.aiUsage} />
+			) : !versionId && (resume.aiOperationIds?.length ?? 0) > 0 ? (
+				<AiResultUsage usage={resume.aiUsage} />
+			) : null}
+			<HistoryTimeline source={useResumeHistory()} />
+		</>
+	);
 }
 
 function useResumeHistory(): HistorySource {
@@ -74,7 +96,9 @@ function useResumeHistory(): HistorySource {
 		restore: async (versionId) => {
 			if (!(await savePendingChanges(resume.id)))
 				throw new Error(t`Couldn't save your changes. Try again before continuing.`);
-			const restored = await orpc.resume.restoreVersion.call({ resumeId: resume.id, versionId });
+			const restored = await withOwnServerWrite(resume.id, () =>
+				orpc.resume.restoreVersion.call({ resumeId: resume.id, versionId, proposalSafety: "v1" }),
+			);
 			useResumeStore.getState().replaceResumeFromServer(restored as Resume);
 			queryClient.setQueryData(orpc.resume.getById.queryKey({ input: { id: resume.id } }), {
 				...restored,
@@ -132,7 +156,9 @@ export function HistoryTimeline({ source }: { source: HistorySource }) {
 			await source.restore(version.id);
 			useEditorStore.setState({ historyVersionId: null });
 			toast.add({
-				description: t`Restored the version from ${formatVersionMoment(version.createdAt, i18n.locale)}. Your previous state is saved as “Before restore”.`,
+				description: version.name
+					? t`Restored “${version.name}”. Your previous state is saved as “Before restoring “${version.name}””.`
+					: t`Restored the version from ${formatVersionMoment(version.createdAt, i18n.locale)}. Your previous state is saved as “Before restore”.`,
 			});
 		});
 
@@ -277,7 +303,9 @@ function NamedVersionMenu({ version, source }: { version: HistoryVersion; source
 	const failed = (error: unknown) => toast.add({ type: "error", description: source.errorMessage(error) });
 
 	const rename = async () => {
-		const name = (await prompt(t`Rename version`, { defaultValue: version.name ?? "" }))?.trim();
+		const name = (
+			await prompt(t`Rename version`, { defaultValue: version.name ?? "", confirmText: t`Rename` })
+		)?.trim();
 		if (!name || name === version.name) return;
 		await source.rename(version.id, name).catch(failed);
 	};
@@ -286,6 +314,7 @@ function NamedVersionMenu({ version, source }: { version: HistoryVersion; source
 		const confirmed = await confirm(t`Delete “${title}”?`, {
 			description: t`Named versions are kept until you delete them. This can't be undone.`,
 			confirmText: t`Delete version`,
+			variant: "danger",
 		});
 		if (!confirmed) return;
 		try {

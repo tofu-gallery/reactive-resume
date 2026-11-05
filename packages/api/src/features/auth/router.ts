@@ -4,13 +4,24 @@ import { createSelectSchema } from "drizzle-zod";
 import z from "zod";
 import { accountAuth, auth } from "@reactive-resume/auth/config";
 import * as schema from "@reactive-resume/db/schema";
-import { careerProfileDataSchema, careerWorkspaceSchema } from "@reactive-resume/schema/career";
+import { env } from "@reactive-resume/env/server";
+import { applicationProfileRecordSchema } from "@reactive-resume/schema/application-profile";
+import { applicationPipelineSchema } from "@reactive-resume/schema/applications/lanes";
+import {
+	careerProfileDataSchema,
+	careerWorkspaceDataSchema,
+	submissionReviewSchema,
+	discoverySourceSchema,
+} from "@reactive-resume/schema/career";
 import { coverLetterSchema } from "@reactive-resume/schema/cover-letter/data";
+import { accountBackupLimits, accountUploadSkipReasons } from "@reactive-resume/utils/account-zip";
+import { localeSchema } from "@reactive-resume/utils/locale";
 import { timezoneSchema } from "@reactive-resume/utils/timezone";
 import { protectedProcedure, publicProcedure } from "../../context";
 import { applicationDto } from "../../dto/application";
 import {
 	savedItemSchema,
+	reviewedAnswerSchema,
 	careerFactSchema,
 	careerNotificationSchema,
 	careerScheduleSchema,
@@ -53,20 +64,23 @@ export const authRouter = {
 			tags: ["Authentication"],
 			operationId: "getProfile",
 			summary: "Get your profile",
-			description: "Returns only the authenticated user's profile and timezone. No secrets are included.",
+			description:
+				"Returns only the authenticated user's profile, timezone and interface language (null until an app reports one). No secrets are included.",
 		})
 		.input(z.object({}).optional())
 		.output(
-			createSelectSchema(schema.user).pick({
-				id: true,
-				name: true,
-				username: true,
-				displayUsername: true,
-				image: true,
-				email: true,
-				emailVerified: true,
-				timezone: true,
-			}),
+			createSelectSchema(schema.user)
+				.pick({
+					id: true,
+					name: true,
+					username: true,
+					displayUsername: true,
+					image: true,
+					email: true,
+					emailVerified: true,
+					timezone: true,
+				})
+				.extend({ locale: localeSchema.nullable() }),
 		)
 		.handler(({ context }) => authService.getProfile(context.user.id)),
 
@@ -78,7 +92,7 @@ export const authRouter = {
 			operationId: "updateProfile",
 			summary: "Update your profile",
 			description:
-				"Updates only the authenticated user's name, username, image, or timezone. Usernames must be unique.",
+				"Updates only the authenticated user's name, username, image, timezone, or interface language. The language picks the language of account emails. Usernames must be unique.",
 		})
 		.input(
 			z.object({
@@ -92,6 +106,7 @@ export const authRouter = {
 					.optional(),
 				image: z.url().nullable().optional(),
 				timezone: timezoneSchema.optional(),
+				locale: localeSchema.optional(),
 			}),
 		)
 		.output(z.object({ status: z.boolean() }))
@@ -101,6 +116,7 @@ export const authRouter = {
 				...(input.username !== undefined ? { username: input.username } : {}),
 				...(input.image !== undefined ? { image: input.image } : {}),
 				...(input.timezone !== undefined ? { timezone: input.timezone } : {}),
+				...(input.locale !== undefined ? { locale: input.locale } : {}),
 			}),
 		),
 
@@ -149,6 +165,52 @@ export const authRouter = {
 			.input(z.object({ keyId: z.string().min(1) }))
 			.output(z.object({ success: z.boolean() }))
 			.handler(({ context, input }) => accountAuth.deleteApiKey(context.user, input.keyId)),
+	},
+
+	connections: {
+		list: accountProcedure
+			.route({
+				method: "GET",
+				path: "/auth/connections",
+				tags: ["Authentication"],
+				operationId: "listConnectedApplications",
+				summary: "List connected applications",
+				description:
+					"Lists the applications you allowed through OAuth, newest first, with their registered names and granted scopes.",
+			})
+			.input(z.object({}).optional())
+			.output(
+				z.object({
+					connections: z.array(
+						z.object({
+							id: z.string(),
+							clientId: z.string(),
+							clientName: z.string().nullable(),
+							scopes: z.array(z.string()),
+							createdAt: z.date().nullable(),
+						}),
+					),
+				}),
+			)
+			.handler(async ({ context }) => ({ connections: await accountAuth.listConnections(context.user) })),
+
+		delete: accountProcedure
+			.route({
+				method: "DELETE",
+				path: "/auth/connections/{id}",
+				tags: ["Authentication"],
+				operationId: "deleteConnectedApplication",
+				summary: "Disconnect an application",
+				description:
+					"Disconnects an application you allowed through OAuth. Its tokens stop working at once; to use it again, connect it from the application.",
+			})
+			.input(z.object({ id: z.string().min(1) }))
+			.output(z.object({ success: z.boolean() }))
+			.handler(async ({ context, input }) => {
+				if (!(await accountAuth.revokeConnection(context.user, input.id)))
+					throw new ORPCError("NOT_FOUND", { message: "No connected application with that ID." });
+				return { success: true };
+			}),
 	},
 
 	providers: {
@@ -206,6 +268,32 @@ export const authRouter = {
 			return { key: result.key };
 		}),
 
+	setPassword: accountProcedure
+		.route({
+			// Session only: keys and OAuth tokens can't add a password.
+			spec: (operation) => ({ ...operation, security: [{ cookieAuth: [] }] }),
+			method: "POST",
+			path: "/auth/password",
+			tags: ["Authentication"],
+			operationId: "setPassword",
+			summary: "Set a password",
+			description:
+				"Adds a password to an account that signs in another way (a social account or passkey). Unlike a password reset, it keeps other devices signed in and keeps API keys, passkeys and connected apps. Requires a recent browser session.",
+		})
+		.input(z.object({ newPassword: z.string().min(8).max(64) }))
+		.output(z.void())
+		.handler(async ({ context, input }) => {
+			if (context.authentication?.method !== "session")
+				throw new ORPCError("FORBIDDEN", { message: "Set a password from Settings in a web browser." });
+			if (env.FLAG_DISABLE_EMAIL_AUTH)
+				throw new ORPCError("FORBIDDEN", { message: "Password sign-in is turned off on this server." });
+			await assertRecentSignIn(context.reqHeaders);
+			await auth.api.setPassword({
+				body: { newPassword: input.newPassword },
+				headers: context.reqHeaders ?? new Headers(),
+			});
+		}),
+
 	exportData: protectedProcedure
 		.use(accountRateLimit)
 		.route({
@@ -215,13 +303,24 @@ export const authRouter = {
 			operationId: "exportAccountData",
 			summary: "Export user account data",
 			description:
-				"Returns a JSON-serializable export of the authenticated user's profile, documents, applications, career knowledge, preparation, schedules and coaching conversations. Images remain URL references; coaching attachments include storage references. Secrets such as password hashes, tokens, and API keys are never included. Requires authentication.",
+				"Returns the authenticated user's profile, documents and version histories, applications, Career records and feedback. Set includeUploads to include bounded base64 bytes for files referenced by exported records, with explicit omissions; external URLs are not fetched. Secrets such as password hashes, tokens and API keys are never included.",
 			successDescription: "The user's exported account data.",
 		})
-		.input(z.object({}).optional())
+		.input(z.object({ includeUploads: z.union([z.boolean(), z.literal("")]).optional() }).optional())
 		.output(
 			z.object({
 				exportedAt: z.string(),
+				uploads: z
+					.object({
+						files: z
+							.array(
+								z.object({ key: z.string(), base64: z.string().max(Math.ceil(accountBackupLimits.fileBytes / 3) * 4) }),
+							)
+							.max(accountBackupLimits.files),
+						skipped: z.array(z.object({ key: z.string(), reason: z.enum(accountUploadSkipReasons) })),
+					})
+					.optional(),
+				applicationProfile: applicationProfileRecordSchema.nullable().optional(),
 				user: createSelectSchema(schema.user).pick({
 					id: true,
 					name: true,
@@ -229,16 +328,53 @@ export const authRouter = {
 					username: true,
 					displayUsername: true,
 					image: true,
+					timezone: true,
+					locale: true,
 					emailVerified: true,
 					createdAt: true,
 					updatedAt: true,
 				}),
 				resumes: z.array(resumeDto.getById.output.omit({ hasPassword: true, applicationId: true })),
 				coverLetters: z.array(coverLetterSchema),
-				applications: z.array(applicationDto.getById.output),
+				documentVersions: z
+					.object({
+						// Preserve historical JSON verbatim; current document parsing can normalize old snapshots.
+						resumes: z.array(
+							createSelectSchema(schema.resumeVersion, { data: z.record(z.string(), z.unknown()) }).omit({
+								userId: true,
+							}),
+						),
+						letters: z.array(
+							createSelectSchema(schema.coverLetterVersion, { data: z.record(z.string(), z.unknown()) }).omit({
+								userId: true,
+							}),
+						),
+					})
+					.optional(),
+				applications: z.array(
+					applicationDto.getById.output.extend({
+						submittedAt: z
+							.date()
+							.nullable()
+							.describe(
+								"First recorded submission time, retained after later stage changes; null when no submission is recorded.",
+							),
+					}),
+				),
+				applicationPipeline: applicationPipelineSchema,
 				aiContentReports: z.array(createSelectSchema(schema.aiContentReport)),
 				career: z.object({
+					aiRequests: z.array(createSelectSchema(schema.aiRequest).omit({ userId: true })).optional(),
+					writingReviews: z
+						.array(
+							createSelectSchema(schema.resumeWritingReview, {
+								passages: z.array(z.object({ id: z.string(), where: z.string(), text: z.string() })).nullable(),
+								review: z.record(z.string(), z.unknown()).nullable(),
+							}).omit({ userId: true, requestGeneration: true }),
+						)
+						.optional(),
 					profile: careerProfileDataSchema,
+					reviewedAnswers: z.array(reviewedAnswerSchema),
 					facts: z.array(careerFactSchema.omit({ usedBy: true, company: true })),
 					stories: z.array(careerStorySchema),
 					artifacts: z.array(savedItemSchema),
@@ -252,14 +388,41 @@ export const authRouter = {
 						}),
 					),
 					attachments: z.array(createSelectSchema(schema.agentAttachment)),
-					opportunities: z.array(createSelectSchema(schema.careerOpportunity)),
+					opportunities: z.array(
+						createSelectSchema(schema.careerOpportunity, { discoverySource: discoverySourceSchema.nullable() }),
+					),
 					jobs: z.array(createSelectSchema(schema.careerJob)),
 					transcripts: z.array(createSelectSchema(schema.careerTranscript)),
-					workspaces: z.array(createSelectSchema(schema.careerWorkspace, { data: careerWorkspaceSchema })),
+					workspaces: z.array(
+						createSelectSchema(schema.careerWorkspace, {
+							data: careerWorkspaceDataSchema,
+							submissionReview: submissionReviewSchema.nullable(),
+						}),
+					),
 				}),
+				feedback: z
+					.object({
+						links: z.array(
+							createSelectSchema(schema.feedbackLink, { snapshot: z.record(z.string(), z.unknown()) }).omit({
+								userId: true,
+							}),
+						),
+						comments: z.array(createSelectSchema(schema.feedbackComment).omit({ userId: true })),
+						events: z.array(createSelectSchema(schema.feedbackEvent).omit({ userId: true })),
+					})
+					.optional(),
 			}),
 		)
-		.handler(({ context }) => authService.exportData({ userId: context.user.id })),
+		.handler(({ context, input, signal }) => {
+			const bindings = [context.reqHeaders.get("x-account-id"), context.rpcItemAccountId];
+			if (bindings.some((id) => id && id !== context.user.id))
+				throw new ORPCError("CONFLICT", { message: "This export belongs to another account. Reload and try again." });
+			return authService.exportData({
+				userId: context.user.id,
+				includeUploads: input?.includeUploads === true,
+				signal,
+			});
+		}),
 
 	deleteAccount: protectedProcedure
 		.route({

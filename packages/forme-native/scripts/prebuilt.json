@@ -3,10 +3,10 @@
 	"artifacts": [
 		{
 			"version": "0.0.0",
-			"sourceHash": "c563664b4180a72b103ed966a7c910cd5a2d25f2c84f4825ad6a0e44fe73ad1e",
-			"tag": "forme-native-v0.0.0-c563664b4180a72b103ed966a7c910cd5a2d25f2c84f4825ad6a0e44fe73ad1e",
-			"url": "https://github.com/reactive-resume/reactive-resume/releases/download/forme-native-v0.0.0-c563664b4180a72b103ed966a7c910cd5a2d25f2c84f4825ad6a0e44fe73ad1e/forme-native-v0.0.0-c563664b4180a72b103ed966a7c910cd5a2d25f2c84f4825ad6a0e44fe73ad1e.tar.gz",
-			"sha256": "7359eea1acf8748d4e6d2299c608eb03a7fb43f6f7018a970abb2cac8bb0d28d"
+			"sourceHash": "f7a5ce86fcfafb330e8f8b0b05a9403e132f0185bf7b74ef8ff411dedf05ceb9",
+			"tag": "forme-native-v0.0.0-f7a5ce86fcfafb330e8f8b0b05a9403e132f0185bf7b74ef8ff411dedf05ceb9",
+			"url": "https://github.com/reactive-resume/reactive-resume/releases/download/forme-native-v0.0.0-f7a5ce86fcfafb330e8f8b0b05a9403e132f0185bf7b74ef8ff411dedf05ceb9/forme-native-v0.0.0-f7a5ce86fcfafb330e8f8b0b05a9403e132f0185bf7b74ef8ff411dedf05ceb9.tar.gz",
+			"sha256": "35de36782db52799416e729e4d3814bea01548af09b3a4cdbf6bb4bcbf0b1e27"
 		}
 	]
 }

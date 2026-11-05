@@ -1,21 +1,28 @@
+import type { ComponentRef } from "react";
+import type { Pressable } from "react-native";
 import type { EnrichedTextInputInstance } from "react-native-enriched-html";
 import { useLingui } from "@lingui/react/macro";
 import { useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
-import { View } from "react-native";
+import { AccessibilityInfo, View } from "react-native";
 import { EnrichedTextInput } from "react-native-enriched-html";
+import { isValidSlug, MAX_SLUG_LENGTH, normalizeSlug } from "@reactive-resume/resume/sharing";
+import { isolate } from "@reactive-resume/utils/string";
 import { client } from "@/api/client";
 import { resumeFieldFocus, useResumeStore } from "@/draft";
-import { resume as draftResume } from "@/draft/runtime";
+import { TranslateResume } from "@/features/assistant/translate-resume";
 import { useNewDocuments } from "@/features/documents/new-documents";
 import { useDocumentOperations } from "@/features/documents/queries";
+import { useExistingTags } from "@/features/documents/tag-suggestions";
 import { flushResume } from "@/features/share/document";
 import { printResume } from "@/features/share/files";
-import { normalizeSlug, validSlug } from "@/features/share/model";
+import { setResumeLocked } from "@/features/share/revision";
+import { confirmUndone } from "@/lib/undone";
 import { routes } from "@/routes";
 import { useBuilderChrome } from "@/shell/builder-chrome";
 import { useKeyCommands } from "@/shell/key-commands";
-import { Banner, Button, IconButton, ListRow, Sheet, Text, TextField, showToast, useTheme } from "@/ui";
+import { useShortcutHelp } from "@/shell/shortcut-help";
+import { Banner, Button, ChipInput, IconButton, ListRow, Sheet, Text, TextField, showToast, useTheme } from "@/ui";
 
 type DocumentMenuProps = {
 	id: string;
@@ -30,9 +37,15 @@ export function DocumentMenu({ id, inChrome = false }: DocumentMenuProps) {
 	const draft = useResumeStore();
 	const resume = draft.document?.id === id ? draft.document : null;
 	const operations = useDocumentOperations();
-	const [panel, setPanel] = useState<"menu" | "rename" | "duplicate" | "notes" | "details" | null>(null);
+	const [panel, setPanel] = useState<"menu" | "rename" | "duplicate" | "tags" | "notes" | "details" | null>(null);
+	const [translating, setTranslating] = useState(false);
 	const [name, setName] = useState("");
+	const [tags, setTags] = useState<string[]>([]);
+	const commitTags = useRef<(() => string[]) | null>(null);
+	const tagSuggestions = useExistingTags(["resume"], panel === "tags");
 	const [slug, setSlug] = useState("");
+	const helpRequested = useRef(false);
+	const menuTrigger = useRef<ComponentRef<typeof Pressable>>(null);
 	const pending = useRef(Promise.resolve(false));
 	const [printing, setPrinting] = useState(false);
 	const printingRef = useRef(false);
@@ -59,19 +72,42 @@ export function DocumentMenu({ id, inChrome = false }: DocumentMenuProps) {
 				setPrinting(false);
 			});
 	};
-	useBuilderChrome(inChrome ? { onMenu: resume ? openMenu : undefined } : {});
+	useBuilderChrome(inChrome ? { onMenu: resume ? openMenu : undefined, menuRef: menuTrigger } : {});
 	useKeyCommands(inChrome ? [{ id: "print", input: "p", title: t`Print`, run: print }] : []);
 	const titles = {
 		menu: t`Document options`,
 		rename: t`Rename`,
 		duplicate: t`Duplicate resume`,
+		tags: t`Tags`,
 		notes: t`Notes`,
 		details: t`Resume details`,
 	};
 	return (
 		<>
-			{!inChrome && <IconButton icon="dots-three" label={t`Document options`} disabled={!resume} onPress={openMenu} />}
-			<Sheet open={!!panel} title={panel ? titles[panel] : undefined} onClose={close} detents={[0.5, 0.9]}>
+			{translating && <TranslateResume resumeId={id} onClose={() => setTranslating(false)} />}
+			{!inChrome && (
+				<IconButton
+					ref={menuTrigger}
+					icon="dots-three"
+					label={t`Document options`}
+					disabled={!resume}
+					onPress={openMenu}
+				/>
+			)}
+			<Sheet
+				onDismissed={() => {
+					if (helpRequested.current) {
+						helpRequested.current = false;
+						useShortcutHelp.getState().show(() => {
+							if (menuTrigger.current) AccessibilityInfo.sendAccessibilityEvent(menuTrigger.current, "focus");
+						});
+					}
+				}}
+				open={!!panel}
+				title={panel ? titles[panel] : undefined}
+				onClose={close}
+				detents={[0.5, 0.9]}
+			>
 				{resume && (
 					<View style={{ padding: space.s4, gap: space.s3 }}>
 						{operations.error && <Banner tone="danger" message={operations.error} />}
@@ -88,10 +124,44 @@ export function DocumentMenu({ id, inChrome = false }: DocumentMenuProps) {
 									title={t`Duplicate`}
 									leading="copy"
 									disabled={operations.busy || printing}
+									onPress={() =>
+										void operations.run(async () => {
+											setName(await client.documents.suggestDuplicateName({ type: "resume", id }));
+											setSlug("");
+											setPanel("duplicate");
+										})
+									}
+								/>
+								{/* The library's job copy, from inside the editor (web's builder menu has it too). */}
+								<ListRow
+									title={t`Translate into…`}
+									leading="translate"
+									disabled={operations.busy || printing}
 									onPress={() => {
-										setName(t`${resume.name} (copy)`.slice(0, 100));
-										setSlug("");
-										setPanel("duplicate");
+										setPanel(null);
+										setTranslating(true);
+									}}
+								/>
+								<ListRow
+									title={t`Copy for a job…`}
+									leading="briefcase"
+									disabled={operations.busy || printing}
+									onPress={() =>
+										void run(async () => {
+											// The copy is made from the saved resume: save the open draft first, as Duplicate does.
+											await flushResume(id);
+											setPanel(null);
+											router.push({ pathname: "/new", params: { step: "copy", sourceResumeId: id } });
+										})
+									}
+								/>
+								<ListRow
+									title={t`Tags…`}
+									leading="tag"
+									disabled={resume.isLocked || operations.busy}
+									onPress={() => {
+										setTags(resume.tags);
+										setPanel("tags");
 									}}
 								/>
 								<ListRow
@@ -100,10 +170,8 @@ export function DocumentMenu({ id, inChrome = false }: DocumentMenuProps) {
 									disabled={operations.busy || printing}
 									onPress={() =>
 										void run(async () => {
-											if (!resume.isLocked) await flushResume(id);
-											await client.documents.setLocked({ type: "resume", id, isLocked: !resume.isLocked });
-											// Metadata-only change: refresh keeps undo history and skips a draft that is no longer this resume.
-											await draftResume.refresh();
+											// Through the open draft's revision: Undo and the next autosave build on it.
+											await setResumeLocked(id, !resume.isLocked);
 										})
 									}
 								/>
@@ -128,6 +196,14 @@ export function DocumentMenu({ id, inChrome = false }: DocumentMenuProps) {
 										router.push(routes.history(id));
 									}}
 								/>
+								<ListRow
+									title={t`Keyboard shortcuts`}
+									leading="keyboard"
+									onPress={() => {
+										helpRequested.current = true;
+										setPanel(null);
+									}}
+								/>
 								<ListRow title={t`Print`} leading="printer" disabled={operations.busy || printing} onPress={print} />
 								<ListRow
 									title={t`Move to Trash`}
@@ -141,13 +217,25 @@ export function DocumentMenu({ id, inChrome = false }: DocumentMenuProps) {
 											await useResumeStore.getState().close();
 											router.replace(routes.documents());
 											showToast({
-												message: t`“${resume.name}” moved to Trash`,
+												message: t`“${isolate(resume.name)}” moved to Trash`,
 												action: {
 													label: t`Undo`,
 													onPress: () => {
-														void pending.current.then(() =>
-															operations.run(() => client.documents.restore({ type: "resume", id })),
-														);
+														// Counted by the server: one already restored elsewhere, or deleted, isn't confirmed.
+														let restored = 0;
+														void pending.current
+															.then(() =>
+																operations.run(async () => {
+																	restored = (
+																		await client.documents.restoreMany({ documents: [{ type: "resume", id }] })
+																	).restored;
+																}),
+															)
+															.then((done) => {
+																if (done && restored > 0) confirmUndone();
+																else if (done)
+																	showToast({ message: t`Nothing to undo: it was already restored or deleted.` });
+															});
 													},
 												},
 											});
@@ -173,11 +261,45 @@ export function DocumentMenu({ id, inChrome = false }: DocumentMenuProps) {
 										void run(async () => {
 											await flushResume(id);
 											useResumeStore.getState().updateDocument((value) => {
+												if (value.id !== id) return;
 												value.name = name.trim();
 											});
 											await flushResume(id);
 										})
 									}
+								/>
+							</>
+						)}
+						{panel === "tags" && (
+							<>
+								<View pointerEvents={operations.busy || resume.isLocked ? "none" : "auto"}>
+									<ChipInput
+										commitRef={commitTags}
+										label={t`Tags`}
+										values={tags}
+										onChange={setTags}
+										suggestions={tagSuggestions}
+										suggestionsLabel={t`Your tags`}
+									/>
+								</View>
+								<Text variant="caption" color="ink3">{t`Up to 20 tags per document, 40 characters per tag.`}</Text>
+								<Button
+									label={t`Save`}
+									loading={operations.busy}
+									disabled={resume.isLocked || tags.length > 20 || tags.some((tag) => !tag.trim() || tag.length > 40)}
+									onPress={() => {
+										if (operations.busy || resume.isLocked) return;
+										const next = commitTags.current?.() ?? tags;
+										if (next.length > 20 || next.some((tag) => !tag.trim() || tag.length > 40)) return;
+										void run(async () => {
+											await flushResume(id);
+											useResumeStore.getState().updateDocument((value) => {
+												if (value.id !== id) return;
+												value.tags = next;
+											});
+											await flushResume(id);
+										});
+									}}
 								/>
 							</>
 						)}
@@ -194,17 +316,23 @@ export function DocumentMenu({ id, inChrome = false }: DocumentMenuProps) {
 									label={t`Slug`}
 									value={slug}
 									onChangeText={(value) => setSlug(normalizeSlug(value))}
-									maxLength={64}
+									ltr
 									editable={!operations.busy}
 									autoCapitalize="none"
 									autoCorrect={false}
 									helper={t`Leave empty to generate an available address from the name.`}
-									error={slug && !validSlug(slug) ? t`Use lowercase letters, numbers and single dashes.` : undefined}
+									error={
+										slug.length > MAX_SLUG_LENGTH
+											? t`Use at most 64 characters.`
+											: slug && !isValidSlug(slug)
+												? t`Use Latin letters a–z, numbers and single dashes.`
+												: undefined
+									}
 								/>
 								<Button
 									label={t`Duplicate`}
 									loading={operations.busy}
-									disabled={!name.trim() || (!!slug && !validSlug(slug))}
+									disabled={!name.trim() || (!!slug && !isValidSlug(slug))}
 									onPress={() =>
 										void run(async () => {
 											const current = await flushResume(id);
@@ -273,6 +401,8 @@ function NotesEditor({ id, value, locked }: NotesEditorProps) {
 	const editor = useRef<EnrichedTextInputInstance>(null);
 	const last = useRef(value);
 	const focused = useRef(false);
+	const [isFocused, setIsFocused] = useState(false);
+	const border = isFocused ? 2 : 1;
 	useEffect(
 		() => () => {
 			if (focused.current) {
@@ -289,42 +419,50 @@ function NotesEditor({ id, value, locked }: NotesEditorProps) {
 		}
 	}, [value]);
 	return (
-		<EnrichedTextInput
-			key={id}
-			ref={editor}
-			accessibilityLabel={t`Notes`}
-			defaultValue={value}
-			editable={!locked}
-			onFocus={() => {
-				focused.current = true;
-				resumeFieldFocus.onFocus();
-			}}
-			onBlur={() => {
-				focused.current = false;
-				resumeFieldFocus.onBlur();
-			}}
+		<View
 			style={{
-				minHeight: space.s12 * 3,
-				color: colors.ink,
-				backgroundColor: colors.raised,
-				borderColor: colors.lineStrong,
-				borderWidth: 1,
+				borderWidth: border,
 				borderRadius: radius.rMd,
-				padding: space.s3,
-				fontFamily: type.body.fontFamily,
-				fontSize: type.body.fontSize,
+				borderColor: isFocused ? colors.accent : colors.lineStrong,
+				backgroundColor: locked ? colors.sunken : colors.raised,
+				overflow: "hidden",
 			}}
-			onChangeHtml={(event) => {
-				if (!focused.current) return;
-				const html = event.nativeEvent.value;
-				last.current = html;
-				useResumeStore.getState().update(
-					(data) => {
-						data.metadata.notes = html;
-					},
-					{ coalesceKey: "metadata.notes" },
-				);
-			}}
-		/>
+		>
+			<EnrichedTextInput
+				key={id}
+				ref={editor}
+				accessibilityLabel={t`Notes`}
+				defaultValue={value}
+				editable={!locked}
+				onFocus={() => {
+					focused.current = true;
+					setIsFocused(true);
+					resumeFieldFocus.onFocus();
+				}}
+				onBlur={() => {
+					focused.current = false;
+					setIsFocused(false);
+					resumeFieldFocus.onBlur();
+				}}
+				style={{
+					minHeight: space.s12 * 3 - border * 2,
+					color: colors.ink,
+					padding: space.s3 - (border - 1),
+					fontFamily: type.body.fontFamily,
+					fontSize: type.body.fontSize,
+				}}
+				onChangeHtml={(event) => {
+					if (!focused.current) return;
+					const html = event.nativeEvent.value;
+					last.current = html;
+					useResumeStore.getState().update(
+						(data) => {
+							data.metadata.notes = html;
+						},
+						{ coalesceKey: "metadata.notes" },
+					);
+				}}
+			/>
+		</View>
 	);
 }

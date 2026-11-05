@@ -4,8 +4,12 @@ import { parseJSONResume } from "@reactive-resume/import/json-resume";
 import { parseReactiveResumeJSON } from "@reactive-resume/import/reactive-resume-json";
 import { parseReactiveResumeV4JSON } from "@reactive-resume/import/reactive-resume-v4-json";
 import { convertLegacyStylesheet, needsLegacyStyleConversion } from "@reactive-resume/pdf/semantic-legacy";
-import { forEachDatedEntry } from "@reactive-resume/schema/resume/dates";
+import { forEachDatedEntry, hasUnreadableDateText } from "@reactive-resume/schema/resume/dates";
+import { stripHtml } from "@reactive-resume/utils/string";
+import { ImportError } from "./error";
 import { client } from "@/libs/orpc/client";
+
+export { ImportError } from "./error";
 
 /** What a file holds, read from its bytes and shape rather than its extension or type. */
 export type ImportKind =
@@ -18,9 +22,6 @@ export type ImportKind =
 	| "cover-letter-json";
 
 type ResumeJsonKind = "reactive-resume-json" | "reactive-resume-v4-json" | "json-resume-json";
-
-/** An import failure worded for the person importing. */
-export class ImportError extends Error {}
 
 // Exports from before Semantic CSS carry legacy style rules, which nothing renders any more: they come in converted.
 const withLegacyStylesConverted = (data: ResumeData): ResumeData =>
@@ -132,15 +133,21 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 /**
- * Reads a resume from a file. PDFs go to the AI provider when one is set up and are read in the browser
- * otherwise; Word needs a provider; LinkedIn exports and JSON never leave the browser. `onRead` reports the
+ * Reads a resume from a file. PDFs use the explicitly chosen AI or browser reader; Word needs a provider; LinkedIn exports and JSON never leave the browser. `onRead` reports the
  * end of the first step (the file's text is in hand) with a short note.
  */
 export async function readResumeFile(
 	file: File,
 	kind: Exclude<ImportKind, "cover-letter-json">,
-	options: { aiAvailable: boolean; onRead?: (note: string) => void },
+	options: {
+		aiAvailable: boolean;
+		signal?: AbortSignal;
+		accountId?: string;
+		onRead?: (note: string) => void;
+		onProvenance?: (aiOperationIds: string[]) => void;
+	},
 ): Promise<ResumeData> {
+	options.signal?.throwIfAborted();
 	if (kind === "reactive-resume-json" || kind === "reactive-resume-v4-json" || kind === "json-resume-json") {
 		const text = await file.text();
 		options.onRead?.(t`JSON read`);
@@ -166,27 +173,67 @@ export async function readResumeFile(
 			file.type === "application/msword"
 				? ("application/msword" as const)
 				: ("application/vnd.openxmlformats-officedocument.wordprocessingml.document" as const);
-		return client.ai.parseDocx({ mediaType, file: { name: file.name, data: base64 } });
+		const { aiOperationIds, ...data } = await client.ai.parseDocx(
+			{ mediaType, file: { name: file.name, data: base64 }, includeProvenance: true },
+			{
+				...(options.signal ? { signal: options.signal } : {}),
+				context: options.accountId ? { accountId: options.accountId } : {},
+			},
+		);
+		options.onProvenance?.(aiOperationIds ?? []);
+		return data;
 	}
 
 	if (options.aiAvailable) {
 		const base64 = await fileToBase64(file);
 		options.onRead?.(t`file read`);
-		return client.ai.parsePdf({ file: { name: file.name, data: base64 } });
+		const { aiOperationIds, ...data } = await client.ai.parsePdf(
+			{ file: { name: file.name, data: base64 }, includeProvenance: true },
+			{
+				...(options.signal ? { signal: options.signal } : {}),
+				context: options.accountId ? { accountId: options.accountId } : {},
+			},
+		);
+		options.onProvenance?.(aiOperationIds ?? []);
+		return data;
 	}
 
-	const [{ extractPdfLines }, { parseResumeText }] = await Promise.all([
-		import("./pdf-text"),
-		import("@reactive-resume/import/plain-text"),
-	]);
-	const lines = await extractPdfLines(file);
-	if (lines.length === 0) {
+	const { readPdfResume } = await import("./pdf-text");
+	const data = await readPdfResume(file);
+	if (!data) {
 		throw new ImportError(
 			t`This PDF is a scanned image. There's no text to read. Try the Word version, or start blank and paste sections in.`,
 		);
 	}
 	options.onRead?.(t`text layer found`);
-	return parseResumeText(lines.join("\n"));
+	return data;
+}
+
+/**
+ * The file's own text and link targets, to review an import against before it's created: what the reader left out,
+ * and profile addresses behind words like "LinkedIn". Null when the file can't be read this way (it never blocks).
+ */
+export async function readImportSource(
+	file: File,
+	kind: ImportKind,
+): Promise<{ lines: string[]; links: string[]; partial: boolean } | null> {
+	try {
+		if (kind === "pdf") {
+			const { readPdfSource } = await import("./pdf-text");
+			return await readPdfSource(file);
+		}
+		if (kind === "docx") {
+			const { extractDocxText } = await import("@reactive-resume/import/docx-text");
+			return {
+				lines: extractDocxText(new Uint8Array(await file.arrayBuffer())).split("\n"),
+				links: [],
+				partial: false,
+			};
+		}
+	} catch {
+		// A file the reader parsed but this check can't open still imports; it just isn't compared.
+	}
+	return null;
 }
 
 /** What an import found: sections with content, their entries, and dates flagged for a look. */
@@ -196,11 +243,11 @@ export function summarizeImport(data: ResumeData) {
 	);
 	let flagged = 0;
 	forEachDatedEntry(data, (entry) => {
-		if (entry.dates?.raw) flagged++;
+		if (hasUnreadableDateText(entry.dates)) flagged++;
 	});
 
 	return {
-		sections: sections.length + (data.summary.content.replace(/<[^>]*>/g, "").trim() ? 1 : 0),
+		sections: sections.length + (stripHtml(data.summary.content) ? 1 : 0),
 		entries: sections.reduce((total, section) => total + section.items.length, 0),
 		flagged,
 	};

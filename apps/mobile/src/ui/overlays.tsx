@@ -21,6 +21,7 @@ import Animated, {
 	FadeInDown,
 	FadeOut,
 	FadeOutDown,
+	ReduceMotion,
 	useAnimatedStyle,
 	useSharedValue,
 	withTiming,
@@ -31,12 +32,15 @@ import { haptics, useIsWide, useReducedMotion } from "./motion";
 import { useWindowSafeAreaInsets } from "./safe-area";
 import { Text } from "./text";
 import { useTheme } from "./theme";
+import { useKeyCommandBlocker } from "@/shell/key-commands";
 
 const android = Platform.OS === "android";
 
 export type SheetProps = {
 	open: boolean;
 	onClose: () => void;
+	/** Runs after native dismissal completes, for returning focus to the opener. */
+	onDismissed?: (() => void) | undefined;
 	/** Block incidental dismissal while an explicit save is in flight. */
 	dismissible?: boolean | undefined;
 	title?: string | undefined;
@@ -90,6 +94,7 @@ function SheetHeader({ title, headerStart, headerEnd }: SheetHeaderProps) {
 
 /** Native sheets share one lifecycle on phones, tablets and web. Form owners remain mounted after dismissal. */
 export function Sheet({
+	onDismissed,
 	open,
 	onClose,
 	title,
@@ -102,6 +107,7 @@ export function Sheet({
 	scroll = true,
 	dismissible = true,
 }: SheetProps) {
+	useKeyCommandBlocker(open);
 	const { t } = useLingui();
 	const { colors, radius, size, space } = useTheme();
 	const wide = useIsWide();
@@ -153,9 +159,12 @@ export function Sheet({
 		if (closing.current) {
 			closing.current = false;
 			if (wantsOpen.current) present();
+			else onDismissed?.();
 		} else if (wantsOpen.current) {
-			if (dismissible) onClose();
-			else present();
+			if (dismissible) {
+				onClose();
+				onDismissed?.();
+			} else present();
 		}
 	};
 
@@ -417,6 +426,7 @@ export function ConfirmDialog({
 	onConfirm,
 	onCancel,
 }: ConfirmDialogProps) {
+	useKeyCommandBlocker(open);
 	const { t } = useLingui();
 	const { colors, radius, shadows, space } = useTheme();
 	const { width, height, fontScale } = useWindowDimensions();
@@ -527,15 +537,18 @@ export function ConfirmDialog({
 
 export type ToastOptions = {
 	message: string;
-	/** For example Undo. Pressing it dismisses the toast. */
+	/** For example "Schedule it". Pressing it dismisses the toast. */
 	action?: { label: string; onPress: () => void } | undefined;
-	/** Shorthand for an "Undo" action. */
+	/** An "Undo" control, shown after `action` when both are set. Pressing it dismisses the toast. */
 	undo?: (() => void) | undefined;
 	/** Milliseconds on screen. Defaults to 4000; toasts with an action stay 6000. Doubled for screen readers. */
 	duration?: number | undefined;
 };
 
 type ActiveToast = ToastOptions & { id: number; lifetime: number };
+
+/** Toasts whose action has run: a second tap that reaches the same render (before it re-renders) does nothing. */
+const actedToasts = new WeakSet<ActiveToast>();
 
 let toasts: ActiveToast[] = [];
 let nextToastId = 1;
@@ -652,19 +665,30 @@ export function Toaster() {
 			}}
 		>
 			{active.map((item) => {
-				const action = item.action ?? (item.undo ? { label: t`Undo`, onPress: item.undo } : undefined);
+				const controls = [
+					...(item.action ? [item.action] : []),
+					...(item.undo ? [{ label: t`Undo`, onPress: item.undo }] : []),
+				];
+				const action = controls.length > 0;
 				return (
 					<Animated.View
 						key={item.id}
-						entering={reduced ? FadeIn.duration(motion.d1) : FadeInDown.duration(motion.d2)}
-						exiting={reduced ? FadeOut.duration(motion.d1) : FadeOutDown.duration(motion.d2)}
+						entering={
+							reduced ? FadeIn.duration(motion.d1).reduceMotion(ReduceMotion.Never) : FadeInDown.duration(motion.d2)
+						}
+						exiting={
+							reduced ? FadeOut.duration(motion.d1).reduceMotion(ReduceMotion.Never) : FadeOutDown.duration(motion.d2)
+						}
 						accessibilityLiveRegion="polite"
 						style={{
 							flexDirection: "row",
+							flexWrap: "wrap",
 							alignItems: "center",
+							justifyContent: "flex-end",
 							gap: space.s1 + space.s0,
 							minHeight: size.button,
-							maxWidth: size.formSheet,
+							width: size.formSheet,
+							maxWidth: "100%",
 							paddingStart: space.s4,
 							paddingEnd: action ? space.s1 + space.s0 : space.s4,
 							borderRadius: android ? radius.rSm : radius.rLg,
@@ -672,28 +696,39 @@ export function Toaster() {
 							boxShadow: (wide ? shadows.e2 : shadows.e3).boxShadow,
 						}}
 					>
-						<Text color="bg" style={{ flexShrink: 1, flexGrow: android ? 1 : 0, paddingVertical: space.s3 }}>
+						<Text color="bg" style={{ flexShrink: 1, width: action ? "100%" : undefined, paddingVertical: space.s3 }}>
 							{item.message}
 						</Text>
-						{action ? (
+						{controls.map((control) => (
 							<Pressable
+								key={control.label}
 								accessibilityRole="button"
 								onPress={() => {
-									action.onPress();
+									// One control per toast runs: a second tap before it re-renders does nothing.
+									if (actedToasts.has(item)) return;
+									actedToasts.add(item);
+									try {
+										control.onPress();
+									} catch (error) {
+										actedToasts.delete(item);
+										throw error;
+									}
 									dismissToast(item.id);
 								}}
 								style={({ pressed }) => ({
+									flexShrink: 1,
+									maxWidth: "100%",
 									minHeight: size.hit,
 									justifyContent: "center",
 									paddingHorizontal: space.s2 + space.s0,
 									opacity: pressed ? 0.6 : 1,
 								})}
 							>
-								<Text weight={700} color="accentSoft">
-									{action.label}
+								<Text weight={600} color="accentSoft">
+									{control.label}
 								</Text>
 							</Pressable>
-						) : null}
+						))}
 						{action && !reduced ? <ToastFuse duration={item.lifetime} /> : null}
 					</Animated.View>
 				);

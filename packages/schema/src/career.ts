@@ -1,6 +1,8 @@
 import z from "zod";
 import { searchRegionsSchema } from "@reactive-resume/utils/region";
 import { timezoneSchema } from "@reactive-resume/utils/timezone";
+import { aiOperationIdsSchema } from "./ai-usage";
+import { applicationClosedReasonSchema, applicationStatusSchema } from "./applications/data";
 
 /** The workspace tabs of one application, in the order a search happens. */
 export const WORKSPACE_TABS = ["fit", "apply", "prepare", "practise", "debrief", "messages", "saved"] as const;
@@ -28,30 +30,78 @@ export type CareerSource = z.infer<typeof careerSourceSchema>;
 export const factCategorySchema = z.enum(["accomplishment", "experience", "skill", "preference"]);
 export type FactCategory = z.infer<typeof factCategorySchema>;
 
+export const careerFactRevisionSchema = z.object({
+	text: z.string(),
+	at: z.string(),
+	category: z.string().optional(),
+	applicationId: z.string().nullable().optional(),
+});
+export type CareerFactRevision = z.infer<typeof careerFactRevisionSchema>;
+
+/** A separate correction contract prevents older servers from saving text while ignoring its private scope. */
+export const careerFactCorrectionSchema = z
+	.object({
+		id: z.string().min(1),
+		before: z.object({ text: z.string(), category: z.string(), applicationId: z.string().nullable() }),
+		text: z.string().trim().min(1).max(2000).optional(),
+		category: factCategorySchema.optional(),
+		applicationId: z.string().min(1).nullable().optional(),
+	})
+	.strict()
+	.refine((input) => input.text !== undefined || input.category !== undefined || input.applicationId !== undefined, {
+		message: "Choose a correction.",
+	});
+export type CareerFactCorrection = z.infer<typeof careerFactCorrectionSchema>;
+
 export const memoryModeSchema = z.enum(["ask", "auto", "off"]);
 export type MemoryMode = z.infer<typeof memoryModeSchema>;
 
 const currencySchema = z.string().regex(/^[A-Z]{3}$/);
 const payPeriodSchema = z.enum(["hour", "month", "year"]);
+// Normalized length bounds belong to the output, not the raw OpenAPI input.
+const profileListEntrySchema = z
+	.string()
+	.trim()
+	.regex(/\S/)
+	.pipe(z.string().min(1).max(200))
+	.describe(
+		"Trimmed before validation. The 1 to 200 character limit applies after trimming; whitespace-only values are rejected.",
+	);
 
-/** Preferences: what the user is looking for, used by discovery, Fit, Offers and the coach. */
-export const careerProfileDataSchema = z.object({
-	targetRoles: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
-	locations: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
-	/** "What matters to you", in the user's own words. */
-	priorities: z.string().max(4000).default(""),
-	minBase: z
-		.object({ amount: z.number().nonnegative().nullable(), currency: currencySchema, period: payPeriodSchema })
-		.default({ amount: null, currency: "USD", period: "year" }),
-	/** 0 is fully remote. */
-	maxOfficeDays: z.number().int().min(0).max(5).nullable().default(null),
-	noticeWeeks: z.number().int().min(0).max(52).nullable().default(null),
-	memoryMode: memoryModeSchema.default("ask"),
-	/**
-	 * Countries web searches target, first is primary. Absent or null is automatic (from the account
-	 * time zone), [] is anywhere. No default, so a save that leaves it out keeps the stored value.
-	 */
-	searchRegions: searchRegionsSchema,
+/** Independent Facts and Preferences writes have no defaults: an omitted field must stay omitted. */
+export const careerProfileUpdateSchema = z
+	.object({
+		targetRoles: z.array(profileListEntrySchema).max(20),
+		locations: z.array(profileListEntrySchema).max(20),
+		/** "What matters to you", in the user's own words. */
+		priorities: z.string().max(4000),
+		minBase: z.object({
+			amount: z.number().nonnegative().nullable(),
+			currency: currencySchema,
+			period: payPeriodSchema,
+		}),
+		/** 0 is fully remote. */
+		maxOfficeDays: z.number().int().min(0).max(5).nullable(),
+		noticeWeeks: z.number().int().min(0).max(52).nullable(),
+		memoryMode: memoryModeSchema,
+		/**
+		 * Countries web searches target, first is primary. Absent or null is automatic (from the account
+		 * time zone), [] is anywhere. No default, so a save that leaves it out keeps the stored value.
+		 */
+		searchRegions: searchRegionsSchema,
+	})
+	.partial();
+export type CareerProfileUpdate = z.infer<typeof careerProfileUpdateSchema>;
+
+/** Stored preferences, used by discovery, Fit, Offers and the coach. Defaults apply only on reads. */
+export const careerProfileDataSchema = careerProfileUpdateSchema.extend({
+	targetRoles: careerProfileUpdateSchema.shape.targetRoles.default([]),
+	locations: careerProfileUpdateSchema.shape.locations.default([]),
+	priorities: careerProfileUpdateSchema.shape.priorities.default(""),
+	minBase: careerProfileUpdateSchema.shape.minBase.default({ amount: null, currency: "USD", period: "year" }),
+	maxOfficeDays: careerProfileUpdateSchema.shape.maxOfficeDays.default(null),
+	noticeWeeks: careerProfileUpdateSchema.shape.noticeWeeks.default(null),
+	memoryMode: careerProfileUpdateSchema.shape.memoryMode.default("ask"),
 });
 export type CareerProfileData = z.infer<typeof careerProfileDataSchema>;
 
@@ -59,6 +109,24 @@ export const careerFactInputSchema = careerScopeSchema.extend({
 	text: z.string().trim().min(1).max(2000),
 	category: factCategorySchema,
 	source: careerSourceSchema,
+});
+
+// Bound submitted input before normalization so runtime and published lengths agree.
+export const MAX_RESUME_FACT_CHARACTERS = 2000;
+const resumeFactTextSchema = z.string().max(MAX_RESUME_FACT_CHARACTERS).trim().min(1).regex(/\S/);
+
+export const resumeFactProposalSchema = careerFactInputSchema.pick({ text: true, category: true }).extend({
+	text: resumeFactTextSchema.describe(
+		"Non-blank fact text. At most 2,000 characters including surrounding whitespace; trimmed before saving.",
+	),
+	quote: resumeFactTextSchema.describe(
+		"Non-blank source quotation. At most 2,000 characters including surrounding whitespace; trimmed before saving.",
+	),
+});
+export const resumeFactsReviewSchema = z.object({
+	resumeId: z.string().min(1),
+	updatedAt: z.coerce.date(),
+	proposals: z.array(resumeFactProposalSchema).min(1).max(50),
 });
 
 export const careerStoryInputSchema = careerScopeSchema.extend({
@@ -73,26 +141,56 @@ export const careerStoryInputSchema = careerScopeSchema.extend({
 });
 export type CareerStoryData = z.infer<typeof careerStoryInputSchema>;
 
+const validBonus = (terms: { variable: number | null; variablePercent?: number | null | undefined }) =>
+	terms.variable === null || terms.variablePercent == null;
+const bonusError = { message: "Enter a bonus amount or a percentage, not both.", path: ["variablePercent"] };
+
 /** Offer terms in their own currency and pay period. Unknown amounts are null, never zero. */
-export const offerTermsSchema = z.object({
-	version: z.enum(["written", "verbal"]).default("written"),
-	currency: currencySchema,
-	period: payPeriodSchema,
-	base: z.number().nonnegative().nullable(),
-	variable: z.number().nonnegative().nullable(),
-	/** What the bonus depends on, or "" when unconditional or unknown. */
-	variableConditions: z.string().max(1000).default(""),
-	equity: z.string().max(1000).default(""),
-	location: z.string().max(500).default(""),
-	officeDays: z.number().int().min(0).max(5).nullable().default(null),
-	leave: z.string().max(500).default(""),
-	learning: z.number().nonnegative().nullable().default(null),
-	other: z.string().max(1000).default(""),
-	respondBy: z.iso.datetime({ offset: true }).nullable().default(null),
-});
+export const offerTermsSchema = z
+	.object({
+		version: z.enum(["written", "verbal"]).default("written"),
+		currency: currencySchema,
+		period: payPeriodSchema,
+		base: z.number().nonnegative().nullable(),
+		variable: z.number().nonnegative().nullable(),
+		/** Percentage of base, in the base currency and pay period. Older amount records omit this. */
+		variablePercent: z
+			.number()
+			.nonnegative()
+			.nullable()
+			.optional()
+			.describe(
+				"Percentage points of base: 10 means 10% of base in its currency and pay period. Set variable to null.",
+			),
+		/** What the bonus depends on, or "" when unconditional or unknown. */
+		variableConditions: z.string().max(1000).default(""),
+		equity: z.string().max(1000).default(""),
+		location: z.string().max(500).default(""),
+		officeDays: z.number().int().min(0).max(5).nullable().default(null),
+		leave: z.string().max(500).default(""),
+		learning: z.number().nonnegative().nullable().default(null),
+		other: z.string().max(1000).default(""),
+		respondBy: z.iso.datetime({ offset: true }).nullable().default(null),
+		/** The first day of work the employer stated, as a local date (YYYY-MM-DD). */
+		startDate: z.iso.date().nullable().default(null),
+	})
+	.refine(validBonus, bonusError);
 export type OfferTerms = z.infer<typeof offerTermsSchema>;
 
+/** Manually entered terms use the same saved offer shape as confirmed message proposals. */
+export const careerOfferInputSchema = offerTermsSchema.safeExtend({ applicationId: z.string().min(1) });
+
 const text = (max = 2000) => z.string().trim().max(max);
+
+/** The application fields applying an employer's message can change. */
+const appliedFieldsSchema = z.object({
+	status: applicationStatusSchema,
+	laneId: z.string().nullable(),
+	closedReason: applicationClosedReasonSchema.nullable(),
+	followUpAt: z.iso.datetime({ offset: true }).nullable(),
+	followUpNote: z.string().nullable(),
+	followUpDateOnly: z.boolean().default(false),
+});
 
 /**
  * What the coach wrote for an application, by kind. Each one is produced by `career.generate` from a fixed shape,
@@ -130,6 +228,8 @@ export const savedItemDataSchema = z.discriminatedUnion("kind", [
 					detail: text(400),
 					action: z.enum(["story", "draft-story", "questions", "practise", "none"]),
 					storyId: z.string().nullable().default(null),
+					/** Explicit supporting facts for this step; older briefings omit the field. */
+					factIds: z.array(z.string().min(1)).max(20).optional(),
 				}),
 			)
 			.max(8),
@@ -180,7 +280,9 @@ export const savedItemDataSchema = z.discriminatedUnion("kind", [
 	}),
 	z.object({
 		kind: z.literal("answers"),
-		answers: z.array(z.object({ question: text(), answer: text(6000) })).max(30),
+		answers: z
+			.array(z.object({ question: text(), answer: text(6000), aiOperationIds: aiOperationIdsSchema.optional() }))
+			.max(30),
 	}),
 	z.object({
 		kind: z.literal("reply"),
@@ -206,14 +308,44 @@ export const savedItemDataSchema = z.discriminatedUnion("kind", [
 		offer: offerTermsSchema.nullable().default(null),
 		/** Set when the user applied the proposal: which changes, and when. */
 		applied: z
-			.object({ at: z.iso.datetime({ offset: true }), changes: z.array(z.number().int()) })
+			.object({
+				at: z.iso.datetime({ offset: true }),
+				changes: z.array(z.number().int()),
+				/** The application fields Apply set, before and after, and the offer it saved: what Undo reverses. */
+				undo: z
+					.object({
+						before: appliedFieldsSchema,
+						after: appliedFieldsSchema,
+						offerId: z.string().nullable(),
+					})
+					.optional(),
+			})
 			.nullable()
 			.default(null),
 	}),
-	z.object({ kind: z.literal("offer"), ...offerTermsSchema.shape }),
+	z
+		.object({
+			kind: z.literal("offer"),
+			...offerTermsSchema.shape,
+			/** Typed in by the user, or read from an employer's message. Absent on offers saved before it was recorded. */
+			origin: z.enum(["manual", "message"]).optional(),
+			/** When the user last corrected the terms by hand. */
+			editedAt: z.iso.datetime({ offset: true }).optional(),
+		})
+		.refine(validBonus, bonusError),
 ]);
 export type SavedItemData = z.infer<typeof savedItemDataSchema>;
 export type SavedItemKind = SavedItemData["kind"];
+
+/** Immutable manual review, stored separately from mutable workspace data. */
+export const submissionReviewSchema = z.object({
+	at: z.iso.datetime({ offset: true }),
+	checklist: z.array(z.number().int().min(0).max(10)).max(10),
+	documents: z.boolean(),
+	answers: z.boolean(),
+	answerVersionId: z.string().nullable().optional(),
+	stageEntryId: z.string().nullable().optional(),
+});
 
 /**
  * Live, user-owned state of one application's workspace. Each widget owns one key and saves the whole value, so
@@ -227,11 +359,14 @@ export const careerWorkspaceSchema = z.object({
 				question: text(),
 				answer: text(6000),
 				factIds: z.array(z.string()).max(10),
+				aiOperationIds: aiOperationIdsSchema.optional(),
 			}),
 		)
 		.max(30),
 	/** Indexes of the ticked "Before you submit" items. */
 	checklist: z.array(z.number().int().min(0).max(10)).max(10),
+	/** Server-owned first-submission review; null means historical checks were not recorded. */
+	submissionReview: submissionReviewSchema.nullable().optional(),
 	/** Questions to ask, added from Fit or the coach. */
 	questions: z.array(z.object({ text: text(400), origin: text(60) })).max(20),
 	/** Fit requirements closed with "Add evidence": requirement text → the new fact's id. */
@@ -241,6 +376,7 @@ export const careerWorkspaceSchema = z.object({
 	/** The employer message pasted into Messages, kept with the application. */
 	message: text(20_000),
 });
+export const careerWorkspaceDataSchema = careerWorkspaceSchema.omit({ submissionReview: true });
 export type CareerWorkspace = z.infer<typeof careerWorkspaceSchema>;
 export const EMPTY_WORKSPACE: CareerWorkspace = {
 	answers: [],
@@ -271,7 +407,12 @@ export const generateTaskSchema = z.discriminatedUnion("task", [
 		answer: text(6000).min(1),
 		landed: z.enum(["well", "mixed", "not"]),
 	}),
-	z.object({ task: z.literal("reply"), message: text(20_000).min(1) }),
+	z.object({
+		task: z.literal("reply"),
+		message: text(20_000).min(1),
+		/** The user's explicit choice to write the reply in their interface language instead of the employer's. */
+		replyLocale: z.string().min(2).max(20).optional(),
+	}),
 	/** Not saved: a shorter answer, or a first draft when `answer` is empty. */
 	z.object({
 		task: z.literal("answer"),
@@ -288,7 +429,7 @@ export type GenerateTask = z.infer<typeof generateTaskSchema>;
 export const careerNoticeSchema = z.discriminatedUnion("type", [
 	z.object({ type: z.literal("opportunities"), count: z.number().int().min(1), query: z.string() }),
 	z.object({ type: z.literal("briefing"), company: z.string(), role: z.string() }),
-	z.object({ type: z.literal("followup"), company: z.string(), role: z.string() }),
+	z.object({ type: z.literal("followup"), company: z.string(), role: z.string(), note: z.string().optional() }),
 	z.object({ type: z.literal("schedule-failed"), reason: z.enum(["stopped", "failed"]) }),
 	z.object({ type: z.literal("email-failed") }),
 	z.object({ type: z.literal("briefing-paused") }),
@@ -297,7 +438,11 @@ export type CareerNotice = z.infer<typeof careerNoticeSchema>;
 
 export const careerScheduleInputSchema = careerScopeSchema.extend({
 	kind: z.enum(["discovery", "prepare", "follow-up"]),
-	query: z.string().trim().max(500).default(""),
+	query: z
+		.string()
+		.trim()
+		.default("")
+		.describe("Discovery search query (up to 500 characters), or the application follow-up note."),
 	interviewId: z.string().nullable().default(null),
 	/** Prepare only: when the briefing runs relative to the interview. */
 	lead: z.enum(["24h", "2h", "morning"]).nullable().default(null),
@@ -309,4 +454,31 @@ export const careerScheduleInputSchema = careerScopeSchema.extend({
 	aiProviderId: z.string().min(1).nullable().default(null),
 	/** The interface language; a scheduled briefing is written in it. Kept when left out. */
 	locale: z.string().min(2).max(20).optional(),
+});
+
+/** Recorded retrieval context, not a promise that the employer is still accepting applications. */
+export const discoverySourceSchema = z.object({
+	query: z.string().max(500),
+	checkedAt: z.string().datetime(),
+});
+export type DiscoverySource = z.infer<typeof discoverySourceSchema>;
+
+export const roleSuggestionsInputSchema = z.object({
+	providerId: z.string().min(1),
+	/** Configuration disclosed when the user approved sharing, from aiProviders.list. */
+	recipientVersion: z.string().regex(/^[a-f0-9]{64}$/),
+	resumeId: z.string().min(1).nullable(),
+	includeKnowledge: z.boolean(),
+	locale: z.string().max(20).default("en-US"),
+});
+export const roleSuggestionsOutputSchema = z.object({
+	suggestions: z
+		.array(
+			z.object({
+				role: z.string().trim().min(1).max(200),
+				facts: z.array(z.object({ id: z.string(), text: z.string() })),
+				resumeQuote: z.string().max(500).nullable(),
+			}),
+		)
+		.max(5),
 });

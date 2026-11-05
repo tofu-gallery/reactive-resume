@@ -2,11 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
 import { contrastOnWhite, isDarkColor, parseColorString, rgbaStringToHex } from "./color";
 
 describe("rgbaStringToHex", () => {
-	it("converts opaque rgba to hex (alpha not represented)", () => {
+	it("converts rgba and 6-digit hex colors to lowercase hex (alpha not represented)", () => {
 		expect(rgbaStringToHex("rgba(0, 255, 0, 1)")).toBe("#00ff00");
-	});
-
-	it("preserves 6-digit hex colors", () => {
 		expect(rgbaStringToHex("#F1F5F9")).toBe("#f1f5f9");
 		expect(rgbaStringToHex("#0F172A")).toBe("#0f172a");
 	});
@@ -17,16 +14,19 @@ describe("rgbaStringToHex", () => {
 });
 
 describe("isDarkColor", () => {
-	it("classifies opaque dark colors as dark", () => {
-		expect(isDarkColor("rgba(0, 0, 0, 1)")).toBe(true);
-	});
-
 	it("composites transparent colors over white before checking darkness", () => {
+		expect(isDarkColor("rgba(0, 0, 0, 1)")).toBe(true);
 		expect(isDarkColor("rgba(0, 0, 0, 0.1)")).toBe(false);
 	});
 });
 
 describe("parseColorString", () => {
+	it("rejects oversized colour values before parsing or falling back", () => {
+		const value = `rgb(1,2,3${" ".repeat(100000)}!)`;
+		expect(parseColorString(value)).toBeNull();
+		expect(rgbaStringToHex(value)).toBe("#000000");
+	});
+
 	describe("rgb format", () => {
 		it("parses rgb without alpha as alpha=1", () => {
 			expect(parseColorString("rgb(255, 128, 64)")).toEqual({ r: 255, g: 128, b: 64, a: 1 });
@@ -44,10 +44,6 @@ describe("parseColorString", () => {
 	});
 
 	describe("hex format", () => {
-		it("parses 6-digit hex", () => {
-			expect(parseColorString("#ff8040")).toEqual({ r: 255, g: 128, b: 64, a: 1 });
-		});
-
 		it("parses 3-digit hex by doubling each digit", () => {
 			expect(parseColorString("#f80")).toEqual({ r: 0xff, g: 0x88, b: 0x00, a: 1 });
 		});

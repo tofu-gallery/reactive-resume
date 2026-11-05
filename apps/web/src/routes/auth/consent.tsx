@@ -1,7 +1,10 @@
+import { t } from "@lingui/core/macro";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { OAuthConsentPage } from "@/features/auth/pages/consent";
+import { getPageTitle } from "@/libs/seo";
 
 export const Route = createFileRoute("/auth/consent")({
+	head: () => ({ meta: [{ title: getPageTitle(t`Authorize access`) }] }),
 	beforeLoad: ({ context }) => {
 		if (!context.session) {
 			throw redirect({
@@ -17,9 +20,17 @@ export const Route = createFileRoute("/auth/consent")({
 });
 
 function RouteComponent() {
-	const { session } = Route.useRouteContext();
+	const { session, flags } = Route.useRouteContext();
 	// This route is client-only. TanStack serializes repeated parameters as JSON
 	// arrays in location.searchStr, invalidating the provider signature. Use the URL verbatim.
 	const oauthQuery = window.location.search.slice(1);
-	return <OAuthConsentPage key={oauthQuery} oauthQuery={oauthQuery} email={session.user.email} />;
+	return (
+		<OAuthConsentPage
+			key={oauthQuery}
+			oauthQuery={oauthQuery}
+			email={session.user.email}
+			isAnonymous={session.user.isAnonymous === true}
+			disableSignups={flags.disableSignups}
+		/>
+	);
 }

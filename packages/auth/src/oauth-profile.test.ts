@@ -33,7 +33,8 @@ vi.mock("@reactive-resume/db/client", () => ({
 	},
 }));
 
-const { createGithubProfileMapper, createProfileMapper } = await import("./oauth-profile");
+const { allocateUniqueUsername, createGithubProfileMapper, createProfileMapper, isUsernameReserved } =
+	await import("./oauth-profile");
 
 beforeEach(() => {
 	dbMock.selectQueue.length = 0;
@@ -78,7 +79,6 @@ describe("createProfileMapper", () => {
 			avatar_url: "https://example.com/new.png",
 		});
 
-		expect(dbMock.select).toHaveBeenCalledTimes(6);
 		expect(dbMock.update).not.toHaveBeenCalled();
 		expect(result).toEqual({
 			name: "Provider Name",
@@ -121,5 +121,31 @@ describe("createProfileMapper", () => {
 			username: "legacy.user",
 			displayUsername: "legacy.user",
 		});
+	});
+});
+
+describe("isUsernameReserved", () => {
+	it("keeps the app's addresses from new accounts but lets an account that already has one keep it", async () => {
+		expect(await isUsernameReserved("Login")).toBe(true);
+		expect(await isUsernameReserved("api", "user-2")).toBe(true);
+
+		dbMock.selectQueue.push([{ id: "user-1" }]);
+		expect(await isUsernameReserved("login", "user-1")).toBe(false);
+	});
+
+	it("gives a new account named after a sign-in address a free name instead", async () => {
+		const mapper = createProfileMapper({ providerName: "Google" });
+
+		const result = await mapper({ email: "login@example.com", name: "Login Person" });
+
+		expect(result).toMatchObject({ username: "login-1", displayUsername: "login-1" });
+	});
+});
+
+describe("allocateUniqueUsername", () => {
+	it("makes a name of at least three characters from a short email address", async () => {
+		await expect(allocateUniqueUsername("a@example.test")).resolves.toBe("user");
+		await expect(allocateUniqueUsername("ab@example.test", "x")).resolves.toBe("user");
+		await expect(allocateUniqueUsername("ada@example.test", "x")).resolves.toBe("ada");
 	});
 });

@@ -5,7 +5,7 @@ description: "See how far your applications get, how often and how fast people r
 
 The **Insights** view turns your applications into a few simple numbers and charts. Use it to spot where things stall, for example lots of applications but few replies, and to see whether tailoring your resume is paying off.
 
-To open it, go to **Applications** and select the **Insights** tab. Insights counts all of your applications, including closed ones, whatever you've typed in the search field.
+To open it, go to **Applications** and select the **Insights** tab. Without filters, Insights counts all your applications, including closed ones. Search and **Needs you** narrow every chart and source total to the matching applications. Turn **Needs you** off and clear the search to return to the full account figures.
 
 <Info>
   Insights appears once at least one application has reached **Applied**. Until then you see a short message instead.
@@ -13,30 +13,32 @@ To open it, go to **Applications** and select the **Insights** tab. Insights cou
 
 ## Read the charts
 
-<Frame caption="How far applications get, reply figures, and tailored vs. base resume">
+<Frame caption="Read the funnel, pipeline and source figures in Insights">
   <img
     src="/images/guides/viewing-application-insights/insights-funnel-and-reply-figures.webp"
-    alt="Insights view with a How far applications get chart showing 9 applied, 4 screening, 3 interview and 1 offer, tiles for 56% heard back and 8 days median to first reply, and a Tailored vs. base resume summary"
+    alt="Insights for five active fictional applications with a stage funnel labelling the renamed Recruiter call stage, reply figures, the themed pipeline flow, weekly activity and source charts"
   />
 </Frame>
 
+Your own stages count as the standard stage they belong to (see [Customizing application stages](/guides/customizing-application-stages)), so renaming or reordering them doesn't change these numbers. The funnel and pipeline picture label each stage with the name you gave its default stage, such as **Recruiter call** for a renamed **Screening**.
+
 - **How far applications get**: For each stage from **Applied** to **Offer**, the number of applications that ever reached it. This uses each application's stage history, so an application that reached **Interview** and was later closed still counts for **Applied**, **Screening** and **Interview**.
 - **heard back**: The share of sent applications that got a reply. A reply means the application moved on to **Screening** or later, or was closed as **Not selected**.
-- **median to first reply**: The typical number of days between sending an application and that first reply. It uses the dates in each application's **Activity**, so correct those dates if you added applications after the fact.
+- **median to first reply**: The typical number of days between sending an application and that first reply. It requires a known sending date and a separate, dated reply in **Activity**. An imported later stage with an unknown date still counts as a reply, but contributes no reply time. A real reply recorded on the sending day counts as zero days. Edit Activity dates when you know what happened.
 - **Tailored vs. base resume**: Compares applications sent with a resume made for that job (with **Tailor a resume** or **Copy for a job…**) against those sent with another resume. It only counts applications with a linked resume. With fewer than 10 of those, it reminds you the numbers are small.
 
 ## The pipeline picture
 
-**Where your applications went** draws your pipeline as a flow from **Saved** to **Offer**. The number above each bar is how many of your current, not-closed applications are at that stage or beyond, and the percentage under it is how many made it on from the stage before. The top line shows how many applications are active, with closed applications counted separately.
+**Where your applications went** draws your pipeline as a flow from **Saved** to **Offer**. The number above each bar is how many of your current, not-closed applications are at that stage or beyond, and the percentage under it is how many made it on from the stage before. The top line shows how many applications are active, with closed applications counted separately. The bars use the same stage colours as the board and list, on the page's own surface, so the picture belongs to the app in both the light and dark theme. Stage labels are the names you gave your stages.
 
-<Frame caption="The pipeline picture, ready to export">
+<Frame caption="Export a picture of the application pipeline">
   <img
     src="/images/guides/viewing-application-insights/insights-pipeline-chart.webp"
-    alt="Where your applications went panel with an Export PNG button and a dark Job search pipeline chart showing bars for Saved, Applied, Screening, Interview and Offer with conversion percentages and 2 closed"
+    alt="Where your applications went, with the saved, applied, Recruiter call, interview and offer stages in the app's stage colours, and Export PNG"
   />
 </Frame>
 
-Select **Export PNG** to download the picture as `pipeline-flow.png`, a high-resolution image with a small Reactive Resume mark in the corner. It's made for sharing, for example with a mentor or career coach.
+Select **Export PNG** to download the picture as `pipeline-flow.png`, a high-resolution image with a small Reactive Resume mark in the corner. The export resolves the stage colours and surface from the theme you are using, so the image stays readable whether you export in light or dark. It's made for sharing, for example with a mentor or career coach.
 
 <Note>
   The pipeline picture counts only applications that aren't closed, while **How far applications get** includes closed
@@ -45,14 +47,14 @@ Select **Export PNG** to download the picture as `pipeline-flow.png`, a high-res
 
 ## Weekly activity and sources
 
-<Frame caption="Applications over time and where they come from">
+<Frame caption="Weekly application activity and sources">
   <img
     src="/images/guides/viewing-application-insights/insights-weekly-and-source-charts.webp"
-    alt="Applications over time bar chart for the last 8 weeks, and a Where applications come from chart with LinkedIn 5, Indeed 3, Company website 2 and Referral 1"
+    alt="Applications over time and Where applications come from charts for the fictional examples"
   />
 </Frame>
 
-- **Applications over time**: How many applications you sent each week over the last 8 weeks, dated by their first move to **Applied** or later. Applications that later closed still count; jobs that never reached **Applied** don't.
+- **Applications over time**: How many applications you sent each week over the last 8 weeks, dated by their first recorded **Applied** date. Imports without a known sending date are left out of weekly totals. Applications that later closed still count; jobs that never reached **Applied** don't.
 - **Where applications come from**: How many applications have each **Source**, such as LinkedIn or Referral. Fill in the source on each application to make this useful. Applications without a source aren't shown.
 
 ## Related guides

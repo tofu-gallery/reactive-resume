@@ -7,22 +7,83 @@ import type {
 	ApplicationTimelineEntry,
 	InterviewDetails,
 } from "@reactive-resume/schema/applications/data";
+import { createHash } from "node:crypto";
 import { ORPCError } from "@orpc/client";
-import { and, arrayContains, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, arrayContains, count, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "@reactive-resume/db/client";
 import * as schema from "@reactive-resume/db/schema";
 import { lintResumeForAts } from "@reactive-resume/resume/ats";
 import { copyCoverLetterStyle } from "@reactive-resume/resume/cover-letter";
+import { latestStageEntryId } from "@reactive-resume/schema/applications/data";
+import { SUBMITTED_DOCUMENT_LOCKED } from "@reactive-resume/schema/applications/errors";
+import { isDateOnlyFollowUp } from "@reactive-resume/schema/applications/follow-up";
+import { canonicalOpportunityUrl } from "@reactive-resume/schema/applications/posting-url";
+import { careerWorkspaceDataSchema, EMPTY_WORKSPACE } from "@reactive-resume/schema/career";
 import { coverLetterSchema } from "@reactive-resume/schema/cover-letter/data";
 import { generateId } from "@reactive-resume/utils/string";
 import { requestRunCancellation } from "../agent/cancellation";
 import { prepareRunAt } from "../career/scheduling";
-import { coverLetterService } from "../cover-letters/service";
+import { coverLetterService, linkLetterToApplication } from "../cover-letters/service";
 import { writeLetterVersion } from "../cover-letters/versions";
-import { lockUser } from "../documents/ownership";
+import { isRetriedCreate, lockUser, recordCreateRequest } from "../documents/ownership";
 import { resumeService } from "../resume/service";
 import { writeVersion } from "../resume/version-history";
 import { getStorageService, uploadFile } from "../storage/service";
+import { activeApplications } from "./access";
+import { assertUntrackedPosting, findTrackedPosting } from "./duplicates";
+import { syncFollowUp } from "./follow-up";
+import { applicationTransitionValues, ensureApplicationPipeline, savedStageOf } from "./lanes";
+
+/**
+ * Saves a new application inside the caller's transaction, under the user's lock: Add application, and Copy for a job
+ * when the job is saved with its copy. Returns its ID. With a client-chosen ID, `request` is what the client asked for:
+ * a retry of the same request returns the application without saving again, and any other use of the ID is refused.
+ */
+export async function insertApplication(
+	tx: DbOrTx,
+	input: {
+		userId: string;
+		id?: string | undefined;
+		request?: unknown;
+		fields: EditableFields & { company: string; role: string };
+		stage?: {
+			status?: ApplicationStatus | undefined;
+			laneId?: string | undefined;
+			closedReason?: ApplicationClosedReason | null | undefined;
+		};
+		at?: Date;
+	},
+) {
+	const id = input.id ?? generateId();
+	const created = input.id ? { table: "application" as const, id, userId: input.userId, request: input.request } : null;
+	await lockUser(tx, input.userId);
+	if (created && (await isRetriedCreate(tx, created))) return id;
+	await assertUntrackedPosting(tx, input.userId, input.fields.sourceUrl);
+	const { values } = await applicationTransitionValues(tx, input.userId, input.stage ?? {}, undefined, input.at);
+	const [row] = await tx
+		.insert(schema.application)
+		.values({
+			id,
+			userId: input.userId,
+			...input.fields,
+			followUpDateOnly:
+				input.fields.followUpDateOnly ??
+				isDateOnlyFollowUp({
+					followUpAt: input.fields.followUpAt ?? null,
+					followUpDateOnly: input.fields.followUpDateOnly,
+				}),
+			...values,
+		})
+		.returning();
+	if (created) await recordCreateRequest(tx, created);
+	if (row) {
+		await recordSentResume(row, tx);
+		if (row.coverLetterId)
+			await linkLetterToApplication(tx, { userId: input.userId, letterId: row.coverLetterId, applicationId: row.id });
+		if (row.followUpAt) await syncFollowUp(tx, row);
+	}
+	return id;
+}
 
 function timelineDate(value: Date | string): Date {
 	return value instanceof Date ? value : new Date(value);
@@ -50,11 +111,7 @@ function atFromDateString(date: string, existing?: Date | string): Date {
 	return parsed;
 }
 
-function stageEntry(stage: ApplicationStatus, date?: string): ApplicationTimelineEntry {
-	return { id: generateId(), type: "stage", stage, at: date ? atFromDateString(date) : new Date() };
-}
-
-function noteEntry(text: string, date?: string): ApplicationTimelineEntry {
+function noteEntry(text: string, date?: string): Extract<ApplicationTimelineEntry, { type: "note" }> {
 	return { id: generateId(), type: "note", text, at: date ? atFromDateString(date) : new Date() };
 }
 
@@ -74,31 +131,44 @@ function timelineDay(value: Date | string) {
 }
 
 function sortTimeline(activity: ApplicationTimelineEntry[]): ApplicationTimelineEntry[] {
-	return [...activity].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+	return [...activity].sort(
+		(a, b) =>
+			new Date(b.at).getTime() - new Date(a.at).getTime() ||
+			(b.type === "stage" ? (b.writeSequence ?? 0) : 0) - (a.type === "stage" ? (a.writeSequence ?? 0) : 0),
+	);
 }
 
+/** Lane-only transitions also anchor the current stage. Retirement preserves the last event's identity. */
 function currentStageAnchor(activity: ApplicationTimelineEntry[], status: ApplicationStatus) {
-	return sortTimeline(activity).find((entry) => entry.type === "stage" && entry.stage === status);
+	const id = latestStageEntryId(activity);
+	return (
+		activity.find((entry) => entry.id === id && entry.type === "stage" && entry.stage === status) ??
+		sortTimeline(activity).find((entry) => entry.type === "stage" && entry.stage === status)
+	);
 }
 
-function assertCurrentStageAnchorLatest(activity: ApplicationTimelineEntry[], status: ApplicationStatus) {
-	const anchor = currentStageAnchor(activity, status);
+function assertCurrentStageAnchorLatest(
+	activity: ApplicationTimelineEntry[],
+	status: ApplicationStatus,
+	anchorId?: string,
+) {
+	// Capture identity before editing dates; re-resolving after a date edit could select another lane's event.
+	const anchor = anchorId ? activity.find((entry) => entry.id === anchorId) : currentStageAnchor(activity, status);
 	if (!anchor)
 		throw new ORPCError("BAD_REQUEST", {
 			message: "This application's timeline is missing its current stage. Reload the application and try again.",
 		});
-
+	if (anchor.type === "stage" && anchor.dateUnknown) return;
 	const anchorDay = timelineDay(anchor.at);
-	const newerStage = activity.some((entry) => entry.type === "stage" && timelineDay(entry.at) > anchorDay);
-	if (newerStage) {
-		throw new ORPCError("BAD_REQUEST", {
-			message: "Choose a current stage date on or after the other stage dates.",
-		});
+	if (activity.some((entry) => entry.type === "stage" && !entry.dateUnknown && timelineDay(entry.at) > anchorDay)) {
+		throw new ORPCError("BAD_REQUEST", { message: "Choose a current stage date on or after the other stage dates." });
 	}
 }
 
 function appliedAtFromTimeline(activity: ApplicationTimelineEntry[], fallback: Date): Date {
-	const sorted = sortTimeline(activity);
+	const sorted = sortTimeline(activity).filter(
+		(entry) => entry.type !== "stage" || entry.canonicalTransition !== false,
+	);
 	const applied = sorted.find((entry) => entry.type === "stage" && entry.stage === "applied");
 	const fallbackEntry = sorted.at(-1);
 	return applied ? timelineDate(applied.at) : fallbackEntry ? timelineDate(fallbackEntry.at) : fallback;
@@ -109,9 +179,24 @@ async function requireOwned(id: string, userId: string) {
 	const [row] = await db
 		.select()
 		.from(schema.application)
-		.where(and(eq(schema.application.id, id), eq(schema.application.userId, userId)));
+		.where(and(eq(schema.application.id, id), activeApplications(userId)));
 	if (!row) throw new ORPCError("NOT_FOUND");
 	return row;
+}
+
+export async function assertApplicationVersion(
+	reader: DbOrTx,
+	userId: string,
+	expected: { id: string; updatedAt: Date },
+) {
+	const [current] = await reader
+		.select({ updatedAt: schema.application.updatedAt })
+		.from(schema.application)
+		.where(and(eq(schema.application.id, expected.id), activeApplications(userId)))
+		.for("share");
+	if (!current) throw new ORPCError("NOT_FOUND");
+	if (current.updatedAt.getTime() !== expected.updatedAt.getTime())
+		throw new ORPCError("CONFLICT", { message: "The application changed. Review it and try again." });
 }
 
 async function assertOwnedResume(userId: string, resumeId: string | null | undefined) {
@@ -127,16 +212,70 @@ async function assertOwnedCoverLetter(userId: string, coverLetterId: string | nu
 // Stages at which an application has been sent.
 const SENT_STAGES = new Set<ApplicationStatus>(["applied", "screening", "interview", "offer"]);
 
+/** Whether a stage means the application has already been sent (and so carries a submission record). */
+export const isSentStage = (status: ApplicationStatus) => SENT_STAGES.has(status);
+
 type ApplicationRow = typeof schema.application.$inferSelect;
+
+type SubmissionHistory = Pick<
+	ApplicationRow,
+	"status" | "activity" | "sentResumeVersionId" | "sentCoverLetterVersionId" | "submittedAt"
+>;
+
+/**
+ * Whether this application has already been submitted at any point in its life. The immediate status alone is not
+ * enough: a Closed job may have been Applied earlier, and reopening it must not turn a late-linked draft into a new
+ * sent receipt. `submittedAt` is durable (timeline edits cannot remove it); sent versions and a stage entry in a sent
+ * stage are fallbacks for rows created before the marker existed. appliedAt is not sound (Saved rows carry a default).
+ */
+export const hasSubmitted = (row: SubmissionHistory) =>
+	row.submittedAt != null ||
+	isSentStage(row.status) ||
+	Boolean(row.sentResumeVersionId) ||
+	Boolean(row.sentCoverLetterVersionId) ||
+	row.activity.some((entry) => entry.type === "stage" && isSentStage(entry.stage));
 
 /**
  * Once an application has been sent (Applied or later), its linked resume is saved as a "sent" version, named after
  * the company, with its Check score at the time, and so is its linked letter. The application keeps pointing at
  * them, so it can open exactly what went out while the documents move on.
  */
-export async function recordSentResume(row: ApplicationRow, client: DbOrTx): Promise<ApplicationRow> {
+export async function recordSentResume(
+	row: ApplicationRow,
+	client: DbOrTx,
+	previouslySubmitted = false,
+): Promise<ApplicationRow> {
 	if (!SENT_STAGES.has(row.status)) return row;
 	const changes: Partial<ApplicationRow> = {};
+	const recordedAt = row.submittedAt ?? new Date();
+	// The first sent snapshot also fixes the durable lifetime submission marker. Later timeline edits cannot erase it.
+	if (!row.submittedAt) changes.submittedAt = recordedAt;
+	const [workspace] = await client
+		.select()
+		.from(schema.careerWorkspace)
+		.where(and(eq(schema.careerWorkspace.applicationId, row.id), eq(schema.careerWorkspace.userId, row.userId)));
+	if (!workspace?.submissionReview && !row.submittedAt && !previouslySubmitted) {
+		const data = careerWorkspaceDataSchema.parse({ ...EMPTY_WORKSPACE, ...workspace?.data });
+		const submissionReview = {
+			at: recordedAt.toISOString(),
+			checklist: [...data.checklist],
+			documents: Boolean(row.resumeId || row.coverLetterId || row.resumeFileUrl || row.coverLetterUrl),
+			answers: data.answers.length > 0,
+			answerVersionId: null,
+			stageEntryId:
+				row.activity.findLast(
+					(entry) => entry.type === "stage" && entry.stage === "applied" && entry.canonicalTransition !== false,
+				)?.id ?? null,
+		};
+		await client
+			.insert(schema.careerWorkspace)
+			.values({ applicationId: row.id, userId: row.userId, data, submissionReview })
+			// Recording review metadata must not make unchanged answers look edited after submission.
+			.onConflictDoUpdate({
+				target: schema.careerWorkspace.applicationId,
+				set: { submissionReview, updatedAt: sql`${schema.careerWorkspace.updatedAt}` },
+			});
+	}
 
 	if (row.resumeId && !row.sentResumeVersionId) {
 		const [resume] = await client
@@ -152,6 +291,7 @@ export async function recordSentResume(row: ApplicationRow, client: DbOrTx): Pro
 			resumeId: row.resumeId,
 			userId: row.userId,
 			data: resume.data,
+			aiOperationIds: resume.aiOperationIds,
 			kind: "sent",
 			name: row.company,
 		});
@@ -207,13 +347,6 @@ export async function recordSentResume(row: ApplicationRow, client: DbOrTx): Pro
 		.where(eq(schema.application.id, row.id))
 		.returning();
 	return updated ?? row;
-}
-
-/** Closing keeps (or takes) a reason; any other stage clears it. */
-function stageFields(status: ApplicationStatus | undefined, closedReason: ApplicationClosedReason | null | undefined) {
-	if (status === undefined) return closedReason !== undefined ? { closedReason } : {};
-	if (status === "closed") return closedReason !== undefined ? { closedReason } : {};
-	return { closedReason: null };
 }
 
 async function assertOwnedResumes(userId: string, resumeIds: (string | null | undefined)[]) {
@@ -273,16 +406,86 @@ async function deleteApplicationAttachments(
 	await Promise.allSettled(keys.map((key) => storageService.delete(key)));
 }
 
-async function deleteApplicationCoaching(userId: string, applicationIds: string[]) {
-	if (!applicationIds.length) return;
-	const threads = await db
+function applicationThreads(reader: DbOrTx, userId: string, applicationIds: string[]) {
+	if (!applicationIds.length) return Promise.resolve([]);
+	return reader
 		.select({ id: schema.agentThread.id, runId: schema.agentThread.activeRunId })
 		.from(schema.agentThread)
 		.where(and(eq(schema.agentThread.userId, userId), inArray(schema.agentThread.applicationId, applicationIds)));
-	for (const thread of threads) {
-		if (thread.runId) await requestRunCancellation(thread.runId, "APPLICATION_DELETED");
-		await getStorageService().delete(`uploads/${userId}/agent/${thread.id}`);
-	}
+}
+
+/** Captured run IDs cannot cancel a newer conversation started after a restore. */
+async function stopApplicationRuns(threads: { runId: string | null }[]) {
+	await Promise.allSettled(
+		threads.flatMap((thread) => (thread.runId ? [requestRunCancellation(thread.runId, "APPLICATION_TRASHED")] : [])),
+	);
+}
+
+/** Preserve rows, foreign keys and files; serialize with application/document writers before hiding active work. */
+async function trashApplications(userId: string, ids: string[]) {
+	const result = await db.transaction(async (tx) => {
+		await lockUser(tx, userId);
+		const rows = await tx
+			.select()
+			.from(schema.application)
+			.where(and(activeApplications(userId), inArray(schema.application.id, ids)))
+			.orderBy(schema.application.id)
+			.for("update");
+		const threads = await applicationThreads(
+			tx,
+			userId,
+			rows.map((row) => row.id),
+		);
+		for (const row of rows) {
+			// Millisecond tokens stay distinct even when restore and re-trash occur within one clock tick.
+			const at = new Date(Math.max(Date.now(), row.updatedAt.getTime() + 1));
+			await tx
+				.update(schema.application)
+				.set({ trashedAt: at, updatedAt: at })
+				.where(and(eq(schema.application.id, row.id), activeApplications(userId)));
+		}
+		if (rows.length)
+			await tx
+				.update(schema.careerJob)
+				.set({ status: "canceled", lease: null, leaseUntil: null })
+				.where(
+					and(
+						eq(schema.careerJob.userId, userId),
+						inArray(
+							schema.careerJob.scheduleId,
+							tx
+								.select({ id: schema.careerSchedule.id })
+								.from(schema.careerSchedule)
+								.where(
+									and(
+										eq(schema.careerSchedule.userId, userId),
+										inArray(
+											schema.careerSchedule.applicationId,
+											rows.map((row) => row.id),
+										),
+									),
+								),
+						),
+						inArray(schema.careerJob.status, ["queued", "running"]),
+					),
+				);
+		return { deleted: rows.length, threads };
+	});
+	await stopApplicationRuns(result.threads);
+	return { deleted: result.deleted };
+}
+
+async function lockedTrash(tx: DbOrTx, input: { userId: string; id: string; trashedAt: Date }) {
+	await lockUser(tx, input.userId);
+	const [row] = await tx
+		.select()
+		.from(schema.application)
+		.where(and(eq(schema.application.id, input.id), eq(schema.application.userId, input.userId)))
+		.for("update");
+	if (!row) throw new ORPCError("NOT_FOUND");
+	if (!row.trashedAt || row.trashedAt.getTime() !== input.trashedAt.getTime())
+		throw new ORPCError("CONFLICT", { message: "This application changed in Trash. Reload before trying again." });
+	return row;
 }
 
 /**
@@ -402,105 +605,340 @@ const stripUserId = <T extends { userId: string; activity?: ApplicationTimelineE
 	return rest.activity ? { ...rest, activity: sortTimeline(rest.activity) } : rest;
 };
 
+// Hash the stored snapshot before display sorting; a timestamp alone can collide within one millisecond.
+const applicationReplyVersion = (row: ApplicationRow) => createHash("sha256").update(JSON.stringify(row)).digest("hex");
+const applicationContactsVersion = (row: Pick<ApplicationRow, "contacts">) =>
+	createHash("sha256").update(JSON.stringify(row.contacts)).digest("hex");
+const applicationView = (row: ApplicationRow) => ({
+	...stripUserId(row),
+	replyVersion: applicationReplyVersion(row),
+	contactsVersion: applicationContactsVersion(row),
+});
+
+const applicationSummarySelect = {
+	id: schema.application.id,
+	userId: schema.application.userId,
+	company: schema.application.company,
+	role: schema.application.role,
+	location: schema.application.location,
+	salary: schema.application.salary,
+	status: schema.application.status,
+	closedReason: schema.application.closedReason,
+	resumeId: schema.application.resumeId,
+	resumeFileUrl: schema.application.resumeFileUrl,
+	coverLetterUrl: schema.application.coverLetterUrl,
+	coverLetterId: schema.application.coverLetterId,
+	sentResumeVersionId: schema.application.sentResumeVersionId,
+	sentCoverLetterVersionId: schema.application.sentCoverLetterVersionId,
+	source: schema.application.source,
+	tags: schema.application.tags,
+	sourceUrl: schema.application.sourceUrl,
+	matchScore: schema.application.matchScore,
+	followUpAt: schema.application.followUpAt,
+	followUpNote: schema.application.followUpNote,
+	followUpDateOnly: schema.application.followUpDateOnly,
+	contacts: schema.application.contacts,
+	activity: sql<ApplicationTimelineEntry[]>`(select coalesce(jsonb_agg(case when entry->>'type' = 'note'
+		then entry || '{"text":"Followed up"}'::jsonb else entry end), '[]'::jsonb)
+		from jsonb_path_query(${schema.application.activity},
+		'$[*] ? (@.type == "stage" || @.type == "interview" || (@.type == "note" && exists(@.followedUp)))') as entry)`,
+	appliedAt: schema.application.appliedAt,
+	createdAt: schema.application.createdAt,
+	updatedAt: schema.application.updatedAt,
+	laneId: schema.application.laneId,
+};
+
 export const applicationService = {
-	list: async (input: { userId: string; status?: ApplicationStatus; tags?: string[] }) => {
-		const rows = await db
+	findPosting: (input: { userId: string; sourceUrl: string }) => findTrackedPosting(db, input.userId, input.sourceUrl),
+	list: async (input: {
+		userId: string;
+		status?: ApplicationStatus;
+		laneId?: string;
+		tags?: string[];
+		limit?: number;
+		offset?: number;
+	}) => {
+		const where = and(
+			activeApplications(input.userId),
+			input.status ? eq(schema.application.status, input.status) : undefined,
+			input.laneId ? eq(schema.application.laneId, input.laneId) : undefined,
+			input.tags && input.tags.length > 0 ? arrayContains(schema.application.tags, input.tags) : undefined,
+		);
+		// Bulk imports share an update timestamp; the ID keeps their pages stable.
+		const query = db
 			.select()
+			.from(schema.application)
+			.where(where)
+			.orderBy(sql`${schema.application.updatedAt} desc nulls last`, desc(schema.application.id));
+		const paged = input.limit !== undefined || input.offset !== undefined;
+		const [rows, totals] = await Promise.all([
+			paged ? query.limit(input.limit ?? 20).offset(input.offset ?? 0) : query,
+			paged ? db.select({ total: count() }).from(schema.application).where(where) : undefined,
+		]);
+
+		return { items: rows.map(applicationView), total: totals?.[0]?.total ?? rows.length };
+	},
+
+	listSummary: async (input: {
+		userId: string;
+		status?: ApplicationStatus;
+		laneId?: string;
+		tags?: string[];
+		limit?: number;
+		offset?: number;
+		includeInitialDetails?: number;
+	}) => {
+		const where = and(
+			activeApplications(input.userId),
+			input.status ? eq(schema.application.status, input.status) : undefined,
+			input.laneId ? eq(schema.application.laneId, input.laneId) : undefined,
+			input.tags && input.tags.length > 0 ? arrayContains(schema.application.tags, input.tags) : undefined,
+		);
+		const query = db
+			.select(applicationSummarySelect)
+			.from(schema.application)
+			.where(where)
+			.orderBy(sql`${schema.application.updatedAt} desc nulls last`, desc(schema.application.id));
+		const paged = input.limit !== undefined || input.offset !== undefined;
+		const [rows, totals] = await Promise.all([
+			paged ? query.limit(input.limit ?? 20).offset(input.offset ?? 0) : query,
+			paged ? db.select({ total: count() }).from(schema.application).where(where) : undefined,
+		]);
+
+		const items = rows.map(stripUserId);
+		const initialDetailCount = input.includeInitialDetails ?? 0;
+		if (initialDetailCount === 0 || items.length === 0) {
+			return { items, total: totals?.[0]?.total ?? rows.length };
+		}
+
+		// Web keeps SQL order within each stage. Mobile differs only when the cutoff
+		// falls inside a timestamp tie, so only that group needs an ID sort.
+		const stageOrder: readonly ApplicationStatus[] = ["interview", "offer", "screening", "applied", "saved", "closed"];
+		const buckets = new Map<ApplicationStatus, typeof items>();
+		for (const item of items) {
+			if (item.status === "closed" && input.status === undefined) continue;
+			const bucket = buckets.get(item.status);
+			if (bucket) bucket.push(item);
+			else buckets.set(item.status, [item]);
+		}
+		const webCandidates = stageOrder.flatMap((status) => buckets.get(status) ?? []).slice(0, initialDetailCount);
+		const candidateIds = new Set(webCandidates.map((item) => item.id));
+		const boundary = webCandidates.at(-1);
+		if (boundary) {
+			const sameGroup = (item: (typeof items)[number]) =>
+				item.status === boundary.status && item.updatedAt.getTime() === boundary.updatedAt.getTime();
+			const mobileCount = webCandidates.filter(sameGroup).length;
+			const tied = items.filter(sameGroup);
+			for (const item of tied.toSorted((a, b) => a.id.localeCompare(b.id)).slice(0, mobileCount)) {
+				candidateIds.add(item.id);
+			}
+		}
+		if (candidateIds.size === 0) return { items, total: totals?.[0]?.total ?? rows.length };
+
+		// Fetch candidates together so the initial response adds one bounded query, never one query per row.
+		const fullRows = await db
+			.select()
+			.from(schema.application)
+			.where(and(activeApplications(input.userId), inArray(schema.application.id, [...candidateIds])));
+		const details = new Map(fullRows.map((row) => [row.id, applicationView(row)]));
+		return {
+			items: items.map((item) => {
+				const initialDetail = details.get(item.id);
+				return initialDetail ? { ...item, initialDetail } : item;
+			}),
+			total: totals?.[0]?.total ?? rows.length,
+		};
+	},
+
+	/**
+	 * Earlier applications at the same company: by default those that ended without a response (older clients word
+	 * their notice that way); with `anyOutcome`, every closed one, with its outcome.
+	 */
+	priorNoResponse: (input: {
+		userId: string;
+		company: string;
+		excludeId?: string | undefined;
+		anyOutcome?: boolean | undefined;
+	}) => {
+		const at = input.anyOutcome
+			? sql<Date>`coalesce((select max((entry->>'at')::timestamptz) from jsonb_array_elements(${schema.application.activity}) entry
+   where entry->>'type' = 'stage' and entry->>'stage' = 'closed'), ${schema.application.updatedAt})`.mapWith(
+					schema.application.updatedAt,
+				)
+			: sql<Date>`coalesce((select max((entry->>'at')::timestamptz) from jsonb_array_elements(${schema.application.activity}) entry
+   where entry->>'type' = 'stage' and entry->>'closedReason' = 'no-response'), ${schema.application.updatedAt})`.mapWith(
+					schema.application.updatedAt,
+				);
+		const ghosted = sql`exists
+     (select 1 from jsonb_array_elements(${schema.application.activity}) entry where entry->>'type' = 'stage' and entry->>'closedReason' = 'no-response')`;
+		// A reopened application that once went unanswered still counts, and still reads as "no reply".
+		const outcome = input.anyOutcome
+			? sql`(${schema.application.status} = 'closed' or ${ghosted})`
+			: sql`((${schema.application.status} = 'closed' and ${schema.application.closedReason} = 'no-response') or ${ghosted})`;
+		const closedReason = sql<ApplicationClosedReason | null>`case
+     when ${schema.application.status} = 'closed' then ${schema.application.closedReason}
+     when ${ghosted} then 'no-response'
+     end`;
+		return db
+			.select({
+				id: schema.application.id,
+				company: schema.application.company,
+				role: schema.application.role,
+				at,
+				closedReason,
+			})
 			.from(schema.application)
 			.where(
 				and(
-					eq(schema.application.userId, input.userId),
-					input.status ? eq(schema.application.status, input.status) : undefined,
-					input.tags && input.tags.length > 0 ? arrayContains(schema.application.tags, input.tags) : undefined,
+					activeApplications(input.userId),
+					sql`lower(regexp_replace(trim(${schema.application.company}), '\\s+', ' ', 'g')) = lower(regexp_replace(trim(${input.company}), '\\s+', ' ', 'g'))`,
+					input.excludeId ? sql`${schema.application.id} <> ${input.excludeId}` : undefined,
+					outcome,
 				),
 			)
-			.orderBy(desc(schema.application.updatedAt));
-
-		return rows.map(stripUserId);
+			.orderBy(desc(at), schema.application.id)
+			.limit(10);
 	},
 
 	getById: async (input: { id: string; userId: string }) => {
-		return stripUserId(await requireOwned(input.id, input.userId));
+		return applicationView(await requireOwned(input.id, input.userId));
 	},
 
 	create: async (
 		input: EditableFields &
 			DocumentFiles & {
 				userId: string;
+				/** The new application's ID, chosen by the client so a retry can't save it twice. */
+				newId?: string | undefined;
 				company: string;
 				role: string;
 				status?: ApplicationStatus | undefined;
+				laneId?: string | undefined;
 				closedReason?: ApplicationClosedReason | null | undefined;
 				stageEnteredAt?: string | undefined;
 			},
 	) => {
-		const { userId, status, stageEnteredAt, closedReason, resumeFile, coverLetterFile, ...fields } = input;
-		const id = generateId();
-		const initialStatus = status ?? "saved";
-		const activity = [stageEntry(initialStatus, stageEnteredAt)];
-
+		const { userId, status, laneId, stageEnteredAt, closedReason, resumeFile, coverLetterFile, newId, ...fields } =
+			input;
+		const file = async (value: File | undefined) =>
+			value && {
+				name: value.name,
+				size: value.size,
+				type: value.type,
+				sha256: createHash("sha256")
+					.update(new Uint8Array(await value.arrayBuffer()))
+					.digest("hex"),
+			};
+		const request = {
+			operation: "applications.create",
+			fields,
+			stage: { status, laneId, closedReason, stageEnteredAt },
+			files: { resume: await file(resumeFile), coverLetter: await file(coverLetterFile) },
+		};
+		// A retry of a create that already landed (a lost response, a second press) returns the same application.
+		if (newId && (await isRetriedCreate(db, { table: "application", id: newId, userId, request }))) return newId;
 		await assertOwnedResume(userId, fields.resumeId);
 		await assertOwnedCoverLetter(userId, fields.coverLetterId);
-
 		return withDocumentFiles(userId, { resumeFile, coverLetterFile }, (uploadedFields) =>
-			db.transaction(async (tx) => {
-				await lockUser(tx, userId);
-				const [row] = await tx
-					.insert(schema.application)
-					.values({
-						id,
-						userId,
-						status: initialStatus,
-						...(initialStatus === "closed" && closedReason ? { closedReason } : {}),
-						activity,
-						appliedAt: appliedAtFromTimeline(activity, new Date()),
-						...fields,
-						...uploadedFields,
-					})
-					.returning();
-
-				if (row) await recordSentResume(row, tx);
-				return id;
-			}),
+			db.transaction((tx) =>
+				insertApplication(tx, {
+					userId,
+					id: newId,
+					request,
+					fields: { ...fields, ...uploadedFields },
+					stage: { status, laneId, closedReason },
+					at: stageEnteredAt ? atFromDateString(stageEnteredAt) : new Date(),
+				}),
+			),
 		);
 	},
-
 	importMany: async (input: {
 		userId: string;
 		items: (EditableFields & {
 			company: string;
 			role: string;
 			status?: ApplicationStatus | undefined;
+			laneId?: string | undefined;
+			closedReason?: ApplicationClosedReason | null | undefined;
 			stageEnteredAt?: string | undefined;
+			applicationDate?: string | undefined;
 		})[];
 	}) => {
-		if (input.items.length === 0) return { imported: 0 };
-
+		if (!input.items.length) return { imported: 0 };
 		await assertOwnedResumes(
 			input.userId,
 			input.items.map((item) => item.resumeId),
 		);
 		const coverLetterIds = new Set(input.items.map((item) => item.coverLetterId).filter((id) => !!id));
 		await Promise.all([...coverLetterIds].map((id) => assertOwnedCoverLetter(input.userId, id)));
-
-		const values = input.items.map(({ status, stageEnteredAt, ...fields }) => {
-			const initialStatus = status ?? ("saved" as ApplicationStatus);
-			const activity = [stageEntry(initialStatus, stageEnteredAt)];
-			return {
-				id: generateId(),
-				userId: input.userId,
-				status: initialStatus,
-				activity,
-				appliedAt: appliedAtFromTimeline(activity, new Date()),
-				...fields,
-			};
-		});
-
-		// Rows imported as already sent keep what went out, as create does.
 		return db.transaction(async (tx) => {
 			await lockUser(tx, input.userId);
+			const pipeline = await ensureApplicationPipeline(tx, input.userId);
+			const values = [];
+			const urls = new Set<string>();
+			for (const { status, laneId, closedReason, stageEnteredAt, applicationDate, ...fields } of input.items) {
+				await assertUntrackedPosting(tx, input.userId, fields.sourceUrl);
+				const url = fields.sourceUrl && canonicalOpportunityUrl(fields.sourceUrl);
+				if (url && urls.has(url))
+					throw new ORPCError("CONFLICT", { message: "Import contains the same posting twice." });
+				if (url) urls.add(url);
+				if (applicationDate && stageEnteredAt && stageEnteredAt < applicationDate)
+					throw new ORPCError("BAD_REQUEST", { message: "Stage date must be on or after the application date." });
+				const appliedDate = applicationDate ? atFromDateString(applicationDate) : undefined;
+				const enteredAt = stageEnteredAt
+					? atFromDateString(stageEnteredAt)
+					: status === "applied" && appliedDate
+						? appliedDate
+						: new Date();
+				const transition = await applicationTransitionValues(
+					tx,
+					input.userId,
+					{ status, laneId, closedReason },
+					undefined,
+					enteredAt,
+					pipeline,
+				);
+				let activity = (transition.values.activity ?? []).map((entry) => ({
+					...entry,
+					...(!stageEnteredAt && transition.values.status === "applied" && appliedDate ? { at: appliedDate } : {}),
+					...(!stageEnteredAt && !(transition.values.status === "applied" && appliedDate) ? { dateUnknown: true } : {}),
+				}));
+				if (
+					appliedDate &&
+					(transition.values.status !== "applied" ||
+						(!!stageEnteredAt && enteredAt.getTime() !== appliedDate.getTime()))
+				) {
+					const sent = await applicationTransitionValues(
+						tx,
+						input.userId,
+						{ status: "applied" },
+						undefined,
+						appliedDate,
+						pipeline,
+					);
+					activity = [...(sent.values.activity ?? []), ...activity.map((entry) => ({ ...entry, writeSequence: 2 }))];
+				}
+				values.push({
+					id: generateId(),
+					userId: input.userId,
+					...fields,
+					followUpDateOnly: fields.followUpDateOnly ?? isDateOnlyFollowUp({ followUpAt: fields.followUpAt ?? null }),
+					...transition.values,
+					activity,
+					...(appliedDate ? { appliedAt: appliedDate } : {}),
+				});
+			}
 			const rows = await tx.insert(schema.application).values(values).returning();
-			for (const row of rows) await recordSentResume(row, tx);
+			for (const row of rows) {
+				await recordSentResume(row, tx, true);
+				if (row.followUpAt) await syncFollowUp(tx, row);
+				if (row.coverLetterId)
+					await linkLetterToApplication(tx, {
+						userId: input.userId,
+						letterId: row.coverLetterId,
+						applicationId: row.id,
+					});
+			}
 			return { imported: rows.length };
 		});
 	},
@@ -510,14 +948,41 @@ export const applicationService = {
 			DocumentFiles & {
 				id: string;
 				userId: string;
+				canDeleteAttachments?: boolean;
 				status?: ApplicationStatus | undefined;
+				laneId?: string | undefined;
 				stageEnteredAt?: string | undefined;
 				closedReason?: ApplicationClosedReason | null | undefined;
 			},
 	) => {
 		const existing = await requireOwned(input.id, input.userId);
 
-		const { id, userId, status, stageEnteredAt, closedReason, resumeFile, coverLetterFile, ...fields } = input;
+		const {
+			id,
+			userId,
+			status,
+			laneId,
+			stageEnteredAt,
+			closedReason,
+			resumeFile,
+			coverLetterFile,
+			canDeleteAttachments = false,
+			...fields
+		} = input;
+		const assertAttachmentPermission = (current: typeof existing) => {
+			if (
+				!canDeleteAttachments &&
+				((current.resumeFileUrl &&
+					(resumeFile || (fields.resumeFileUrl !== undefined && fields.resumeFileUrl !== current.resumeFileUrl))) ||
+					(current.coverLetterUrl &&
+						(coverLetterFile ||
+							(fields.coverLetterUrl !== undefined && fields.coverLetterUrl !== current.coverLetterUrl))))
+			)
+				throw new ORPCError("FORBIDDEN", {
+					message: "Replacing or removing an attachment requires api:delete permission.",
+				});
+		};
+		assertAttachmentPermission(existing);
 		if (
 			(existing.sentResumeVersionId && fields.resumeId !== undefined && fields.resumeId !== existing.resumeId) ||
 			(existing.sentCoverLetterVersionId &&
@@ -527,25 +992,11 @@ export const applicationService = {
 			throw new ORPCError("BAD_REQUEST", {
 				message:
 					"Recorded submitted documents cannot be replaced. Prepare a copy to keep the submitted versions intact.",
+				data: { reason: SUBMITTED_DOCUMENT_LOCKED },
 			});
 		}
 		await assertOwnedResume(userId, fields.resumeId);
 		await assertOwnedCoverLetter(userId, fields.coverLetterId);
-
-		const statusEntry = status !== undefined ? stageEntry(status, stageEnteredAt) : undefined;
-		// Append in SQL so concurrent notes/stage events are not overwritten by a stale array.
-		const activityExpr =
-			statusEntry !== undefined
-				? sql`case when ${schema.application.status} <> ${status}
-						then ${schema.application.activity} || ${JSON.stringify([statusEntry])}::jsonb
-						else ${schema.application.activity} end`
-				: undefined;
-		const appliedAtExpr =
-			statusEntry !== undefined && status === "applied"
-				? sql`case when ${schema.application.status} <> ${status}
-						then ${statusEntry.at}
-						else ${schema.application.appliedAt} end`
-				: undefined;
 
 		return withDocumentFiles(userId, { resumeFile, coverLetterFile }, async (uploadedFields) => {
 			const result = await db.transaction(async (tx) => {
@@ -553,9 +1004,16 @@ export const applicationService = {
 				const [current] = await tx
 					.select()
 					.from(schema.application)
-					.where(and(eq(schema.application.id, id), eq(schema.application.userId, userId)))
+					.where(and(eq(schema.application.id, id), activeApplications(userId)))
 					.for("update");
 				if (!current) throw new ORPCError("NOT_FOUND");
+				if (fields.followUpAt !== undefined && fields.followUpDateOnly === undefined)
+					fields.followUpDateOnly =
+						fields.followUpAt?.getTime() === current.followUpAt?.getTime()
+							? current.followUpDateOnly
+							: isDateOnlyFollowUp({ followUpAt: fields.followUpAt });
+				await assertUntrackedPosting(tx, userId, fields.sourceUrl, id);
+				assertAttachmentPermission(current);
 				if (
 					(current.sentResumeVersionId && fields.resumeId !== undefined && fields.resumeId !== current.resumeId) ||
 					(current.sentCoverLetterVersionId &&
@@ -565,22 +1023,77 @@ export const applicationService = {
 					throw new ORPCError("BAD_REQUEST", {
 						message:
 							"Recorded submitted documents cannot be replaced. Prepare a copy to keep the submitted versions intact.",
+						data: { reason: SUBMITTED_DOCUMENT_LOCKED },
 					});
+				const { values, transition } = await applicationTransitionValues(
+					tx,
+					userId,
+					{ status, laneId, closedReason },
+					current,
+					stageEnteredAt ? atFromDateString(stageEnteredAt) : new Date(),
+				);
+				if (
+					!transition.changed &&
+					Object.values(fields).every((value) => value === undefined) &&
+					Object.keys(uploadedFields).length === 0
+				)
+					return applicationView(current);
 				const [updated] = await tx
 					.update(schema.application)
 					.set({
 						...fields,
 						...uploadedFields,
-						...(status !== undefined ? { status } : {}),
-						...(appliedAtExpr ? { appliedAt: appliedAtExpr } : {}),
-						...stageFields(status, closedReason),
-						...(activityExpr ? { activity: activityExpr } : {}),
+						...values,
 					})
-					.where(and(eq(schema.application.id, id), eq(schema.application.userId, userId)))
+					.where(and(eq(schema.application.id, id), activeApplications(userId)))
 					.returning();
 
 				if (!updated) throw new ORPCError("NOT_FOUND");
-				return stripUserId(await recordSentResume(updated, tx));
+				if (
+					fields.followUpAt !== undefined ||
+					fields.followUpNote !== undefined ||
+					fields.followUpDateOnly !== undefined
+				)
+					await syncFollowUp(tx, updated);
+				if (current.status === "saved" && !hasSubmitted(current) && updated.resumeId !== current.resumeId) {
+					const [workspace] = await tx
+						.select()
+						.from(schema.careerWorkspace)
+						.where(and(eq(schema.careerWorkspace.applicationId, id), eq(schema.careerWorkspace.userId, userId)));
+					if (workspace)
+						await tx
+							.update(schema.careerWorkspace)
+							.set({
+								data: {
+									...workspace.data,
+									checklist: workspace.data.checklist.filter((index) => index !== 0 && index !== 1),
+								},
+								updatedAt: new Date(),
+							})
+							.where(eq(schema.careerWorkspace.applicationId, id));
+				}
+				// A sent snapshot belongs to the moment the application first enters a sent stage, or to an explicit
+				// submission. Later metadata saves and stage advances must not turn a late-linked draft into "sent".
+				const result =
+					!hasSubmitted(current) && isSentStage(updated.status) ? await recordSentResume(updated, tx) : updated;
+				// Every explicit letter-link write reconciles both sides, including an equal-ID save that may be
+				// repairing a legacy null reverse or multiple aliases.
+				if (fields.coverLetterId !== undefined) {
+					if (fields.coverLetterId !== current.coverLetterId && current.coverLetterId)
+						await linkLetterToApplication(tx, {
+							userId,
+							letterId: current.coverLetterId,
+							applicationId: null,
+							clearApplicationId: id,
+						});
+					if (fields.coverLetterId)
+						await linkLetterToApplication(tx, {
+							userId,
+							letterId: fields.coverLetterId,
+							applicationId: id,
+						});
+				}
+				return applicationView(result);
 			});
 			if (fields.resumeFileUrl !== undefined || fields.coverLetterUrl !== undefined || resumeFile || coverLetterFile) {
 				await deleteApplicationAttachments(userId, [existing]).catch(() => {});
@@ -589,36 +1102,57 @@ export const applicationService = {
 		});
 	},
 
-	attachDocument: (input: { id: string; userId: string; kind: ApplicationDocumentKind; file: File }) => {
+	attachDocument: (input: {
+		id: string;
+		userId: string;
+		kind: ApplicationDocumentKind;
+		file: File;
+		canDeleteAttachments?: boolean;
+	}) => {
 		const fields = documentFields(input.kind);
-		return applicationService.update({ id: input.id, userId: input.userId, [fields.file]: input.file });
+		return applicationService.update({
+			id: input.id,
+			userId: input.userId,
+			[fields.file]: input.file,
+			canDeleteAttachments: input.canDeleteAttachments ?? false,
+		});
 	},
 
 	removeDocument: (input: { id: string; userId: string; kind: ApplicationDocumentKind }) => {
 		const fields = documentFields(input.kind);
-		return applicationService.update({ id: input.id, userId: input.userId, [fields.url]: null, [fields.name]: null });
+		return applicationService.update({
+			id: input.id,
+			userId: input.userId,
+			[fields.url]: null,
+			[fields.name]: null,
+			canDeleteAttachments: true,
+		});
 	},
 
 	// Persist AI-owned enrichment (match score + freeform metadata). Separate from the editable
 	// update path so these fields are only ever written by the AI procedures.
-	setAiResult: async (input: {
+	setAiResult: (input: {
 		id: string;
 		userId: string;
 		matchScore?: number | null;
 		aiMetadata?: AiMetadata | null;
-	}) => {
-		const [updated] = await db
-			.update(schema.application)
-			.set({
-				...(input.matchScore !== undefined ? { matchScore: input.matchScore } : {}),
-				...(input.aiMetadata !== undefined ? { aiMetadata: input.aiMetadata } : {}),
-			})
-			.where(and(eq(schema.application.id, input.id), eq(schema.application.userId, input.userId)))
-			.returning();
+		check?: (tx: DbOrTx) => Promise<void>;
+	}) =>
+		db.transaction(async (tx) => {
+			await lockUser(tx, input.userId);
+			await input.check?.(tx);
+			const [updated] = await tx
+				.update(schema.application)
+				.set({
+					...(input.matchScore !== undefined ? { matchScore: input.matchScore } : {}),
+					...(input.aiMetadata !== undefined ? { aiMetadata: input.aiMetadata } : {}),
+				})
+				.where(and(eq(schema.application.id, input.id), activeApplications(input.userId)))
+				.returning();
 
-		if (!updated) throw new ORPCError("NOT_FOUND");
-		return stripUserId(updated);
-	},
+			if (!updated) throw new ORPCError("NOT_FOUND");
+			return applicationView(updated);
+		}),
 
 	addNote: async (input: { id: string; userId: string; text: string; date?: string | undefined }) => {
 		// Append in a single statement (activity || [event]) so concurrent notes can't drop each
@@ -627,12 +1161,66 @@ export const applicationService = {
 		const [updated] = await db
 			.update(schema.application)
 			.set({ activity: sql`${schema.application.activity} || ${JSON.stringify([event])}::jsonb` })
-			.where(and(eq(schema.application.id, input.id), eq(schema.application.userId, input.userId)))
+			.where(and(eq(schema.application.id, input.id), activeApplications(input.userId)))
 			.returning();
 
 		if (!updated) throw new ORPCError("NOT_FOUND");
-		return stripUserId(updated);
+		return applicationView(updated);
 	},
+
+	deleteContact: (input: { id: string; userId: string; index: number; expectedVersion: string }) =>
+		db.transaction(async (tx) => {
+			const [existing] = await tx
+				.select()
+				.from(schema.application)
+				.where(and(eq(schema.application.id, input.id), activeApplications(input.userId)))
+				.for("update");
+			if (!existing) throw new ORPCError("NOT_FOUND");
+			if (applicationContactsVersion(existing) !== input.expectedVersion || !existing.contacts[input.index])
+				throw new ORPCError("CONFLICT", { message: "The contacts changed. Reload them before removing the contact." });
+			const [updated] = await tx
+				.update(schema.application)
+				.set({ contacts: existing.contacts.filter((_, index) => index !== input.index) })
+				.where(and(eq(schema.application.id, input.id), activeApplications(input.userId)))
+				.returning({ id: schema.application.id });
+			if (!updated) throw new ORPCError("NOT_FOUND");
+		}),
+
+	/** Records contact within the locked visit; an explicit reply also clears the owned follow-up and its schedule. */
+	logFollowUp: (input: { id: string; userId: string; reply?: { expectedVersion: string } | undefined }) =>
+		db.transaction(async (tx) => {
+			if (input.reply) await lockUser(tx, input.userId);
+			const [existing] = await tx
+				.select()
+				.from(schema.application)
+				.where(and(eq(schema.application.id, input.id), activeApplications(input.userId)))
+				.for("update");
+			if (!existing) throw new ORPCError("NOT_FOUND");
+			if (existing.status === "saved" || existing.status === "closed")
+				throw new ORPCError("BAD_REQUEST", { message: "Follow-ups can only be logged for open, sent applications." });
+			if (input.reply && applicationReplyVersion(existing) !== input.reply.expectedVersion)
+				throw new ORPCError("CONFLICT", { message: "The application changed. Reload it before logging your reply." });
+			const event: ApplicationTimelineEntry = {
+				...noteEntry(input.reply ? "Replied" : "Followed up"),
+				followedUp: {
+					...(input.reply ? { kind: "reply" as const } : {}),
+					stageEntryId: latestStageEntryId(
+						existing.activity.filter((entry) => entry.type === "stage" && entry.canonicalTransition !== false),
+					),
+				},
+			};
+			const [updated] = await tx
+				.update(schema.application)
+				.set({
+					activity: sql`${schema.application.activity} || ${JSON.stringify([event])}::jsonb`,
+					...(input.reply ? { followUpAt: null, followUpNote: null, followUpDateOnly: false } : {}),
+				})
+				.where(and(eq(schema.application.id, input.id), activeApplications(input.userId)))
+				.returning();
+			if (!updated) throw new ORPCError("NOT_FOUND");
+			if (input.reply) await syncFollowUp(tx, updated);
+			return applicationView(updated);
+		}),
 
 	addInterview: async (input: InterviewDetails & { id: string; userId: string; at: string }) => {
 		const { id, userId, at, ...details } = input;
@@ -641,11 +1229,11 @@ export const applicationService = {
 		const [updated] = await db
 			.update(schema.application)
 			.set({ activity: sql`${schema.application.activity} || ${JSON.stringify([event])}::jsonb` })
-			.where(and(eq(schema.application.id, id), eq(schema.application.userId, userId)))
+			.where(and(eq(schema.application.id, id), activeApplications(userId)))
 			.returning();
 
 		if (!updated) throw new ORPCError("NOT_FOUND");
-		return stripUserId(updated);
+		return applicationView(updated);
 	},
 
 	updateInterview: (
@@ -663,7 +1251,7 @@ export const applicationService = {
 			const [existing] = await tx
 				.select()
 				.from(schema.application)
-				.where(and(eq(schema.application.id, id), eq(schema.application.userId, userId)))
+				.where(and(eq(schema.application.id, id), activeApplications(userId)))
 				.for("update");
 			if (!existing) throw new ORPCError("NOT_FOUND");
 
@@ -680,14 +1268,14 @@ export const applicationService = {
 			const [updated] = await tx
 				.update(schema.application)
 				.set({ activity })
-				.where(and(eq(schema.application.id, id), eq(schema.application.userId, userId)))
+				.where(and(eq(schema.application.id, id), activeApplications(userId)))
 				.returning();
 
 			if (!updated) throw new ORPCError("NOT_FOUND");
 			// Only a new time moves briefings; re-saving the same time would cancel a briefing that's running.
 			const moved = at !== undefined && interviewAt(at).getTime() !== new Date(target.at).getTime();
 			if (moved) await followInterviewSchedules(tx, userId, id, entryId, interviewAt(at));
-			return stripUserId(updated);
+			return applicationView(updated);
 		});
 	},
 
@@ -702,10 +1290,11 @@ export const applicationService = {
 			const [existing] = await tx
 				.select()
 				.from(schema.application)
-				.where(and(eq(schema.application.id, input.id), eq(schema.application.userId, input.userId)))
+				.where(and(eq(schema.application.id, input.id), activeApplications(input.userId)))
 				.for("update");
 			if (!existing) throw new ORPCError("NOT_FOUND");
 
+			const anchor = currentStageAnchor(existing.activity, existing.status);
 			const activity = existing.activity.map((entry) => {
 				if (entry.id !== input.entryId) return entry;
 
@@ -722,25 +1311,32 @@ export const applicationService = {
 
 				return {
 					...entry,
-					...(input.date !== undefined ? { at: atFromDateString(input.date, entry.at) } : {}),
+					...(input.date !== undefined
+						? { at: atFromDateString(input.date, entry.at), ...(entry.type === "stage" ? { dateUnknown: false } : {}) }
+						: {}),
 					...(entry.type === "note" && input.text !== undefined ? { text: input.text } : {}),
 				};
 			});
 
 			if (!activity.some((entry) => entry.id === input.entryId)) throw new ORPCError("NOT_FOUND");
-			assertCurrentStageAnchorLatest(activity, existing.status);
+			if (input.date !== undefined && activity.some((entry) => entry.id === input.entryId && entry.type === "stage"))
+				assertCurrentStageAnchorLatest(activity, existing.status, anchor?.id);
 
 			const [updated] = await tx
 				.update(schema.application)
 				.set({
 					activity,
-					appliedAt: appliedAtFromTimeline(activity, existing.appliedAt),
+					appliedAt: existing.activity.some(
+						(entry) => entry.id === input.entryId && (entry.type !== "stage" || entry.canonicalTransition === false),
+					)
+						? existing.appliedAt
+						: appliedAtFromTimeline(activity, existing.appliedAt),
 				})
-				.where(and(eq(schema.application.id, input.id), eq(schema.application.userId, input.userId)))
+				.where(and(eq(schema.application.id, input.id), activeApplications(input.userId)))
 				.returning();
 
 			if (!updated) throw new ORPCError("NOT_FOUND");
-			return stripUserId(updated);
+			return applicationView(updated);
 		});
 	},
 
@@ -749,7 +1345,7 @@ export const applicationService = {
 			const [existing] = await tx
 				.select()
 				.from(schema.application)
-				.where(and(eq(schema.application.id, input.id), eq(schema.application.userId, input.userId)))
+				.where(and(eq(schema.application.id, input.id), activeApplications(input.userId)))
 				.for("update");
 			if (!existing) throw new ORPCError("NOT_FOUND");
 
@@ -762,118 +1358,167 @@ export const applicationService = {
 			}
 
 			const activity = existing.activity.filter((item) => item.id !== input.entryId);
-			assertCurrentStageAnchorLatest(activity, existing.status);
+			if (entry.type === "stage") assertCurrentStageAnchorLatest(activity, existing.status, anchor?.id);
 
 			const [updated] = await tx
 				.update(schema.application)
 				.set({
 					activity,
-					appliedAt: appliedAtFromTimeline(activity, existing.appliedAt),
+					appliedAt: existing.activity.some(
+						(entry) => entry.id === input.entryId && (entry.type !== "stage" || entry.canonicalTransition === false),
+					)
+						? existing.appliedAt
+						: appliedAtFromTimeline(activity, existing.appliedAt),
 				})
-				.where(and(eq(schema.application.id, input.id), eq(schema.application.userId, input.userId)))
+				.where(and(eq(schema.application.id, input.id), activeApplications(input.userId)))
 				.returning();
 
 			if (!updated) throw new ORPCError("NOT_FOUND");
 			if (entry.type === "interview") await followInterviewSchedules(tx, input.userId, input.id, entry.id, null);
-			return stripUserId(updated);
+			return applicationView(updated);
 		});
 	},
 
 	delete: async (input: { id: string; userId: string }) => {
-		const existing = await requireOwned(input.id, input.userId);
-		await deleteApplicationCoaching(input.userId, [input.id]);
-		const result = await db.transaction(async (tx) => {
-			await lockUser(tx, input.userId);
-			return tx
+		const result = await trashApplications(input.userId, [input.id]);
+		if (!result.deleted) throw new ORPCError("NOT_FOUND");
+	},
+
+	listTrash: async (input: { userId: string; limit: number; offset: number }) => {
+		const scope = and(eq(schema.application.userId, input.userId), isNotNull(schema.application.trashedAt));
+		const [items, [total]] = await Promise.all([
+			db
+				.select({
+					id: schema.application.id,
+					company: schema.application.company,
+					role: schema.application.role,
+					trashedAt: schema.application.trashedAt,
+				})
+				.from(schema.application)
+				.where(scope)
+				.orderBy(desc(schema.application.trashedAt), schema.application.id)
+				.limit(input.limit)
+				.offset(input.offset),
+			db.select({ count: count() }).from(schema.application).where(scope),
+		]);
+		return {
+			items: items.flatMap((row) => (row.trashedAt ? [{ ...row, trashedAt: row.trashedAt }] : [])),
+			total: total?.count ?? 0,
+		};
+	},
+
+	restore: (input: { userId: string; id: string; trashedAt: Date }) =>
+		db.transaction(async (tx) => {
+			const row = await lockedTrash(tx, input);
+			await assertUntrackedPosting(tx, input.userId, row.sourceUrl, row.id);
+			await tx
+				.update(schema.application)
+				.set({ trashedAt: null, updatedAt: new Date(Math.max(Date.now(), row.updatedAt.getTime() + 1)) })
+				.where(
+					and(
+						eq(schema.application.id, input.id),
+						eq(schema.application.userId, input.userId),
+						eq(schema.application.trashedAt, input.trashedAt),
+					),
+				);
+		}),
+
+	purge: async (input: { userId: string; id: string; trashedAt: Date }) => {
+		const { row, threads } = await db.transaction(async (tx) => {
+			const row = await lockedTrash(tx, input);
+			const threads = await applicationThreads(tx, input.userId, [input.id]);
+			await tx
 				.delete(schema.application)
-				.where(and(eq(schema.application.id, input.id), eq(schema.application.userId, input.userId)))
-				.returning({ id: schema.application.id });
+				.where(
+					and(
+						eq(schema.application.id, input.id),
+						eq(schema.application.userId, input.userId),
+						eq(schema.application.trashedAt, input.trashedAt),
+					),
+				);
+			return { row, threads };
 		});
-		if (result.length === 0) throw new ORPCError("NOT_FOUND");
-		await deleteApplicationAttachments(input.userId, [existing]);
+		await stopApplicationRuns(threads);
+		await Promise.allSettled(
+			threads.map((thread) => getStorageService().delete(`uploads/${input.userId}/agent/${thread.id}`)),
+		);
+		await deleteApplicationAttachments(input.userId, [row]);
 	},
 
 	bulkUpdate: (input: {
 		userId: string;
 		ids: string[];
 		status?: ApplicationStatus | undefined;
+		laneId?: string | undefined;
 		closedReason?: ApplicationClosedReason | null | undefined;
 		addTags?: string[] | undefined;
-	}) => {
-		const scope = and(inArray(schema.application.id, input.ids), eq(schema.application.userId, input.userId));
-
-		// Tags: union the new tags into the existing array (de-duplicated) in a single statement.
-		// Build an explicit `array[$1, $2]` — drizzle renders a bare JS array as a tuple `($1,$2)`,
-		// which can't be cast to text[].
-		const tagsExpr =
-			input.addTags && input.addTags.length > 0
-				? sql`(select array(select distinct unnest(${schema.application.tags} || array[${sql.join(
-						input.addTags.map((tag) => sql`${tag}`),
-						sql`, `,
-					)}]::text[])))`
-				: undefined;
-
-		// Stage moves must log a timeline event on every row that actually changed — mirror the
-		// single-item update path. Append the event only where the current status differs.
-		const statusEntry = input.status !== undefined ? stageEntry(input.status) : undefined;
-		const activityExpr =
-			statusEntry !== undefined
-				? sql`case when ${schema.application.status} <> ${input.status}
-					then ${schema.application.activity} || ${JSON.stringify([statusEntry])}::jsonb
-					else ${schema.application.activity} end`
-				: undefined;
-		const appliedAtExpr =
-			statusEntry !== undefined && input.status === "applied"
-				? sql`case when ${schema.application.status} <> ${input.status}
-					then ${statusEntry.at}
-					else ${schema.application.appliedAt} end`
-				: undefined;
-
-		return db.transaction(async (tx) => {
+		expectedStages?:
+			| {
+					id: string;
+					status: ApplicationStatus;
+					laneId?: string | null | undefined;
+					closedReason: ApplicationClosedReason | null;
+					stageEntryId?: string | null | undefined;
+			  }[]
+			| undefined;
+	}) =>
+		db.transaction(async (tx) => {
 			await lockUser(tx, input.userId);
-			const rows = await tx
-				.update(schema.application)
-				.set({
-					...(input.status !== undefined ? { status: input.status } : {}),
-					...(appliedAtExpr ? { appliedAt: appliedAtExpr } : {}),
-					...(activityExpr ? { activity: activityExpr } : {}),
-					...stageFields(input.status, input.closedReason),
-					...(tagsExpr ? { tags: tagsExpr } : {}),
-				})
-				.where(scope)
-				.returning();
+			const pipeline = await ensureApplicationPipeline(tx, input.userId);
+			const scope = and(inArray(schema.application.id, input.ids), activeApplications(input.userId));
+			const rows = await tx.select().from(schema.application).where(scope).for("update");
+			const expected = new Map(input.expectedStages?.map((stage) => [stage.id, stage]));
+			// Each moved row's stage as saved, so the client's next move of it can start from there.
+			const stages: ReturnType<typeof savedStageOf>[] = [];
+			const saved = (row: ApplicationRow) => stages.push(savedStageOf(row));
+			let updated = 0;
+			for (const row of rows) {
+				// Rows are locked, so this check and the write below see the same stage: a move made since wins, even one
+				// that has come back to the same stage. Every move, lane-only ones too, adds a stage change, so a client that
+				// sends one is checked on it rather than on the lane, which also changes without a move (a retired lane's
+				// rows going to its replacement, a legacy row getting its default lane).
+				const stage = expected.get(row.id);
+				if (
+					stage &&
+					(stage.status !== row.status ||
+						(stage.closedReason ?? null) !== (row.closedReason ?? null) ||
+						(stage.stageEntryId === undefined
+							? stage.laneId !== undefined && (stage.laneId ?? null) !== (row.laneId ?? null)
+							: stage.stageEntryId !== latestStageEntryId(row.activity)))
+				)
+					continue;
+				updated += 1;
+				const { values, transition } = await applicationTransitionValues(
+					tx,
+					input.userId,
+					input,
+					row,
+					new Date(),
+					pipeline,
+				);
+				const tags = [...new Set([...row.tags, ...(input.addTags ?? [])])];
+				if (!transition.changed && tags.length === row.tags.length) {
+					saved(row);
+					continue;
+				}
+				const [written] = await tx
+					.update(schema.application)
+					.set({ ...values, tags })
+					.where(and(eq(schema.application.id, row.id), activeApplications(input.userId)))
+					.returning();
+				saved(written ?? row);
+				if (written && transition.canonicalTransition && !hasSubmitted(row)) await recordSentResume(written, tx);
+			}
+			return { updated, stages };
+		}),
 
-			for (const row of rows) await recordSentResume(row, tx);
-			return { updated: rows.length };
-		});
-	},
-
-	bulkDelete: async (input: { userId: string; ids: string[] }) => {
-		const existing = await db
-			.select()
-			.from(schema.application)
-			.where(and(inArray(schema.application.id, input.ids), eq(schema.application.userId, input.userId)));
-		await deleteApplicationCoaching(
-			input.userId,
-			existing.map((item) => item.id),
-		);
-		const rows = await db.transaction(async (tx) => {
-			await lockUser(tx, input.userId);
-			return tx
-				.delete(schema.application)
-				.where(and(inArray(schema.application.id, input.ids), eq(schema.application.userId, input.userId)))
-				.returning({ id: schema.application.id });
-		});
-		await deleteApplicationAttachments(
-			input.userId,
-			existing.filter((application) => rows.some((row) => row.id === application.id)),
-		);
-		return { deleted: rows.length };
+	bulkDelete: (input: { userId: string; ids: string[] }) => {
+		return trashApplications(input.userId, input.ids);
 	},
 
 	// Raw counts for Insights; funnel/sankey/tiles are derived client-side from these.
 	stats: async (input: { userId: string }) => {
-		const scope = eq(schema.application.userId, input.userId);
+		const scope = activeApplications(input.userId);
 
 		const byStage = await db
 			.select({ status: schema.application.status, count: sql<number>`count(*)::int` })
@@ -902,7 +1547,7 @@ export const applicationService = {
 		const rows = await db
 			.select({ tag: sql<string>`distinct unnest(${schema.application.tags})` })
 			.from(schema.application)
-			.where(eq(schema.application.userId, input.userId));
+			.where(activeApplications(input.userId));
 
 		return rows.map((row) => row.tag).sort((a, b) => a.localeCompare(b));
 	},

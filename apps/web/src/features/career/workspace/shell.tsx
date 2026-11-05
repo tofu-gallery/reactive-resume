@@ -4,7 +4,8 @@ import type { Application } from "@/features/applications/types";
 import type { InterviewTimelineEntry } from "@reactive-resume/schema/applications/data";
 import type { WorkspaceTab } from "@reactive-resume/schema/career";
 import type { ReactNode } from "react";
-import { t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural, t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
 import { useQuery } from "@tanstack/react-query";
@@ -21,6 +22,7 @@ import { downloadWithAnchor } from "@reactive-resume/utils/file";
 import { getInitials } from "@reactive-resume/utils/string";
 import { cn } from "@reactive-resume/utils/style";
 import { useOverlayHistory, useSavedItems } from "../hooks";
+import { CareerLoadError } from "../load-state";
 import { CountdownChip, Eyebrow, minutesUntil, tabLabel, useCareerTime, useNow } from "../shared";
 import { ApplyTab } from "./apply";
 import { CoachSheet } from "./coach-sheet";
@@ -34,8 +36,10 @@ import { ApplicationNotes } from "@/features/applications/components/application
 import { InterviewDialog } from "@/features/applications/components/interview-dialog";
 import { buildIcs } from "@/features/applications/ics";
 import { formatDuration, interviewKindOf, isInterview } from "@/features/applications/interviews";
+import { getDisplayLane, getLaneLabel } from "@/features/applications/lanes";
 import { describeNextStep, getNextStep } from "@/features/applications/next-step";
-import { getStageLabel, PIPELINE } from "@/features/applications/stages";
+import { offerHintFor, useOfferHints } from "@/features/applications/queries";
+import { useApplicationLanes } from "@/features/applications/use-application-lanes";
 import { D1, EASE } from "@/libs/motion";
 import { orpc } from "@/libs/orpc/client";
 
@@ -45,6 +49,11 @@ export type WorkspaceSearch = {
 	version?: string | undefined;
 	speak?: boolean | undefined;
 	story?: string | undefined;
+	warmup?: boolean | undefined;
+	/** Messages opens with the offer form ("Add the offer's terms"). */
+	offer?: "new" | undefined;
+	/** The interview round to work on, when a link names one (a later round of the same application). */
+	round?: string | undefined;
 };
 
 /** What every tab receives: the application, and a saved version to show read-only ("Open in Prepare"). */
@@ -57,8 +66,11 @@ export type WorkspaceTabProps = {
 	/** Practise: open with Speak selected. */
 	speak: boolean;
 	story?: string | undefined;
+	warmup?: boolean | undefined;
 	now: Date;
 	go: (tab: WorkspaceTab, search?: WorkspaceSearch) => void;
+	/** Messages: open the offer form at once, then forget the request once it closes. */
+	offerForm?: { open: boolean; onDone: () => void } | undefined;
 };
 
 const DAY = 86_400_000;
@@ -88,7 +100,7 @@ function defaultTab(application: Application, now: Date): WorkspaceTab {
 	const ended = interview && +new Date(interview.at) + interview.durationMinutes * 60_000 < +now;
 	switch (application.status) {
 		case "saved":
-			return "fit";
+			return "apply";
 		case "applied":
 			return "apply";
 		case "screening":
@@ -115,6 +127,8 @@ export function Workspace({ applicationId, tab: requested, search }: WorkspacePr
 	const breakpoint = useBreakpoint();
 	const query = useQuery(orpc.applications.getById.queryOptions({ input: { id: applicationId } }));
 	const saved = useSavedItems(applicationId);
+	// Items being deleted (Undo still offered) are already gone from the list: leave them out of the badge too.
+	const savedCount = saved.data?.length ?? 0;
 	const workspace = useQuery(orpc.career.workspace.queryOptions({ input: { applicationId } }));
 	const overlay = useOverlayHistory();
 	const application = query.data;
@@ -138,7 +152,13 @@ export function Workspace({ applicationId, tab: requested, search }: WorkspacePr
 		);
 
 	const tab = requested ?? defaultTab(application, now);
-	const interview = currentInterview(application, now);
+	// A link to a later round names it; otherwise the next one to come.
+	const named = search.round
+		? application.activity.find(
+				(entry): entry is InterviewTimelineEntry => isInterview(entry) && entry.id === search.round,
+			)
+		: undefined;
+	const interview = search.warmup && search.round ? named : (named ?? currentInterview(application, now));
 	const version = search.version ? saved.data?.find((item) => item.id === search.version) : undefined;
 	const archived = search.version !== undefined;
 	const archiveUnavailable = archived && (!version || version.data.kind !== archiveKinds[tab]);
@@ -152,7 +172,8 @@ export function Workspace({ applicationId, tab: requested, search }: WorkspacePr
 		void navigate({
 			to: "/dashboard/applications/$applicationId/{-$tab}",
 			params: { applicationId, tab: next },
-			search: nextSearch,
+			// The chosen round stays chosen from tab to tab.
+			search: { ...(search.round ? { round: search.round } : {}), ...nextSearch },
 			viewTransition: false,
 		});
 	const setSearch = (patch: WorkspaceSearch, push = false) =>
@@ -175,6 +196,8 @@ export function Workspace({ applicationId, tab: requested, search }: WorkspacePr
 		go,
 		speak: search.speak === true,
 		story: search.story,
+		warmup: search.warmup === true,
+		offerForm: { open: search.offer === "new", onDone: () => setSearch({ offer: undefined }) },
 	};
 	// Messages shows the newest read message: it waits for a decision while its changes aren't applied.
 	const newestReply = saved.data?.find((item) => item.data.kind === "reply");
@@ -237,13 +260,18 @@ export function Workspace({ applicationId, tab: requested, search }: WorkspacePr
 								{tabLabel(value)}
 								{value === "prepare" && minutes !== null && minutes > 0 && minutes < 7 * 24 * 60 && (
 									<TabBadge tone={minutes <= 60 ? "warn" : "accent"}>
-										{minutes <= 60 ? t`${minutes} min` : t`${Math.round(minutes / 60)} h`}
+										{/* Past two days, days: "113 h" beside "In 5 days" reads as two different times. */}
+										{minutes <= 60
+											? t`${ph({ minutes: i18n.number(minutes) })} min`
+											: minutes < 48 * 60
+												? t`${i18n.number(Math.round(minutes / 60))} h`
+												: plural(Math.round(minutes / (24 * 60)), { one: "# day", other: "# days" })}
 									</TabBadge>
 								)}
-								{value === "messages" && unreadMessages > 0 && <TabBadge tone="info">{unreadMessages}</TabBadge>}
-								{value === "saved" && (saved.data?.length ?? 0) > 0 && (
-									<TabBadge tone="plain">{saved.data?.length}</TabBadge>
+								{value === "messages" && unreadMessages > 0 && (
+									<TabBadge tone="info">{i18n.number(unreadMessages)}</TabBadge>
 								)}
+								{value === "saved" && savedCount > 0 && <TabBadge tone="plain">{i18n.number(savedCount)}</TabBadge>}
 							</TabsTrigger>
 						))}
 					</TabsList>
@@ -271,7 +299,7 @@ export function Workspace({ applicationId, tab: requested, search }: WorkspacePr
 															<Trans>This workspace couldn't be loaded.</Trans>
 														)
 													) : version ? (
-														<Trans>This saved version belongs to a different tab. Open it from Saved.</Trans>
+														<Trans>This saved version belongs to a different tab. Open it from Library.</Trans>
 													) : (
 														<Trans>This saved version is no longer available.</Trans>
 													)}
@@ -364,7 +392,7 @@ function TabBadge({ tone, children }: { tone: "accent" | "warn" | "info" | "plai
 	return (
 		<span
 			className={cn(
-				"inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm px-1.5 font-mono text-[11px] font-medium",
+				"inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm px-1.5 font-mono text-xs font-medium",
 				tone === "accent" && "bg-accent-soft text-accent-text",
 				tone === "warn" && "bg-warn-soft text-warn-text",
 				tone === "info" && "bg-info-soft text-info-text",
@@ -376,20 +404,15 @@ function TabBadge({ tone, children }: { tone: "accent" | "warn" | "info" | "plai
 	);
 }
 
-const stageDot = {
-	saved: "bg-stage-saved",
-	applied: "bg-stage-applied",
-	screening: "bg-stage-screening",
-	interview: "bg-stage-interview",
-	offer: "bg-stage-offer",
-	closed: "bg-stage-closed",
-} as const;
-
 type WorkspaceHeaderProps = { application: Application; onAskCoach: () => void };
 
 function WorkspaceHeader({ application, onAskCoach }: WorkspaceHeaderProps) {
+	const saved = useSavedItems(application.id);
 	const { date } = useCareerTime();
-	const reached = PIPELINE.indexOf(application.status);
+	const { lanes, active } = useApplicationLanes();
+	const lane = getDisplayLane(lanes, application);
+	const steps = active.filter((item) => item.category !== "closed");
+	const reached = steps.findIndex((item) => item.id === lane.id);
 	const sent = application.status !== "saved";
 	return (
 		<header className="grid gap-3 border-b border-line px-4 pt-[22px] pb-4 md:px-8">
@@ -402,13 +425,13 @@ function WorkspaceHeader({ application, onAskCoach }: WorkspaceHeaderProps) {
 			</Link>
 			<div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
 				<div className="grid min-w-0 gap-1.5">
-					<h1 className="font-display text-2xl leading-8 font-medium md:text-[30px] md:leading-9">
+					<h1 className="font-display text-2xl leading-8 md:text-[30px] md:leading-9">
 						{application.role} · {application.company}
 					</h1>
 					<p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-ink-2">
 						<span className="flex items-center gap-1.5 text-ink">
-							<span aria-hidden="true" className={cn("size-2 rounded-sm", stageDot[application.status])} />
-							{getStageLabel(application.status)}
+							<span aria-hidden="true" className="size-2 rounded-sm" style={{ background: lane.color }} />
+							{getLaneLabel(lane)}
 						</span>
 						{application.location && <span>· {application.location}</span>}
 						{sent && <span>· {t`Applied ${date(application.appliedAt)}`}</span>}
@@ -424,23 +447,45 @@ function WorkspaceHeader({ application, onAskCoach }: WorkspaceHeaderProps) {
 						)}
 					</p>
 				</div>
-				<div className="flex items-center gap-4">
+				<div className="flex flex-wrap items-center gap-4">
+					<Link
+						to="/dashboard/applications"
+						search={{ applicationId: application.id }}
+						className={buttonVariants({ variant: "secondary" })}
+					>
+						<Icon name="briefcase" size={18} />
+						<Trans>Stage, details and timeline</Trans>
+					</Link>
 					{application.status !== "closed" && (
 						<div aria-hidden="true" className="hidden gap-1 lg:flex">
-							{PIPELINE.map((stage, index) => (
+							{steps.map((step, index) => (
 								<span
-									key={stage}
-									className={cn("h-1.5 w-10 rounded-sm", index <= reached ? stageDot[stage] : "bg-line")}
+									key={step.id}
+									className={cn("h-1.5 w-10 rounded-sm", index > reached && "bg-line")}
+									style={index <= reached ? { background: step.color } : undefined}
 								/>
 							))}
 						</div>
 					)}
-					{application.status === "offer" && (
-						<Link to="/dashboard/career/offers" className={cn(buttonVariants({ variant: "secondary" }))}>
-							<Icon name="scales" size={18} />
-							<Trans>Compare offers</Trans>
-						</Link>
-					)}
+					{application.status === "offer" &&
+						(saved.isPending || saved.isError || !saved.data ? (
+							<div className="grid gap-2">
+								<Button variant="secondary" loading={saved.isPending} disabled>
+									<Icon name="scales" size={18} />
+									<Trans>Compare offers</Trans>
+								</Button>
+								{saved.isError && <CareerLoadError onRetry={() => void saved.refetch()} />}
+							</div>
+						) : (
+							<Link
+								to="/dashboard/career/offers"
+								search={{ a: saved.data?.find((item) => item.data.kind === "offer")?.id }}
+								className={cn(buttonVariants({ variant: "secondary" }))}
+							>
+								<Icon name="scales" size={18} />
+								<Trans>Compare offers</Trans>
+							</Link>
+						))}
 					<Button
 						className="bg-accent-soft text-accent-text hover:bg-accent-soft hover:brightness-95"
 						onClick={onAskCoach}
@@ -464,16 +509,17 @@ type ContextColumnProps = {
 /** NEXT STEP, WHO YOU'LL MEET, WHAT YOU SENT and NOTES: the job at a glance beside every tab. */
 function ContextColumn({ application, interview, now, onEdit }: ContextColumnProps) {
 	const { i18n } = useLingui();
-	const { day, date, time } = useCareerTime();
+	const { day, date, time, timeZone } = useCareerTime();
 	const documents = useQuery(orpc.documents.list.queryOptions({ input: { trashed: false } }));
 	const hasSentVersion = Boolean(application.sentResumeVersionId || application.sentCoverLetterVersionId);
 	const trashed = useQuery({
 		...orpc.documents.list.queryOptions({ input: { trashed: true } }),
 		enabled: hasSentVersion,
 	});
-	const step = getNextStep(application, now);
-	const text = describeNextStep(step, application, i18n.locale);
-	const upcoming = step.kind === "interview" ? step.interview : interview;
+	const hints = useOfferHints(application.status === "offer");
+	const step = getNextStep(application, now, timeZone, offerHintFor(hints, application.id));
+	const text = describeNextStep(step, application, i18n.locale, timeZone);
+	const upcoming = step.kind === "interview" ? step.interview : step.kind === "offer" ? undefined : interview;
 	const soon = upcoming ? minutesUntil(new Date(upcoming.at), now) <= 60 : false;
 	const available = [...(documents.data ?? []), ...(trashed.data ?? [])];
 	const resume = available.find((document) => document.type === "resume" && document.id === application.resumeId);
@@ -489,11 +535,13 @@ function ContextColumn({ application, interview, now, onEdit }: ContextColumnPro
 		const people = upcoming.participants.map((person) => [person.name, person.role].filter(Boolean).join(", "));
 		const ics = buildIcs({
 			uid: upcoming.id,
-			title: `${interviewKindOf(upcoming.kind)?.label ?? ""} interview · ${application.role}, ${application.company}`,
+			// In the interface language, like the rest of the entry the calendar shows.
+			title: t`${interviewKindOf(upcoming.kind)?.label ?? ""} interview · ${application.role}, ${application.company}`,
 			start,
 			end: new Date(start.getTime() + upcoming.durationMinutes * 60_000),
 			...(upcoming.location ? { location: upcoming.location } : {}),
 			description: [people.join("\n"), upcoming.notes].filter(Boolean).join("\n\n"),
+			alarmMinutes: 60,
 		});
 		downloadWithAnchor(
 			new Blob([ics], { type: "text/calendar" }),
@@ -577,13 +625,7 @@ function ContextColumn({ application, interview, now, onEdit }: ContextColumnPro
 
 			{(resume || letter || documentsPending || documentsFailed) && (
 				<section className="grid gap-2">
-					<Eyebrow>
-						{sent ? (
-							<Trans>What you sent · {date(application.appliedAt)}</Trans>
-						) : (
-							<Trans>Documents for this job</Trans>
-						)}
-					</Eyebrow>
+					<Eyebrow>{sent ? <Trans>What you sent</Trans> : <Trans>Documents for this job</Trans>}</Eyebrow>
 					{documentsPending ? (
 						<p role="status" className="text-xs text-ink-3">
 							<Trans>Loading linked documents…</Trans>
@@ -609,7 +651,10 @@ function ContextColumn({ application, interview, now, onEdit }: ContextColumnPro
 						<Link
 							to="/builder/$resumeId"
 							params={{ resumeId: application.resumeId }}
-							search={application.sentResumeVersionId ? { version: application.sentResumeVersionId } : {}}
+							search={{
+								applicationId: application.id,
+								...(application.sentResumeVersionId ? { version: application.sentResumeVersionId } : {}),
+							}}
 							className="flex items-center gap-2.5 rounded-xl border border-line p-3 transition-colors duration-quick hover:bg-hover"
 						>
 							<Icon name="file-text" className="shrink-0 text-ink-2" />
@@ -617,7 +662,7 @@ function ContextColumn({ application, interview, now, onEdit }: ContextColumnPro
 								<span className="truncate text-[13px] font-semibold">{resume.name}</span>
 								<span className="text-xs text-ink-3">
 									{application.sentResumeVersionId ? (
-										<Trans>Resume · version sent</Trans>
+										<Trans>Resume · version sent {date(application.appliedAt)}</Trans>
 									) : (
 										<Trans>Resume · not sent yet</Trans>
 									)}
@@ -629,7 +674,10 @@ function ContextColumn({ application, interview, now, onEdit }: ContextColumnPro
 						<Link
 							to="/builder/letter/$coverLetterId"
 							params={{ coverLetterId: application.coverLetterId }}
-							search={application.sentCoverLetterVersionId ? { version: application.sentCoverLetterVersionId } : {}}
+							search={{
+								applicationId: application.id,
+								...(application.sentCoverLetterVersionId ? { version: application.sentCoverLetterVersionId } : {}),
+							}}
 							className="flex items-center gap-2.5 rounded-xl border border-line p-3 transition-colors duration-quick hover:bg-hover"
 						>
 							<Icon name="envelope-simple" className="shrink-0 text-ink-2" />
@@ -637,7 +685,7 @@ function ContextColumn({ application, interview, now, onEdit }: ContextColumnPro
 								<span className="truncate text-[13px] font-semibold">{letter.name}</span>
 								<span className="text-xs text-ink-3">
 									{application.sentCoverLetterVersionId ? (
-										<Trans>Letter · version sent</Trans>
+										<Trans>Letter · version sent {date(application.appliedAt)}</Trans>
 									) : (
 										<Trans>Letter · not sent yet</Trans>
 									)}

@@ -7,10 +7,13 @@ import type { InferRouterInputs, InferRouterOutputs, RouterClient } from "@orpc/
 // the mobile override in the root vite.config.ts rejects value imports from it.
 // @boundaries-ignore type-only import of the server router
 import type router from "@reactive-resume/api/routers";
+import type { DeferredFetch } from "@reactive-resume/utils/deferred-request";
 import { createORPCClient, onError } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import { createTanstackQueryUtils } from "@orpc/tanstack-query";
 import { fetch as expoFetch } from "expo/fetch";
+import { prepareRequest } from "@reactive-resume/utils/deferred-request";
+import { privateUploadUrl } from "@reactive-resume/utils/http";
 import { authorizeAiRequest } from "./ai-consent";
 import { getAccountScope, getCredentials, recoverFromUnauthorized, rejectCredentials } from "@/auth/session";
 
@@ -18,7 +21,13 @@ import { getAccountScope, getCredentials, recoverFromUnauthorized, rejectCredent
  * Per-call context. `scope` binds a call to one account (the draft store's scope, `JSON.stringify([server, user id])`):
  * the call fails instead of going out when the session no longer belongs to that account.
  */
-export type ClientContext = { scope?: string | undefined };
+export type ClientContext = {
+	defer?: DeferredFetch | undefined;
+	scope?: string | undefined;
+	aiDestination?: string | undefined;
+	webDestination?: string | undefined;
+	nativeSearchFallback?: boolean | undefined;
+};
 
 export class SessionChangedError extends Error {
 	constructor() {
@@ -68,14 +77,17 @@ const rpcFetch = async (request: Request, _init: unknown, options: { context: Cl
 	const path = request.url.slice(placeholder.length);
 	const hasBody = request.method !== "GET" && request.method !== "HEAD";
 	const body = hasBody ? await request.arrayBuffer() : null;
-	return withCredentials(async (credentials) => {
-		const response = await expoFetch(`${credentials.server}${path}`, {
-			method: request.method,
-			headers: bearer(credentials, new Headers(request.headers)),
-			body,
-			signal: request.signal,
-		});
-		return response as unknown as Response;
+	return withCredentials((credentials) => {
+		const send = () => {
+			if (getAccountScope() !== credentials.scope) throw new SessionChangedError();
+			return expoFetch(`${credentials.server}${path}`, {
+				method: request.method,
+				headers: bearer(credentials, new Headers(request.headers)),
+				body,
+				signal: request.signal,
+			}).then((response) => response as unknown as Response);
+		};
+		return options.context.defer ? options.context.defer(send) : send();
 	}, options.context.scope);
 };
 
@@ -84,13 +96,18 @@ const isAbort = (error: unknown) => error instanceof Error && error.name === "Ab
 const createLink = (label: string) =>
 	new RPCLink<ClientContext>({
 		url: `${placeholder}/api/rpc`,
+		headers: ({ context }) => ({
+			...(context.aiDestination ? { "x-ai-destination": context.aiDestination } : {}),
+			...(context.webDestination ? { "x-web-destination": context.webDestination } : {}),
+			...(context.nativeSearchFallback ? { "x-ai-native-search": "1" } : {}),
+		}),
 		fetch: rpcFetch,
 		interceptors: [
 			async (options) => {
 				const { path, input, context, signal, next } = options;
 				const scope = context.scope ?? getAccountScope();
-				await authorizeAiRequest(path, input, client, scope, signal);
-				return next({ ...options, context: { ...context, ...(scope ? { scope } : {}) } });
+				const destination = await authorizeAiRequest(path, input, client, scope, signal);
+				return next({ ...options, context: { ...context, ...(scope ? { scope } : {}), ...destination } });
 			},
 			// Logs the failure only: errors can carry request data, which must never reach the device log.
 			onError((error) => {
@@ -108,6 +125,16 @@ export const streamClient: RouterClient<typeof router, ClientContext> = createOR
 	createLink("oRPC stream client"),
 );
 
+/** Bind preparation and its eventual send to the initiating server and account. */
+export function prepareRpc<Input, Output>(
+	procedure: (input: Input, options: { context: ClientContext }) => Promise<Output>,
+	input: Input,
+) {
+	const scope = getAccountScope();
+	if (!scope) return Promise.reject(new SessionChangedError());
+	return prepareRequest((defer) => procedure(input, { context: { scope, defer } }));
+}
+
 /** TanStack Query helpers: `orpc.resume.list.queryOptions()` and friends. */
 export const orpc = createTanstackQueryUtils(client);
 
@@ -119,13 +146,13 @@ export type RouterOutput = InferRouterOutputs<typeof router>;
  * Sends the bearer token and returns the raw response; callers check `ok` and read `arrayBuffer()`/`json()`.
  * The body is sent again after a token refresh, so pass a repeatable one (string, `FormData`, bytes), never a stream.
  */
-export async function rest(path: `/${string}`, init: RequestInit = {}): Promise<Response> {
-	const scope = getAccountScope();
+export async function rest(path: `/${string}`, init: RequestInit = {}, scope = getAccountScope()): Promise<Response> {
+	let approved: Awaited<ReturnType<typeof authorizeAiRequest>>;
 	if (path === "/career/voice/transcribe") {
 		if (!(init.body instanceof FormData)) throw new Error("Expected a recording form.");
-		await authorizeAiRequest(
+		approved = await authorizeAiRequest(
 			["career", "voice", "transcribe"],
-			{ providerId: init.body.get("providerId") },
+			{ providerId: init.body.get("providerId"), model: init.body.get("model") },
 			client,
 			scope,
 			init.signal ?? undefined,
@@ -134,10 +161,38 @@ export async function rest(path: `/${string}`, init: RequestInit = {}): Promise<
 	return withCredentials(async (credentials) => {
 		const response = await expoFetch(`${credentials.server}/api/openapi${path}`, {
 			method: init.method ?? "GET",
-			headers: bearer(credentials, new Headers(init.headers)),
+			headers: bearer(
+				credentials,
+				new Headers({
+					...Object.fromEntries(new Headers(init.headers)),
+					...(approved?.aiDestination ? { "x-ai-destination": approved.aiDestination } : {}),
+				}),
+			),
 			body: init.body ?? null,
 			signal: init.signal ?? null,
 		});
 		return response as unknown as Response;
 	}, scope ?? undefined);
+}
+
+/** Private file reads share the session snapshot/refresh owner; never send a token to another host or a redirect. */
+export async function privateUpload(source: string, signal: AbortSignal, scope: string): Promise<Response> {
+	const response = await withCredentials(async (credentials) => {
+		if (getAccountScope() !== scope) throw new SessionChangedError();
+		return (await expoFetch(privateUploadUrl(source, credentials.server), {
+			headers: bearer(credentials, new Headers()),
+			redirect: "error",
+			credentials: "omit",
+			signal,
+		})) as unknown as Response;
+	}, scope);
+	if (getAccountScope() !== scope) {
+		await response.body?.cancel().catch(() => {});
+		throw new SessionChangedError();
+	}
+	if (!response.ok || response.redirected) {
+		await response.body?.cancel().catch(() => {});
+		throw new Error("Private file unavailable.");
+	}
+	return response;
 }

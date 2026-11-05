@@ -7,8 +7,6 @@ import { SCENE, useLanding } from "./scroll";
 import { Sheet } from "./sheet";
 import { Doodle, labelClass, SceneCaption, Stamp } from "./ui";
 
-/** Job match as each of the posting's four keywords is matched. */
-const MATCH = [62, 70, 78, 85, 91];
 const KEYWORDS = ["a", "b", "c", "d"] as const;
 
 type PostingKeywordProps = { id: (typeof KEYWORDS)[number]; children: ReactNode };
@@ -25,7 +23,7 @@ function PostingKeyword({ id, children }: PostingKeywordProps) {
 
 /**
  * 04 Tailor. The verb is stitched together, then threads run from each keyword in a job posting to its match on the
- * resume, the match score climbs, a cover letter slides out and the role moves from Saved to Applied.
+ * resume, supported requirements accumulate, a cover letter slides out and the role moves from Saved to Applied.
  */
 export function Tailor() {
 	const { i18n } = useLingui();
@@ -44,12 +42,13 @@ export function Tailor() {
 			data-scene={SCENE.tailor}
 			data-pin
 			aria-labelledby="tailor-title"
-			className="relative h-[260vh] motion-reduce:h-svh min-[900px]:h-[300vh]"
+			className="relative h-[260vh] min-[900px]:h-[300vh]"
 		>
 			<div className="sticky top-0 h-svh overflow-clip [--ap:clamp(0,(var(--p)-.74)/.1,1)] [--cv:clamp(0,(var(--p)-.64)/.12,1)] [--cvx:-60%] [--kwa:var(--t1)] [--kwb:var(--t2)] [--kwc:var(--t3)] [--kwd:var(--t4)] [--pw:min(56vw,36vh)] [--sw:clamp(0,var(--p)/.14,1)] [--t1:clamp(0,(var(--p)-.14)/.1,1)] [--t2:clamp(0,(var(--p)-.26)/.1,1)] [--t3:clamp(0,(var(--p)-.38)/.1,1)] [--t4:clamp(0,(var(--p)-.5)/.1,1)] min-[900px]:[--cvx:-40%] min-[900px]:[--pw:min(23vw,46vh)]">
 				<Doodle
 					name="scissors"
 					wipe="clamp(0, (var(--p) - .08) / .2, 1)"
+					sizes="12vw"
 					className="start-[41vw] top-[74vh] w-[12vw] translate-y-[calc(var(--p)*-40px)] rotate-[12deg] max-[900px]:hidden"
 				/>
 
@@ -77,7 +76,7 @@ export function Tailor() {
 					title={tailor}
 					className="min-[900px]:short:hidden absolute end-(--gutter) top-[13vh] hidden w-[min(24em,30vw)] min-[900px]:flex"
 				>
-					{t`Paste a job posting once. It feeds a tailored copy of your resume, a match score, a cover letter draft and a place to track the role.`}
+					{t`Paste a job posting once. It feeds a tailored copy of your resume, a fit check against each requirement, a cover letter draft and a place to track the role.`}
 				</SceneCaption>
 
 				<svg
@@ -113,7 +112,7 @@ export function Tailor() {
 						<div className="flex items-center gap-[11px]">
 							<span
 								aria-hidden="true"
-								className="font-anybody flex size-9 shrink-0 items-center justify-center rounded-lg bg-ink text-[19px] leading-none font-medium text-bg font-stretch-[95%]"
+								className="font-anybody flex size-9 shrink-0 items-center justify-center rounded-lg bg-ink text-[19px] leading-none text-bg font-stretch-[95%]"
 							>
 								F
 							</span>
@@ -132,9 +131,9 @@ export function Tailor() {
 							</Trans>
 						</p>
 						<div className="flex items-baseline justify-between border-t border-line pt-3">
-							<span className={cn(labelClass, "text-[10.5px] text-ink-3")}>{t`Job match`}</span>
+							<span className={cn(labelClass, "text-[10.5px] text-ink-3")}>{t`Supported`}</span>
 							<span className="font-anybody text-[40px] leading-none font-light tracking-[-.03em] text-accent-text tabular-nums">
-								{i18n.number((MATCH[matched] ?? 0) / 100, { style: "percent" })}
+								{i18n.number(matched)} / {i18n.number(KEYWORDS.length)}
 							</span>
 						</div>
 					</div>

@@ -24,6 +24,7 @@ colors:
     warn: "#D29922"
     warn-soft: "#FCEDCD"
     warn-text: "#81520A"
+    warn-ink: "#22190A"
     info-soft: "#E0F1FF"
     info-text: "#1D5B92"
   dark:
@@ -47,6 +48,7 @@ colors:
     warn: "#E4B750"
     warn-soft: "#3E2D10"
     warn-text: "#EFCC83"
+    warn-ink: "#22190A"
     info-soft: "#192F46"
     info-text: "#9DC9F7"
   paper: "#FFFFFF"
@@ -141,7 +143,7 @@ Resume templates retain their Pokémon names, fonts, and palettes. App typograph
 
 - **Surfaces:** `bg` for the app desk; `surface` for panels and cards; `raised` for menus, dialogs, and inputs; `sunken` for wells, tracks, and the page canvas.
 - **Text:** `ink` for primary text, `ink-2` for secondary text, and `ink-3` for metadata and placeholders. Use no lighter text token, and check contrast on tinted backgrounds.
-- **Signals:** `danger` for errors and irreversible actions; `warn` for issues to review; `info-soft` and `info-text` for neutral guidance. Success uses `accent-soft` and `accent-text`.
+- **Signals:** `danger` for errors and irreversible actions; `warn` for issues to review; `warn-ink` for text on a solid `warn` fill, such as issue-marker numbers; `info-soft` and `info-text` for neutral guidance. Success uses `accent-soft` and `accent-text`.
 - **Overlays:** `hover` and `press` are translucent interaction states; `scrim` and `scrim-sheet` dim the background behind layers.
 - **Paper:** `--paper` remains white in both themes. Switching the app theme must not invert documents.
 - **Stages:** `stage-saved`, `stage-applied`, `stage-screening`, `stage-interview`, `stage-offer`, and `stage-closed` identify application stages. Use small dots or stepper bars beside stage names.
@@ -190,8 +192,10 @@ Icons inside resumes use Phosphor names stored in resume data, drawn by the Phos
 - Entering and changing state use `ease-enter` (`cubic-bezier(0.2, 0.8, 0.2, 1)`). Exits take 70% of the entry duration.
 - Sliding indicators, reordering, and settling use `ease-in-out-strong` (`cubic-bezier(0.77, 0, 0.175, 1)`). Swipe-dismissed bottom sheets use `ease-drawer`.
 - Keep app motion brief and purposeful. Small entrance fades, status transitions, and the mobile tab indicator's spring are supported. Loading placeholders stay still; document reflow is never animated. Keyboard mode switches are instant.
-- Reduced motion sets duration tokens to 1ms and collapses CSS transitions and animations. Status spinners continue turning.
-- `apps/web/src/libs/motion.ts` mirrors CSS timings. `MotionConfig reducedMotion="user"` and `followReducedMotion()` make Motion animations respect the preference.
+- Reduced motion removes spatial movement, stagger and decorative animation. Known layer/content state changes retain a short 120ms opacity fade; page snapshot transitions and explicit instant controls stay instant, and status spinners continue turning. Native custom fades follow the same policy; native system sheets keep their platform accessibility behavior.
+- A pathname change fades through: the old page fades out over 140ms, then the new one fades up 6px over 200ms, so the two never show at once. The builder's own pending shell (its bar, panel placeholders and a blank page at the canvas's size) stands in while a resume loads; the logo loader covers only the app's first load.
+- Dragging auto-scrolls a list only from its outer 8%, gently (`DRAG_AUTO_SCROLL`).
+- `apps/web/src/libs/motion.ts` mirrors CSS timings. `MotionConfig reducedMotion="user"` removes transform/layout animations while preserving opacity. CSS keeps unknown effects instant and allows opacity alone on known layer/content transitions.
 
 The homepage has separate motion rules below.
 
@@ -205,7 +209,8 @@ Generic primitives live in `packages/ui/src/components`, using Base UI and cmdk 
 - **Segments and tabs:** use `SegmentedControl` for 2–4 options in a radio group. Use `Tabs` to switch panels; set `TabsList variant="line"` for underline tabs.
 - **Menus:** 4px radius and 36px items. Size popups for their content and trigger; put destructive items last, after a separator.
 - **Layers:** menus and popovers provide lightweight choices; sheets hold tasks beside the document and use the bottom variant on mobile; dialogs hold decisions. Use `AlertDialog` for destructive confirmation and name what cancel keeps.
-- **Toasts:** one visible at a time, bottom center, with `bg-ink` and `text-bg`. The default timeout is six seconds; `timeout: 0` keeps a toast visible. Undo is an optional underlined action.
+- **Creating things:** a short create form (up to about six fields, such as New document or Save a job) is a dialog. New document uses a bottom sheet on phones, matching the native creation form; its presentation stays fixed while open so a resize cannot discard work. A long form, or one that needs the page behind it, is a sheet (New schedule, Add offer on Offers). A form tied to one item already on screen opens in place beside it (Add fact, Add offer in a job's Offer stage).
+- **Toasts:** one visible at a time, bottom center, with `bg-ink` and `text-bg`. The default timeout is six seconds; `timeout: 0` keeps a toast visible. Undo is an optional underlined action. Pressing an action closes its toast after the action's handler runs, and a second press while it leaves does nothing.
 - **Chats:** the assistant and career coach transcripts use `MessageScroller` (shadcn, behaviour from `@shadcn/react`): it follows a streaming reply only while the reader is at the latest message, settles each question near the top, reopens a saved thread on its last question, and shows a “Latest” button after scrolling away. Agent steps are `Trace` lines: spinner and shimmer while running, check when done, danger when failed, dimmed dash when unfinished. Mobile mirrors both.
 - **Alerts:** `info`, `success`, `warn`, and `error`; only the error variant adds `role="alert"` by default.
 - **Empty states:** a 22px Instrument Serif headline, concise 14px body text, and a primary action. Add a secondary action only when useful.
@@ -215,7 +220,7 @@ Generic primitives live in `packages/ui/src/components`, using Base UI and cmdk 
 Target WCAG 2.2 AA:
 
 - Show a 2px accent focus outline with a 2px gap on `:focus-visible`. Inputs use their border and soft ring instead.
-- Provide at least 24px pointer targets and 44px touch targets. Every drag operation needs keyboard and menu alternatives.
+- Provide at least 24px pointer targets and 44px touch targets. Every drag operation needs keyboard and menu alternatives. Each `DndContext` takes `dndContextProps()` (`apps/web/src/libs/dnd.ts`): drags are announced in the UI language by the item's visible name and its page or column, never by an id.
 - Pair color signals with text; add icons where they clarify status.
 - Trap focus in modal sheets and dialogs. Escape closes the top layer; closing returns focus to its trigger.
 - Announce save state and routine feedback politely. Reserve assertive announcements for errors that need immediate attention.
@@ -240,7 +245,7 @@ The public homepage in `apps/web/src/features/homepage` shares app colors and th
 
 - **Header:** a 30px logomark from `apps/web/public/icon/{light,dark}.svg`. Keep “Reactive Resume” as visually hidden text inside the home link.
 - **Footer:** a 140px logo from `apps/web/public/logo/{light,dark}.svg` above the hero's promise (its two highlighted phrases in `accent-text`), the link columns, then a line of community, MIT license and version copy.
-- **Footer desk:** two drawings of the same writing desk in front of an open window, day (`apps/web/public/illustrations/footer-desk-light.webp`, moss and charcoal on white) and night (`footer-desk-dark.webp`, silver and amber on black). The light one multiplies and the dark one lightens into the page, so their white or black wall vanishes and the desk seems to stand on the footer; their far edges fade out. As the desk scrolls into view it paints itself in from the window down, just ahead of the fold, while it rises and settles from a 4% zoom; it completes exactly when the page ends (`--dp`, written by `scroll.ts`; 1 under reduced motion). In the light theme a soft morning glow rises behind the window with it. Its objects are links back into the story, each showing its scene number and name on hover or focus: the resume to Write, the glasses to Check, the letters to Share, the calendar to Prepare, the window to Remember. The lamp switches the theme, like the header's cord. Below 700px the desk crops to its middle and the hotspots hide (the columns carry the same links). Hotspot boxes are percentages of the drawing (`getDeskSpots` in `footer.tsx`): re-measure them if the drawing changes. The wall must be pure white in the day drawing and pure black in the night one: multiply and lighten only make those disappear, and any tint shows as a band. Flatten with `magick in.png -background white -alpha remove -alpha off flat.png` (black for the night one); if the wall came back tinted, lift it to white per channel (e.g. `-channel R -level 0,97% -channel G -level 0,96.6% -channel B -level 0,95% +channel` for a #F8F7F3 wall), then `cwebp -q 74 -m 6 -sharp_yuv flat.png -o out.webp`.
+- **Footer desk:** two drawings of the same writing desk in front of an open window, day (`apps/web/public/illustrations/footer-desk-light.webp`, moss and charcoal on white) and night (`footer-desk-dark.webp`, silver and amber on black). The light one multiplies and the dark one lightens into the page, so their white or black wall vanishes and the desk seems to stand on the footer; their far edges fade out. As the desk scrolls into view it paints itself in from the window down, just ahead of the fold, while it rises and settles from a 4% zoom; it completes exactly when the page ends (`--dp`, written by `scroll.ts`; 1 under reduced motion). In the light theme a soft morning glow rises behind the window with it. Its objects are links back into the story, each showing its scene number and name on hover or focus: the resume to Write, the glasses to Check, the letters to Share, the calendar to Prepare, the window to Remember. The lamp switches the theme, like the header's cord. Below 700px the desk crops to its middle and the hotspots hide (the columns carry the same links). Hotspot boxes are percentages of the drawing (`getDeskSpots` in `footer.tsx`): re-measure them if the drawing changes. The wall must be pure white in the day drawing and pure black in the night one: multiply and lighten only make those disappear, and any tint shows as a band. Flatten with `magick in.png -background white -alpha remove -alpha off flat.png` (black for the night one); if the wall came back tinted, lift it to white per channel (e.g. `-channel R -level 0,97% -channel G -level 0,96.6% -channel B -level 0,95% +channel` for a #F8F7F3 wall), then `cwebp -q 74 -m 6 -sharp_yuv flat.png -o out.webp`. The 3200px drawing also ships at 1600px and 2400px (`footer-desk-<theme>-1600.webp`, `-2400.webp`; `magick -filter Lanczos -resize 1600x`, same `cwebp` settings), listed in the images' `srcSet`.
 - **Instrument Serif (`font-anybody`):** hero and closing headlines, selected scene titles, and large numerals. `font-anybody` is an alias of `font-display`.
 - **Instrument Serif:** body copy, italic accents, and serif title treatments in the Design scene.
 - **Labels (`font-martian`, an alias of `font-ui`):** Figtree 13px, weight 500, sentence case (`labelClass`).
@@ -250,39 +255,59 @@ The public homepage in `apps/web/src/features/homepage` shares app colors and th
 
 - Repeat the same primary CTA, “Build your resume,” in the header, hero, and closing section. Buttons have 2px corners, in Figtree 600, at 38px, 54px, and 56px respectively.
 - Scene navigation appears from 1240px. Sentence-case labels use `ink` when active and `ink-3` when inactive; a 6px accent dot marks the active scene. The Share night scene uses its own light inks.
-- The GitHub link appears from 1024px, with the GitHub mark, a filled gold star, and a live compact count. Format counts with the locale's `Intl.NumberFormat`; include the full count in the accessible name.
+- The GitHub link appears from 1024px, with the GitHub mark and, when available, a filled gold star and live compact count. Format counts with the locale's `Intl.NumberFormat`; include the full count in the accessible name. Failed counts leave the GitHub link available without a star or number.
+- Community totals need at least two eligible rows. Hide failed totals and values below 100; reserve loading placeholders and announcements for pending queries.
 - The homepage theme control is a fixed 30px pull-cord button at the top end corner. Its height is 92px at rest, 112px on hover, and 124px during a pull. It uses a 450ms spring curve, toggles the shared theme after 170ms, and sways every seven seconds until first activated. The bulb glows in dark mode.
 
 ### Motion
 
 Pinned scenes contain a sticky `100svh` stage. Scroll progress is `p = clamp(0, −top / max(1, height − viewportHeight), 1)`; `scroll.ts` writes it to `--p` through one animation-frame-throttled scroll listener. CSS derives continuous motion from progress; React receives only coarse scene and step changes.
 
-| Scene  | Below 900px | From 900px |
-| ------ | ----------- | ---------- |
-| Hero   | 190vh       | 260vh      |
-| Write  | 280vh       | 330vh      |
-| Design | 380vh       | 440vh      |
-| Check  | 260vh       | 320vh      |
-| Tailor | 280vh       | 330vh      |
-| Share  | 240vh       | 300vh      |
+| Scene   | Below 900px | From 900px |
+| ------- | ----------- | ---------- |
+| Hero    | 170vh       | 220vh      |
+| Write   | 280vh       | 330vh      |
+| Design  | 280vh       | 320vh      |
+| Check   | 245vh       | 295vh      |
+| Tailor  | 260vh       | 300vh      |
+| Share   | 240vh       | 300vh      |
+| Prepare | 310vh       | 330vh      |
 
 Light mode combines breathing window light (16 seconds), a drifting mullion shadow (90 seconds), and 18 dust motes. Dark mode adds a neutral 620px cursor glow at 6% opacity. These are decorative and must not obscure text.
 
 Scroll performance (Firefox and phones dropped frames here): the mullion shadow's softness is drawn into its gradients, never `filter: blur()`; backdrop blur uses the `blur-ok` variant (fine pointer, non-Gecko only) and falls back to the plain tinted backdrop; components that follow fast-changing scroll steps (Check's score, Prepare's clock and countdown) subscribe to `useLanding` on their own so the scene around them doesn't re-render.
 
-Reduced motion fixes scenes at their end state and collapses pinned sections to `100svh`. Disable scroll scrubbing, parallax, ambient movement, cord sway, and count animations. The Languages word rotation has a pause control and stays still with reduced motion.
+Scene navigation scrolls smoothly within a scene or to the next one, since scrubbing through is the story. A longer jump cuts to the scene, fading through like a page change, instead of fast-forwarding through every scene between; reduced motion always cuts. Pinned scenes skip rendering offscreen (`content-visibility: auto`); the scroll engine renders a scene and decodes its images while it is within about two screens (`data-warm`) and lets it skip again once it is further away.
+
+Reduced motion fixes scenes at their end state and collapses pinned sections to `100svh` at every width (one rule in `landing.css`). Disable scroll scrubbing, parallax, ambient movement, cord sway, and count animations. The Languages word rotation has a pause control and stays still with reduced motion.
 
 ### Illustration
 
-- Ten watercolour doodles live in `apps/web/public/doodles/` as transparent WebP (up to 800px, plus a 400px `-small`): pencil, paperclip, eraser, curve, magnifier, scissors, plane, globe, jar, and note. They share the footer desk's style: soft washes, thin blue-grey pen lines, cream, sage, moss, slate blue, terracotta and ochre. Prompts and references for regenerating them are kept outside the repo; each is trimmed to its content and its faint background alpha cleaned (`-channel A -level 4%,100%`) before encoding losslessly in alpha (`cwebp -q 82 -alpha_q 100 -exact`), and its size goes in `doodleSizes` (`ui.tsx`). The magnifier is not trimmed: its empty glass is the Check lens, so `check.tsx` positions it from the lens's measured centre and radius in the 1024px source.
+- Ten watercolour doodles live in `apps/web/public/doodles/` as transparent WebP (up to 800px, plus a half-size `-small` and a quarter-size `-tiny`, each resized from the full file with `magick -filter Lanczos` and encoded with the same `cwebp` settings): pencil, paperclip, eraser, curve, magnifier, scissors, plane, globe, jar, and note. They share the footer desk's style: soft washes, thin blue-grey pen lines, cream, sage, moss, slate blue, terracotta and ochre. Prompts and references for regenerating them are kept outside the repo; each is trimmed to its content and its faint background alpha cleaned (`-channel A -level 4%,100%`) before encoding losslessly in alpha (`cwebp -q 82 -alpha_q 100 -exact`), and its size goes in `doodleSizes` (`ui.tsx`). The magnifier is not trimmed: its empty glass is the Check lens, so `check.tsx` positions it from the lens's measured centre and radius in the 1024px source.
 - Doodles appear through a 110° mask wipe with subtle parallax. They keep their colours in both themes: opacity 0.92 in light mode, 0.8 and slightly dimmed (`brightness(0.92)`) in dark. No drop shadows: a hard shadow draws the image's box against the paper texture. The Share plane fades in with the night sky.
 - Most doodles hide below 900px; pencil and plane remain. Keep them decorative, noninteractive, and clear of readable text.
 - Construction guides use `graphite` lines with an SVG turbulence filter for a pencil effect.
 
 ### Content and delivery
 
-- Prerender the homepage and public ATS checker per locale at build time through `prerender.tsx` and `apps/web/vite.config.ts`. The app is a client-rendered SPA; `apps/server/src/static/web.ts` serves the generated HTML and adds canonical, Open Graph, `hreflang`, and structured data. Keep headings and body copy in the initial HTML.
+- Prerender the homepage and public ATS checker per locale at build time through `prerender.tsx` and `apps/web/vite.config.ts`. The app is a client-rendered SPA; `apps/server/src/static/web.ts` serves the generated HTML and adds canonical, Open Graph, `hreflang`, and structured data. Keep headings and body copy in the initial HTML. Prerendered pages start the app's JavaScript only after the first contentful paint (the loader in `vite.config.ts`), so their first screen must not depend on it, and must not fade in on load: the largest paint would wait for the fade.
 - Include title and description metadata and `SoftwareApplication` structured data with a zero-price offer.
+- **Template previews** come from each template's sample PDF (`apps/web/public/templates/pdf/<id>.pdf`), never at print resolution: `templates/jpg/<id>.jpg` at 600×848 (builder and letter cards, the mobile picker and the README; old mobile builds load this URL, so it stays a JPEG), and `templates/thumb/<id>.webp` at 596×843 with a 300×424 `<id>-small.webp` (homepage and gallery). Regenerate them with the server's sharp:
+
+  ```sh
+  id=gengar
+  pdftoppm -png -r 300 -singlefile "apps/web/public/templates/pdf/$id.pdf" "/tmp/$id"
+  (cd apps/server && node --input-type=module -e '
+  import sharp from "sharp";
+  const id = process.argv[1], dir = "../web/public/templates";
+  const page = (width) => sharp(`/tmp/${id}.png`).resize(width, Math.round((width * 3508) / 2481), { fit: "fill" });
+  const webp = { quality: 75, effort: 6, smartSubsample: true };
+  await page(600).jpeg({ mozjpeg: true, quality: 75 }).toFile(`${dir}/jpg/${id}.jpg`);
+  await page(596).webp(webp).toFile(`${dir}/thumb/${id}.webp`);
+  await page(300).webp(webp).toFile(`${dir}/thumb/${id}-small.webp`);
+  ' "$id")
+  ```
+
 - Use one `h1`, section headings, landmarks, and a skip link. Animated character treatments expose the complete string once to assistive technology. Nothing relies on hover alone.
 - Translate copy, accessible labels, and demo resume text through Lingui. Names and addresses may stay literal; the Languages display intentionally preserves native words and language names. Allow text expansion and RTL layouts.
 

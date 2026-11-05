@@ -1,45 +1,45 @@
-# Issue tracker: GitHub
+# Issue tracker
 
-Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+Planned work lives in **Linear**, team **Reactive Resume** (key `RX`): tickets are `RX-<n>`, the spec is the issue
+description plus its comments and attachments. Public bug reports and feature requests arrive as **GitHub issues** on
+`reactive-resume/reactive-resume`; use `gh issue view <n> --comments` for those.
+
+## Read and write Linear tickets
+
+- **Claude Code** with the Linear connector: `get_issue` (description), `list_comments` (discussion; `get_issue`
+  omits it), `get_attachment`, `extract_images` for embedded screenshots, `save_comment`, `save_issue`.
+- **Shell or Codex**: the Composio CLI. Several Linear accounts are connected, so always pass `--account`; the alias
+  and workspace IDs are in the maintainer's private notes at `~/Projects/reactive-resume-private/ops/linear.md`.
+
+```sh
+composio execute LINEAR_RUN_QUERY_OR_MUTATION --account <alias> -d '{
+  "query_or_mutation": "query { issue(id: \"RX-123\") { id identifier title description state { name } labels { nodes { name } } branchName comments { nodes { body createdAt } } attachments { nodes { title url } } } }",
+  "variables": {}
+}'
+```
+
+`issue(id:)` accepts the `RX-<n>` identifier. Comment with `commentCreate(input: { issueId, body })`, where `issueId`
+is the issue's UUID from the query above. Large Composio results are written to a file whose path is in the response.
+
+## States
+
+| State       | Meaning                                                       |
+| ----------- | ------------------------------------------------------------- |
+| Backlog     | Not scheduled.                                                |
+| Todo        | Scheduled, nobody working on it.                              |
+| In Progress | Someone owns it and is working on it.                         |
+| In Review   | A pull request is open and under review.                      |
+| Done        | Merged to `main`.                                             |
+| Canceled    | Won't be done. `Duplicate` marks a ticket covered by another. |
+
+## Labels
+
+- **Type**: `Bug`, `Feature`, `Improvement`.
+- **Owner agent**: `Claude`, `Codex` or `DeepSeek` marks which agent thread owns the ticket. Leave tickets labelled for
+  another agent alone unless the owner reassigns them; coordinate through Linear comments.
 
 ## Conventions
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
-- **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
-- **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
-- **Comment on an issue**: `gh issue comment <number> --body "..."`
-- **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
-- **Close**: `gh issue close <number> --comment "..."`
-
-Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
-
-## Pull requests as a triage surface
-
-**PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
-
-When set to `yes`, PRs run through the same labels and states as issues, using the `gh pr` equivalents:
-
-- **Read a PR**: `gh pr view <number> --comments` and `gh pr diff <number>` for the diff.
-- **List external PRs for triage**: `gh pr list --state open --json number,title,body,labels,author,authorAssociation,comments` then keep only `authorAssociation` of `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, or `NONE`.
-- **Comment / label / close**: `gh pr comment`, `gh pr edit --add-label`/`--remove-label`, `gh pr close`.
-
-GitHub shares one number space across issues and PRs. Resolve bare `#42` with `gh pr view 42`, then fall back to `gh issue view 42`.
-
-## When a skill says "publish to the issue tracker"
-
-Create a GitHub issue.
-
-## When a skill says "fetch the relevant ticket"
-
-Run `gh issue view <number> --comments`.
-
-## Wayfinding operations
-
-Used by `/wayfinder`. Map is one issue with child issues as tickets.
-
-- **Map**: issue labelled `wayfinder:map`, holding Notes / Decisions-so-far / Fog. Create with `gh issue create --label wayfinder:map`.
-- **Child ticket**: issue linked as a GitHub sub-issue. Where sub-issues are unavailable, add it to a task list in map body and put `Part of #<map>` atop child body. Labels: `wayfinder:<type>` (`research`, `prototype`, `grilling`, or `task`). Assign ticket to driving developer once claimed.
-- **Blocking**: use GitHub native issue dependencies. Add with `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`, where database ID comes from `gh api repos/<owner>/<repo>/issues/<n> --jq .id`. Where unavailable, use `Blocked by: #<n>, #<n>` atop child body.
-- **Frontier query**: list map’s open children, drop assigned tickets and tickets with open blockers, then select first in map order.
-- **Claim**: `gh issue edit <n> --add-assignee @me`.
-- **Resolve**: comment with answer, close child, then append context pointer to map’s Decisions-so-far.
+- Branch: `feature/rx-<n>` (Linear's `branchName`). Mention `RX-<n>` in the pull request body.
+- Ticket notes (delivery logs, handoffs, review results, evidence) go on the Linear issue as comments, never into files
+  in this repository. Durable knowledge that outlives the ticket goes in `.agents/docs/` (see its `README.md`).

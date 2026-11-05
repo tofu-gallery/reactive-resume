@@ -64,17 +64,67 @@ describe("computeOutcomes", () => {
 			appliedAt: now,
 			activity: application.activity.map((entry) => ({ ...entry, at: now })),
 		}));
-		expect(computeTimeline(current, 1)[0]?.count).toBe(3);
+		expect(computeTimeline(current, "en-US", 1)[0]?.count).toBe(3);
 	});
 });
 
 it("labels the pipeline total and percentages using active applications", () => {
-	const insights = computeInsights([
-		{ status: "saved", count: 1 },
-		{ status: "applied", count: 2 },
-		{ status: "closed", count: 4 },
-	]);
+	const insights = computeInsights(
+		[
+			{ status: "saved", count: 1 },
+			{ status: "applied", count: 2 },
+			{ status: "closed", count: 4 },
+		],
+		"en-US",
+	);
 	expect(insights.total).toBe(3);
 	expect(insights.closed).toBe(4);
 	expect(insights.funnel[0]?.pct).toBe(100);
 });
+
+it("formats chart totals, conversion labels and week dates with interface numerals", () => {
+	const insights = computeInsights(
+		[
+			{ status: "saved", count: 1000 },
+			{ status: "applied", count: 2000 },
+		],
+		"ar-SA",
+	);
+	expect(insights.tiles[0]?.value).toBe("٣٬٠٠٠");
+	expect(insights.funnel[1]?.conv).toBe("٦٧%");
+	const [week] = computeTimeline([], "ar-SA", 1);
+	expect(week?.label).toMatch(/[٠-٩]/);
+	expect(week?.label).not.toMatch(/[0-9]/);
+});
+
+it.each(["closed", "applied"] as const)(
+	"uses recorded rejection dates after outcome changes and %s state",
+	(status) => {
+		const at = (day: number) => new Date(Date.UTC(2026, 0, day, 12));
+		const application = {
+			status,
+			closedReason: status === "closed" ? ("not-selected" as const) : null,
+			resumeId: null,
+			appliedAt: at(1),
+			activity: [
+				{ id: "sent", type: "stage" as const, stage: "applied" as const, at: at(1) },
+				{
+					id: "ghosted",
+					type: "stage" as const,
+					stage: "closed" as const,
+					at: at(5),
+					closedReason: "no-response" as const,
+				},
+				{
+					id: "reply",
+					type: "stage" as const,
+					stage: "closed" as const,
+					at: at(10),
+					closedReason: "not-selected" as const,
+					canonicalTransition: false,
+				},
+			],
+		};
+		expect(computeOutcomes([application], () => false)).toMatchObject({ sent: 1, heardBack: 1, medianDaysToReply: 9 });
+	},
+);

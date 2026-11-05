@@ -1,6 +1,6 @@
 ---
 title: "Changing appearance and language"
-description: "Switch Reactive Resume between light, dark and system themes, change the interface language, set your timezone, and see how the app handles reduced motion."
+description: "Switch Reactive Resume between light, dark and system themes, change the interface language (also used for account emails), set your timezone, and see how the app handles reduced motion."
 ---
 
 You can choose how the app looks and which language its menus and buttons use. These settings change the app only. Your resumes always print on white paper, in the language set for each resume.
@@ -9,7 +9,7 @@ You can choose how the app looks and which language its menus and buttons use. T
 
 <Steps>
   <Step title="Open Preferences">
-    Select your name at the bottom of the sidebar, then **Settings**, then **Preferences**.
+    Select **Settings** in the sidebar, then **Preferences**. You can also open **Settings** from your account menu.
   </Step>
 
   <Step title="Pick a theme under Appearance">
@@ -19,12 +19,12 @@ You can choose how the app looks and which language its menus and buttons use. T
   </Step>
 </Steps>
 
-The change applies at once. Reactive Resume remembers it in this browser, so another device or browser keeps its own choice.
+The change applies at once. Reactive Resume remembers it in this browser for a year, including after a browser restart. Another device or browser keeps its own theme choice.
 
-<Frame caption="The Preferences page">
+<Frame caption="Preferences includes appearance, language and timezone">
   <img
-    src="/images/guides/changing-appearance-and-language/preferences-page.webp"
-    alt="The Preferences page with Light, Dark and System theme tiles under Appearance, an English language picker under Language, and a Motion note"
+    src="/images/guides/changing-appearance-and-language/preferences-page.png"
+    alt="Fictional Maya Chen account preferences with appearance, interface language and timezone settings"
   />
 </Frame>
 
@@ -33,14 +33,30 @@ The change applies at once. Reactive Resume remembers it in this browser, so ano
 - Select your name at the bottom of the sidebar, point to **Theme**, and choose **Light**, **Dark** or **System**.
 - Press <kbd>⌘</kbd> <kbd>K</kbd> (<kbd>Ctrl</kbd> <kbd>K</kbd> on Windows and Linux), choose **Change theme to…**, then pick a theme.
 
-<Frame caption="The theme options in the account menu">
+<Frame caption="Change appearance from the account menu">
   <img
     src="/images/guides/changing-appearance-and-language/account-menu-theme.webp"
-    alt="The account menu opened from the sidebar with Settings, Language, Theme and Sign out, and a Theme submenu listing Light, Dark and System with System checked"
+    alt="Preferences with Account, Profile, Preferences and AI & developer navigation, and the account Theme submenu"
   />
 </Frame>
 
 ## Change the interface language
+
+On your first visit, the website follows your browser's preferred languages. It uses a supported regional variant when an exact match is unavailable, or English if none matches. This automatic choice isn't saved: a language in the page address (`?locale=`) or a choice already saved in this browser takes priority. Automatic selection needs JavaScript; homepage language links also work without it.
+
+After sign-in on a browser or device without a language choice, Reactive Resume restores your account's saved language.
+If the account has none, it follows the browser or device. Automatic choices don't replace your account language or become a local override.
+
+The Android and iPhone apps also restore your account language on an unconfigured device. Choosing **System** in Preferences
+explicitly follows that device instead. A switch between left-to-right and right-to-left languages shows a restart notice;
+the language changes immediately, and restarting applies the layout direction.
+
+<Frame caption="Account language restored in a fresh browser">
+  <img
+    src="/images/guides/changing-appearance-and-language/account-language-restored.png"
+    alt="Fictional Maya Chen account in German Preferences, with Deutsch selected after opening a fresh English-language browser"
+  />
+</Frame>
 
 <Steps>
   <Step title="Open Preferences">
@@ -48,15 +64,37 @@ The change applies at once. Reactive Resume remembers it in this browser, so ano
   </Step>
 
   <Step title="Choose a language under Language">
-    Open the picker and choose from more than 50 languages. You can type to filter the list.
+    Open the picker and choose from more than 50 languages. Each language appears in its own name, with its name in the current interface language below or beside it when different. For example, a German interface shows **Français · Französisch**. Search by either name, its English name, or a language code such as `fr-FR`.
   </Step>
 </Steps>
 
-The page reloads in the new language. Like the theme, the choice is saved in this browser.
+The page reloads in the new language. The choice is saved in this browser for a year, including after a browser restart. A language in the page address (`?locale=`) takes precedence.
 
 You can also change it from your name in the sidebar (**Language**), or with <kbd>⌘</kbd> <kbd>K</kbd> and **Change language to…**.
 
-The interface language doesn't translate your resume. Each resume has its own **Language** setting in the **Page** group of the editor's **Design** mode, which sets the section titles and date words on the page. See [Set the language](/guides/selecting-page-format#set-the-language).
+Before you sign in, choose a language on the homepage: the language name in the header and footer leads to the languages section, which lists every language in its own name. Each name opens the homepage in that language, and the choice carries over when you create an account.
+
+<Frame caption="Language names stay recognizable in a foreign-language interface">
+  <img
+    src="/images/guides/changing-appearance-and-language/language-endonyms.png"
+    alt="Public language picker in a German interface showing Français with Französisch as the secondary name and no visible ISO code"
+  />
+</Frame>
+
+Account emails, such as email verification, password resets and email change approvals, use the language you last used Reactive Resume in, on the website or in the app. A new account starts in the language you signed up in. The links and how long they stay valid are the same in every language.
+
+What you write keeps its own direction. In a right-to-left language such as Arabic, a German or English description, title or salary still reads left to right, each paragraph from its first letter, and Arabic text reads right to left inside an English interface.
+
+Counts, page labels, dates and elapsed times follow the interface language's number format. For example, Arabic uses **١، ٢، ٣** in interface counts and page names. This doesn't rewrite numbers you type into a resume, application or answer, or change the resume's own language.
+
+<Frame caption="Arabic interface numbers around an English-language resume">
+  <img
+    src="/images/guides/changing-appearance-and-language/arabic-numerals.png"
+    alt="Fictional English resume in an Arabic tablet editor with Arabic digits in the Check count, score and page labels"
+  />
+</Frame>
+
+The interface language doesn't translate your resume. Each resume has its own **Language** setting in the **Page** group of the editor's **Design** mode, which sets the section titles and date words on the page. A new resume starts in the interface language; **Resume language** at the top of **Write** shows it and changes it in one step. See [Set the language](/guides/selecting-page-format#set-the-language).
 
 <Tip>
   Spotted a wrong or missing translation? Select **Help translate** under the language picker to suggest a fix on
@@ -65,13 +103,17 @@ The interface language doesn't translate your resume. Each resume has its own **
 
 ## Set your timezone
 
-Go to **Settings → Preferences** and pick your timezone under **Timezone**. Interview times, reminders and schedules in Career use it. New accounts start on UTC; when your device is set to another timezone, **Use this device's timezone** switches to it in one step. The change is saved at once.
+Go to **Settings → Preferences** and pick your timezone under **Timezone**. Interview times, reminders and schedules in Career use it. New accounts start in your device's timezone; existing accounts that never changed it stay on UTC, which the field shows as **UTC**. **Use this device's timezone** switches to it in one step, and the change is saved at once.
+
+## Turn off haptic feedback
+
+In the Android and iPhone apps, many taps, such as choosing a design option, give a small vibration. To turn this off, open **Settings → Preferences** and switch off **Haptic feedback** under **Feedback**. The setting applies to this device only. The website has no haptic setting.
 
 ## Reduce motion
 
-Reactive Resume has no motion switch of its own. It follows your operating system's reduced-motion setting: turn that on, and the app replaces movement with simple fades. Nothing in the app animates on its own without you doing something first.
+Reactive Resume has no motion switch of its own. It follows your operating system's reduced-motion setting: turn that on, and app content uses short opacity fades instead of slides or scaling. Spatial and layout movement stops; native sheets follow the platform's reduced-motion behavior. Loading spinners remain visible while work runs. Keyboard mode switches and controls intended to open instantly still do so.
 
 ## Related guides
 
 - [Using the command bar](/guides/using-the-command-bar): change settings and jump anywhere from the keyboard.
-- [Updating your profile](/guides/updating-your-profile): your name, photo, username and email.
+- [Updating your account details](/guides/updating-your-profile): your name, photo, username and email.

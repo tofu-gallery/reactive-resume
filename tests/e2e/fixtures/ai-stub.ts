@@ -9,7 +9,11 @@ import { createServer } from "node:http";
  */
 
 type ChatMessage = { role: string; content?: unknown; tool_call_id?: string; tool_calls?: unknown[] };
-type ChatRequest = { messages: ChatMessage[]; tools?: Array<{ function: { name: string } }>; stream?: boolean };
+type ChatRequest = {
+	messages: ChatMessage[];
+	tools?: Array<{ function: { name: string; parameters?: { properties?: Record<string, unknown> } } }>;
+	stream?: boolean;
+};
 
 const text = (content: unknown) =>
 	typeof content === "string"
@@ -30,24 +34,6 @@ function chunk(response: ServerResponse, delta: Record<string, unknown>, finish:
 }
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** The Fit check a workspace asks for: one requirement with no evidence yet, so the spec can add some. */
-const FIT = {
-	headline: "A relevant role, with one question to resolve",
-	summary: "Each requirement from the posting, checked against your Knowledge.",
-	requirements: [
-		{
-			text: "Enterprise onboarding",
-			origin: "posting",
-			status: "missing",
-			evidence: "Your Knowledge doesn't say this yet.",
-			factIds: [],
-		},
-	],
-	checks: [],
-	ask: null,
-	factIds: [],
-};
 
 async function streamText(response: ServerResponse, words: string[], delayMs = 0) {
 	chunk(response, { role: "assistant", content: "" });
@@ -87,25 +73,26 @@ function reply(request: ChatRequest, response: ServerResponse) {
 	const readTool = tools.has("read_letter") ? "read_letter" : "read_resume";
 
 	response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-
 	if (said.includes("slowly"))
 		return streamText(
 			response,
 			Array.from({ length: 60 }, (_, index) => `word${index} `),
 			150,
 		);
-	if (!tools.has("propose_edits")) return streamText(response, ["You ", "left ", "the ", "document ", "out."]);
-
 	const asked = sinceUser.some((message) =>
 		(message.tool_calls as Array<{ function?: { name?: string } }> | undefined)?.some(
 			(call) => call.function?.name === "ask_user_question",
 		),
 	);
-	if (said.includes("question") && !asked)
+	if (said.includes("question") && !asked && tools.has("ask_user_question"))
 		return streamToolCall(response, "ask_user_question", {
 			question: "The posting mentions accessibility. Have you done accessibility work?",
 			choices: ["Yes, I have", "No, skip it"],
 		});
+	if (!tools.has("propose_edits"))
+		return streamText(response, [
+			asked ? "Thanks. I'll use your answer as we continue." : "You left the document out.",
+		]);
 
 	// The tool that produced the last result: read first, then propose, then say what changed.
 	const calls = sinceUser.flatMap(
@@ -114,7 +101,7 @@ function reply(request: ChatRequest, response: ServerResponse) {
 	const lastToolName = calls.find((call) => call.id === lastTool?.tool_call_id)?.function.name;
 	if (!lastTool || lastToolName === "ask_user_question") return streamToolCall(response, readTool, {});
 
-	let result: { data?: { passages?: Array<{ id: string; text: string }> } } = {};
+	let result: { data?: { passages?: Array<{ id: string; sectionId?: string; text: string }> } } = {};
 	try {
 		result = JSON.parse(text(lastTool.content) || "{}");
 	} catch {
@@ -122,13 +109,21 @@ function reply(request: ChatRequest, response: ServerResponse) {
 	}
 	const passage =
 		lastToolName === readTool ? result.data?.passages?.find((item) => item.text && item.text !== "(empty)") : undefined;
-	if (passage)
-		return streamToolCall(response, "propose_edits", {
-			title: "Tighten the first passage",
-			edits: [
-				{ passageId: passage.id, text: `${passage.text} (tightened by the stub)`, why: "Leads with the outcome." },
-			],
-		});
+	if (passage) {
+		const structured = request.tools?.find((tool) => tool.function.name === "propose_edits")?.function.parameters
+			?.properties?.changes;
+		const edits = [
+			{ passageId: passage.id, text: `${passage.text} (tightened by the stub)`, why: "Leads with the outcome." },
+		];
+		const title = "Tighten the first passage";
+		return streamToolCall(
+			response,
+			"propose_edits",
+			structured
+				? { title, changes: edits.map((edit) => ({ ...edit, kind: "text", sectionId: passage.sectionId })) }
+				: { title, edits },
+		);
+	}
 
 	return streamText(response, [
 		"I ",
@@ -156,11 +151,8 @@ function handle(request: IncomingMessage, response: ServerResponse, requests: Ch
 		}
 		const parsed = JSON.parse(body || "{}") as ChatRequest;
 		requests.push(parsed);
-		// The connection test asks for a single character, without streaming; a workspace tab asks for its JSON.
+		// The connection test asks for a single character, without streaming.
 		if (!parsed.stream) {
-			const asksForFit = parsed.messages.some((message) =>
-				text(message.content).includes("Check the posting's requirements"),
-			);
 			response.writeHead(200, { "content-type": "application/json" });
 			response.end(
 				JSON.stringify({
@@ -171,7 +163,7 @@ function handle(request: IncomingMessage, response: ServerResponse, requests: Ch
 					choices: [
 						{
 							index: 0,
-							message: { role: "assistant", content: asksForFit ? JSON.stringify(FIT) : "1" },
+							message: { role: "assistant", content: "1" },
 							finish_reason: "stop",
 						},
 					],

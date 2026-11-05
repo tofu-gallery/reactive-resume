@@ -20,7 +20,7 @@ Add this workspace package to the Expo app. Expo autolinking discovers its Swift
 
 ## EAS prebuilt binaries
 
-The manually dispatched `.github/workflows/mobile-forme-native.yml` builds both platforms on macOS with the pinned Rust tools and NDK. It packages the generated header, arm64 device/simulator xcframework, and all three Android `jniLibs` into one archive. Linux Android workers and macOS iOS workers need only Node and `tar`; they never run Cargo. Local development keeps `bash rust/build.sh`.
+The manually dispatched `.github/workflows/mobile-forme-build.yml` builds both platforms on macOS with the pinned Rust tools and NDK. It packages the generated header, arm64 device/simulator xcframework, and all three Android `jniLibs` into one archive. Linux Android workers and macOS iOS workers need only Node and `tar`; they never run Cargo. Local development keeps `bash rust/build.sh`.
 
 Each archive and workflow artifact is named `forme-native-v<package-version>-<source-hash>`. The hash covers sorted relative paths and SHA-256 file contents of every file under `rust/`, excluding the generated `rust/target/` directory. This includes the Cargo lockfile, build script, toolchain pin and cbindgen configuration. Changing any input requires a new pin. The archive has a separate SHA-256 because rebuilding the same source is not assumed to produce byte-identical archives.
 

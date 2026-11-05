@@ -1,12 +1,12 @@
 import type { CheckIssue } from "./issues";
 import type { ResumeData } from "@reactive-resume/schema/resume/data";
 import { t } from "@lingui/core/macro";
-import { toast } from "@reactive-resume/ui/components/toast";
 import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { useEditorStore } from "../store";
 import { useEditorMode } from "../use-editor-mode";
 import { getScrollBehavior, revealSelectionInPanel } from "../write/reveal";
 import { useResumeStore } from "@/features/resume/builder/draft";
+import { undoToast } from "@/features/resume/builder/undo-toast";
 
 /** The author's Check choices on a draft, created on first use. */
 export function checkStateOf(draft: ResumeData) {
@@ -14,14 +14,10 @@ export function checkStateOf(draft: ResumeData) {
 	return draft.metadata.check;
 }
 
-/** One undo step, confirmed in a toast whose Undo takes it back. */
+/** One undo step, confirmed in a toast whose Undo takes back this change only (see `undoToast`). */
 export function editWithUndo(edit: (draft: ResumeData) => void, message: string) {
-	const store = useResumeStore.getState();
-	store.updateResumeData(edit, { newStep: true });
-	toast.add({
-		description: message,
-		actionProps: { children: t`Undo`, onClick: () => useResumeStore.getState().undo() },
-	});
+	useResumeStore.getState().updateResumeData(edit, { newStep: true });
+	undoToast(message);
 }
 
 /** Scrolls the page to an issue's pin, or the panel to its card. */

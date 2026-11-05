@@ -9,15 +9,22 @@ import { Stack, ThemeProvider } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
+import { DevSettings } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { followStageWrites } from "@reactive-resume/schema/applications/stage-baselines";
 import { restoreSession } from "@/auth/session";
 import { SessionGate } from "@/auth/session-gate";
+import { IncomingPosting } from "@/features/applications/incoming-posting";
+import { stageScope } from "@/features/applications/queries";
+import { listedApplication } from "@/features/applications/stage-actions";
 import { useOpenReminder } from "@/features/reminders/open";
 import { useReviewPrompt } from "@/features/reviews/use-review-prompt";
+import { useAccountLocale } from "@/features/settings/account-locale";
 import { i18n, initI18n } from "@/i18n";
-import { EmptyState, Screen, Toaster, WindowSafeAreaProvider, useReducedMotion, useTheme } from "@/ui";
+import { KeyboardShortcuts, ShortcutHelpButton } from "@/shell/shortcut-help";
+import { ConfirmDialog, EmptyState, Screen, Toaster, WindowSafeAreaProvider, useReducedMotion, useTheme } from "@/ui";
 import { fontAssets } from "@/ui/fonts";
 import { initTheme } from "@/ui/theme";
 
@@ -28,6 +35,8 @@ Observe.configure({ integrations: { "expo-router": { filteredParams: ["code", "s
 void SplashScreen.preventAutoHideAsync();
 
 const queryClient = new QueryClient();
+// A bulk move chosen while a single stage change is on its way starts from what that change saved.
+followStageWrites(queryClient, stageScope, (id) => listedApplication(queryClient, id));
 
 function useNavigationTheme() {
 	const { scheme, colors, fonts } = useTheme();
@@ -72,6 +81,7 @@ function RootStack() {
 	const reduced = useReducedMotion();
 	useOpenReminder();
 	useReviewPrompt();
+	const accountLocale = useAccountLocale();
 
 	return (
 		<ThemeProvider value={navigationTheme}>
@@ -79,6 +89,7 @@ function RootStack() {
 			<Stack
 				screenOptions={{
 					animation: reduced ? "fade" : "default",
+					headerRight: () => <ShortcutHelpButton />,
 					headerTitleStyle: { fontFamily: navigationTheme.fonts.bold.fontFamily },
 				}}
 			>
@@ -95,6 +106,19 @@ function RootStack() {
 				<Stack.Screen name="applications/[id]" options={{ headerShown: false, title: t`Application` }} />
 				<Stack.Screen name="r/[username]/[slug]" options={{ title: t`Resume` }} />
 			</Stack>
+			<KeyboardShortcuts />
+			<ConfirmDialog
+				open={accountLocale.restart}
+				title={t`Restart to change text direction`}
+				message={t`Your language is saved. Restart Reactive Resume to apply the new left-to-right or right-to-left layout.`}
+				confirmLabel={__DEV__ ? t`Reload now` : t`Done`}
+				cancelLabel={t`Later`}
+				onCancel={accountLocale.dismissRestart}
+				onConfirm={() => {
+					accountLocale.dismissRestart();
+					if (__DEV__) DevSettings.reload();
+				}}
+			/>
 		</ThemeProvider>
 	);
 }
@@ -127,6 +151,7 @@ function RootLayout() {
 									<ObserveErrorBoundary fallback={({ resetError }) => <CrashScreen onRetry={resetError} />}>
 										<RootStack />
 										<SessionGate />
+										<IncomingPosting />
 									</ObserveErrorBoundary>
 									<Toaster />
 								</TrueSheetProvider>

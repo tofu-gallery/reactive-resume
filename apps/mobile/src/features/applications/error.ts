@@ -1,9 +1,19 @@
 import { t } from "@lingui/core/macro";
 import { ORPCError } from "@orpc/client";
+import { SUBMITTED_DOCUMENT_LOCKED } from "@reactive-resume/schema/applications/errors";
 
 export function applicationError(error: unknown) {
 	if (error instanceof ORPCError) {
-		if (error.code === "POSTING_UNREADABLE") return t`That link couldn't be read. Paste the posting text instead.`;
+		if (error.data?.reason === SUBMITTED_DOCUMENT_LOCKED)
+			return t`This application keeps the documents you submitted. Choose an application without a submitted letter, or duplicate the letter for another job.`;
+		if (error.code === "POSTING_SUPPORT_UNAVAILABLE")
+			return t`Reading without AI couldn't be confirmed. Retry, update your server, or enter the details manually.`;
+		if (error.code === "CONFLICT") return t`This changed elsewhere. Reload and try again.`;
+		if (error.code === "POSTING_UNREADABLE")
+			// The server names the cause (a board's list of jobs, or a page that would not open) and the next step.
+			return error.message || t`That link couldn't be read. Paste the posting text instead.`;
+		if (error.code === "SEARCH_AUTH") return t`The web service rejected its key. Fix web access or paste a posting.`;
+		if (error.code === "SEARCH_QUOTA") return t`The web service quota is used up. Fix web access or paste a posting.`;
 		if (error.code === "SEARCH_FAILED") return t`Job search couldn't be reached. Try again or paste a posting link.`;
 		if (error.code === "SEARCH_UNAVAILABLE")
 			return t`Job search isn't configured on this server. Paste a posting link instead.`;

@@ -4,16 +4,18 @@ import type { SavedData, SavedItem } from "../hooks";
 import type { WorkspaceTabProps } from "../shell";
 import type { Application } from "@/features/applications/types";
 import type { InterviewTimelineEntry } from "@reactive-resume/schema/applications/data";
-import { plural } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
 import { useState } from "react";
 import { View } from "react-native";
+import { firstFutureLead, PREPARE_LEADS } from "@reactive-resume/schema/career-schedule";
 import { formatList } from "@reactive-resume/utils/locale";
 import {
 	latest,
-	useFlags,
+	useFacts,
 	useGenerate,
 	useSavedItems,
 	useSchedules,
@@ -23,13 +25,16 @@ import {
 	workspaceError,
 } from "../hooks";
 import { minutesUntil, preparePhase } from "../logic";
-import { Actions, AiNotice, Block, CheckRow, EmptyNotice, Pill, PrivacyLine, useWorking, workingSteps } from "../parts";
+import { Actions, AiNotice, Block, CheckRow, Pill, GenerateNotice, useWorking, workingSteps } from "../parts";
 import { WorkspaceScreen } from "../shell";
 import { orpc } from "@/api/client";
+import { useFlags } from "@/api/flags";
 import { useHasAIProvider } from "@/features/ai/providers";
-import { interviewTypeLabel, useUserTime } from "@/features/application-detail/hooks";
+import { interviewTypeLabel, useNow, useUserTime } from "@/features/application-detail/hooks";
+import { LoadState } from "@/features/career/shared";
+import { StoryEditor } from "@/features/career/stories";
 import { routes } from "@/routes";
-import { Banner, Button, ListRow, Sheet, Skeleton, Switch, Text, showToast, useTheme } from "@/ui";
+import { Banner, Button, EmptyState, ListRow, Sheet, Skeleton, Switch, Text, showToast, useTheme } from "@/ui";
 
 type Briefing = SavedItem & { data: SavedData<"briefing"> };
 
@@ -46,12 +51,13 @@ function Prepare({ application, version, interview, now, go, addInterview }: Wor
 
 	if (!interview && !isBriefing(version))
 		return (
-			<EmptyNotice
+			<EmptyState
+				variant="card"
 				title={t`Add an interview to plan for it`}
-				message={t`Once a round is scheduled, Prepare builds a timed plan, your opening and the questions to ask.`}
+				message={t`Once a round is scheduled, Interview prep builds a timed plan, your opening and the questions to ask.`}
 			>
 				<Button variant="secondary" icon="calendar-dot" label={t`Add an interview`} onPress={addInterview} />
-			</EmptyNotice>
+			</EmptyState>
 		);
 
 	const briefing = isBriefing(version) ? version : latest(saved.data, "briefing", interview?.id ?? null);
@@ -60,12 +66,13 @@ function Prepare({ application, version, interview, now, go, addInterview }: Wor
 		const phase = preparePhase(interview, now);
 		if (phase === "after")
 			return (
-				<EmptyNotice
+				<EmptyState
+					variant="card"
 					title={t`How did it go?`}
 					message={t`Write down what they asked while it's fresh. The coach compares your answers with your stories.`}
 				>
 					<Button label={t`Start a debrief`} onPress={() => go("debrief")} />
-				</EmptyNotice>
+				</EmptyState>
 			);
 		if (phase === "soon")
 			return <Soon application={application} interview={interview} briefing={briefing} now={now} go={go} />;
@@ -86,27 +93,17 @@ function PlanEmpty({ application, interview }: PlanEmptyProps) {
 	const provider = useHasAIProvider().defaultProvider;
 	const generate = useGenerate(application.id);
 	const label = useWorking(generate.isPending, workingSteps("briefing"), t`Plan my preparation`);
-	const name = provider?.label ?? "";
+	const plan = () => void generate.run({ task: "briefing", interviewId: interview.id }).catch(() => undefined);
 	return (
-		<EmptyNotice
+		<EmptyState
+			variant="card"
 			title={t`A focused plan for this round`}
 			message={t`A timed plan, your opening, the stories to bring and questions to ask. It becomes your checklist 10 minutes before the call.`}
 		>
-			{provider ? (
-				<>
-					<Button
-						label={label}
-						loading={generate.isPending}
-						onPress={() => void generate.run({ task: "briefing", interviewId: interview.id }).catch(() => undefined)}
-					/>
-					<PrivacyLine centered>
-						{t`Sends this application (posting, notes, interview details) and Knowledge that's switched on to ${name}.`}
-					</PrivacyLine>
-				</>
-			) : (
-				<AiNotice centered />
-			)}
-		</EmptyNotice>
+			{provider ? <Button label={label} loading={generate.isPending} onPress={plan} /> : null}
+			<GenerateNotice generate={generate} onRetry={plan} />
+			<AiNotice task="briefing" application={application} interview centered />
+		</EmptyState>
 	);
 }
 
@@ -128,9 +125,15 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 	const ticks = useTicks(application.id, `plan:${briefing.id}`);
 	const workspace = useWorkspace(application.id);
 	const [reading, setReading] = useState(false);
+	const [drafting, setDrafting] = useState<{ title: string; note: string; factIds?: string[] | undefined } | null>(
+		null,
+	);
+	const facts = useFacts(application.id, drafting !== null);
 	const provider = useHasAIProvider().defaultProvider;
 	const generate = useGenerate(application.id);
 	const againLabel = useWorking(generate.isPending, workingSteps("briefing"), t`Plan again`);
+	const planAgain = (interviewId: string) =>
+		void generate.run({ task: "briefing", interviewId }).catch(() => undefined);
 	const done = (index: number) => ticks.ticked.includes(String(index));
 	const total = data.plan.reduce((sum, row) => sum + row.minutes, 0);
 	const doneMinutes = data.plan.reduce((sum, row, index) => sum + (done(index) ? row.minutes : 0), 0);
@@ -141,7 +144,11 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 			case "story":
 				return { label: t`Open story`, onPress: () => router.push(routes.career("knowledge")) };
 			case "draft-story":
-				return { label: t`Draft story`, onPress: () => router.push(routes.career("knowledge")) };
+				// The new story starts from this step: its title, and its detail as a note above the parts.
+				return {
+					label: t`Draft story`,
+					onPress: () => setDrafting({ title: row.title, note: row.detail, factIds: row.factIds }),
+				};
 			case "practise":
 				return { label: t`Practice`, onPress: () => go("practise", { speak: true }) };
 			case "questions":
@@ -156,7 +163,7 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 				<Text variant="heading">{data.headline}</Text>
 				<Text color="ink2">{data.summary}</Text>
 				<Text variant="mono" color="ink3">
-					{t`${doneMinutes} of ${total} min`}
+					{t`${ph({ doneMinutes: i18n.number(doneMinutes) })} of ${ph({ total: i18n.number(total) })} min`}
 				</Text>
 			</View>
 			{/* The interview, posting or Knowledge changed since it was planned: plan again on request. */}
@@ -165,9 +172,10 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 					variant="secondary"
 					label={againLabel}
 					loading={generate.isPending}
-					onPress={() => void generate.run({ task: "briefing", interviewId: interview.id }).catch(() => undefined)}
+					onPress={() => planAgain(interview.id)}
 				/>
 			) : null}
+			{!readOnly ? <GenerateNotice generate={generate} onRetry={() => interview && planAgain(interview.id)} /> : null}
 			<View
 				accessibilityElementsHidden
 				importantForAccessibility="no-hide-descendants"
@@ -200,7 +208,7 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 								onChange={(on) => ticks.toggle(String(index), on)}
 								trailing={
 									<Text variant="mono" color="ink3">
-										{t`${minutes} min`}
+										{t`${ph({ minutes: i18n.number(minutes) })} min`}
 									</Text>
 								}
 							/>
@@ -219,7 +227,7 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 					{questions.map((question, index) => (
 						<View key={`${question.text}-${index}`} style={{ flexDirection: "row", gap: space.s2 }}>
 							<Text variant="mono" color="accentText">
-								{index + 1}
+								{i18n.number(index + 1)}
 							</Text>
 							<Text style={{ flex: 1 }}>{question.text}</Text>
 							<Text variant="caption" color="ink3">
@@ -239,11 +247,16 @@ function Plan({ application, interview, briefing, readOnly, go }: PlanProps) {
 			{interview && !readOnly ? <RefreshSwitch application={application} interview={interview} /> : null}
 			<StoriesToBring application={application} briefing={briefing} />
 			<BriefingSheet briefing={briefing} open={reading} onClose={() => setReading(false)} />
+			{drafting ? (
+				facts.data ? (
+					<StoryEditor story={null} facts={facts.data} start={drafting} onClose={() => setDrafting(null)} />
+				) : (
+					<LoadState query={facts} />
+				)
+			) : null}
 		</View>
 	);
 }
-
-const LEADS = ["24h", "2h", "morning"] as const;
 
 type RefreshSwitchProps = { application: Application; interview: InterviewTimelineEntry };
 
@@ -257,40 +270,46 @@ function RefreshSwitch({ application, interview }: RefreshSwitchProps) {
 	const flags = useFlags();
 	const schedules = useSchedules();
 	const schedule = schedules.data?.find((item) => item.kind === "prepare" && item.interviewId === interview.id);
-	const lead = LEADS.find((item) => item === schedule?.lead) ?? "24h";
+	const now = useNow();
+	const next = firstFutureLead(new Date(interview.at), timeZone, now);
+	const lead = schedule?.lead ?? next?.lead ?? PREPARE_LEADS[0];
 	// The schedule's own connection while it's switched on and tested; otherwise the default, as the run itself does.
 	const own = connection.usableProviders.find((item) => item.id === schedule?.aiProviderId);
 	const provider = own ?? connection.defaultProvider;
 	const providerId = provider?.id ?? null;
 	const providerLabel = provider?.label ?? "";
-	const runAt = schedule?.nextRunAt ?? new Date(new Date(interview.at).getTime() - 24 * 3_600_000);
+	const runAt = schedule?.nextRunAt ?? next?.runAt ?? null;
 	const scheduling = flags.data?.careerSchedulingEnabled !== false;
 
 	const save = useMutation({
 		...orpc.career.saveSchedule.mutationOptions(),
 		onSuccess: (row) => {
 			void queryClient.invalidateQueries({ queryKey: orpc.career.schedules.key() });
-			const next = when(row.nextRunAt);
-			showToast({ message: row.enabled ? t`Briefing refresh is on · ${next}` : t`Briefing refresh paused` });
+			const nextAt = when(row.nextRunAt);
+			showToast({ message: row.enabled ? t`Briefing refresh is on · ${nextAt}` : t`Briefing refresh paused` });
 		},
 		onError: (error) => showToast({ message: workspaceError(error, t`Couldn't change the schedule. Try again.`) }),
 	});
 
 	const enabled = (save.isPending ? save.variables.enabled : schedule?.enabled) ?? false;
 	const available = !connection.isUnavailable && scheduling && !!providerId;
-	const label = {
-		"24h": t`Refresh the briefing 24 hours before`,
-		"2h": t`Refresh the briefing 2 hours before`,
-		morning: t`Refresh the briefing on the morning of`,
-	}[lead];
-	const at = when(runAt);
+	const label = next
+		? {
+				"24h": t`Refresh the briefing 24 hours before`,
+				"2h": t`Refresh the briefing 2 hours before`,
+				morning: t`Refresh the briefing on the morning of`,
+			}[next.lead]
+		: t`Refresh the briefing`;
+	const at = runAt ? when(runAt) : "";
 	const description = !scheduling
 		? t`Scheduled work isn't available on this server.`
 		: connection.isUnavailable
 			? t`AI connections are unavailable.`
 			: !providerId
 				? t`Connect an AI provider in Settings to refresh it automatically.`
-				: t`${at} · ${providerLabel}. Sends this application and your Knowledge; your provider may charge.`;
+				: at
+					? t`${at} · ${providerLabel}. Sends this application and your Knowledge; your provider may charge.`
+					: t`Too close to the interview to schedule a refresh.`;
 
 	return (
 		<Block>
@@ -304,19 +323,19 @@ function RefreshSwitch({ application, interview }: RefreshSwitchProps) {
 				<Switch
 					label={label}
 					value={enabled}
-					disabled={save.isPending || (!available && !enabled)}
+					disabled={save.isPending || (!available && !enabled) || (!next && !enabled)}
 					onValueChange={(checked) =>
 						save.mutate({
 							...(schedule ? { id: schedule.id } : {}),
 							kind: "prepare",
 							applicationId: application.id,
 							interviewId: interview.id,
-							lead,
+							lead: (next?.lead ?? lead) as "24h" | "2h" | "morning",
 							enabled: checked,
 							email: schedule?.email ?? false,
 							timezone: timeZone,
 							locale: i18n.locale,
-							nextRunAt: new Date(runAt),
+							nextRunAt: next?.runAt ?? runAt ?? new Date(interview.at),
 							aiProviderId: providerId,
 							query: "",
 							intervalDays: null,
@@ -359,7 +378,7 @@ function BriefingNotes({ briefing }: { briefing: Briefing }) {
 	const { data } = briefing;
 	const items = [
 		{ label: t`Your focus`, text: data.focus },
-		{ label: t`Your opening`, text: data.opening && `“${data.opening}”`, italic: true },
+		{ label: t`Your opening`, text: data.opening && `“${data.opening}”` },
 		{ label: data.stories.length === 2 ? t`Two stories` : t`Stories`, text: data.stories.join("\n") },
 		{ label: t`Keep it honest`, text: data.honesty },
 	];
@@ -372,7 +391,7 @@ function BriefingNotes({ briefing }: { briefing: Briefing }) {
 						<Text variant="label" color="ink2">
 							{item.label}
 						</Text>
-						<Text style={item.italic ? { fontStyle: "italic" } : null}>{item.text}</Text>
+						<Text>{item.text}</Text>
 					</View>
 				))}
 		</View>

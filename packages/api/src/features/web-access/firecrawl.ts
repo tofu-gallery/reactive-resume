@@ -4,12 +4,12 @@ import { htmlToText } from "./builtin";
 import { MAX_PAGE_BYTES, WebAccessError } from "./contracts";
 import { normalizeSearch, parseResponse, postJson } from "./transport";
 
-function request(path: string, body: unknown, { connection, signal }: ProviderRequest) {
+function request(path: string, body: Record<string, unknown>, { connection, signal }: ProviderRequest) {
 	const base = (connection.apiUrl || "https://api.firecrawl.dev").replace(/\/+$/, "");
 	return postJson(
 		`${base}/v2/${path}`,
 		connection.apiKey ? { authorization: `Bearer ${connection.apiKey}` } : {},
-		body,
+		{ ...body, integration: "_reactive-resume" },
 		signal,
 	);
 }
@@ -23,6 +23,7 @@ const scrapeSchema = z.object({
 			url: z.string().optional(),
 			sourceURL: z.string().optional(),
 			error: z.string().nullable().optional(),
+			cachedAt: z.iso.datetime({ offset: true }).optional(),
 		})
 		.optional(),
 });
@@ -42,6 +43,7 @@ export async function readFirecrawl(url: string, options: ProviderRequest) {
 		format: result.markdown?.trim() ? ("markdown" as const) : ("text" as const),
 		...(result.rawHtml ? { html: result.rawHtml } : {}),
 		...(result.metadata?.url ? { resolvedUrl: result.metadata.url } : {}),
+		...(result.metadata?.cachedAt ? { providerFetchedAt: result.metadata.cachedAt } : {}),
 	};
 }
 

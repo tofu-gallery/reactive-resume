@@ -4,6 +4,7 @@ import type { RouterInput } from "@/api/client";
 import { t } from "@lingui/core/macro";
 import { ORPCError } from "@orpc/client";
 import { produce } from "immer";
+import { aiOperationIdsSchema } from "@reactive-resume/schema/ai-usage";
 import { coverLetterSchema } from "@reactive-resume/schema/cover-letter/data";
 import { resumeDataSchema } from "@reactive-resume/schema/resume/data";
 import { syncResumeDates } from "@reactive-resume/schema/resume/dates";
@@ -23,6 +24,7 @@ function resumeFields(document: ResumeDocument) {
 		isPublic: document.isPublic,
 		showDownloadButtons: document.showDownloadButtons,
 		data: document.data,
+		aiOperationIds: document.aiOperationIds ?? [],
 	};
 }
 
@@ -32,6 +34,7 @@ function letterFields(document: LetterDocument) {
 		name: document.name,
 		recipient: document.recipient,
 		content: document.content,
+		aiOperationIds: document.aiOperationIds ?? [],
 		greeting: document.greeting,
 		signOff: document.signOff,
 		recipientName: document.recipientName,
@@ -71,6 +74,7 @@ export const resumeAdapter: DraftAdapter<ResumeDocument, ResumeDocument["data"]>
 		...changedFields(resumeFields(current), resumeFields(submitted)),
 		// Keep authored data and its references stable across the server's normalized echo.
 		data: current.data,
+		...(JSON.stringify(saved.aiOperationIds) !== JSON.stringify(current.aiOperationIds) ? { aiUsage: null } : {}),
 	}),
 	parse: (value) => {
 		const document = dates(value) as ResumeDocument;
@@ -86,15 +90,27 @@ export const resumeAdapter: DraftAdapter<ResumeDocument, ResumeDocument["data"]>
 			!Number.isFinite(document.updatedAt.getTime())
 		)
 			throw new Error("Invalid stored resume.");
+		if (document.aiOperationIds !== undefined && !aiOperationIdsSchema.safeParse(document.aiOperationIds).success) {
+			delete document.aiOperationIds;
+			document.aiUsage = null;
+		}
 		return { ...document, data: resumeDataSchema.parse(document.data) };
 	},
-	save: async (document, baseline, sessionId, force, scope) => ({
+	save: async (document, baseline, sessionId, force, scope, proposalApplications, proposalSafety) => ({
 		...document,
 		...(await client.resume.update(
 			{
 				id: document.id,
 				...changedFields(resumeFields(document), resumeFields(baseline)),
+				...(JSON.stringify(document.aiOperationIds ?? []) !== JSON.stringify(baseline.aiOperationIds ?? [])
+					? { data: document.data }
+					: {}),
 				sessionId,
+				// Only for drafts this app kept (see the draft store's proposalSafety).
+				...(proposalSafety ? { proposalSafety } : {}),
+				...(proposalApplications && Object.keys(proposalApplications).length
+					? { proposalApplications: { ...proposalApplications } }
+					: {}),
 				...(!force ? { expectedUpdatedAt: baseline.updatedAt } : {}),
 			},
 			{ context: { scope } },
@@ -102,7 +118,12 @@ export const resumeAdapter: DraftAdapter<ResumeDocument, ResumeDocument["data"]>
 	}),
 	copy: async (document, copyId, remember, scope) => {
 		const name = t`${document.name} (mine)`.slice(0, 100);
-		const id = copyId ?? (await client.resume.import({ data: document.data }, { context: { scope } }));
+		const id =
+			copyId ??
+			(await client.resume.import(
+				{ data: document.data, ...(document.aiOperationIds ? { aiOperationIds: document.aiOperationIds } : {}) },
+				{ context: { scope } },
+			));
 		remember(id);
 		await client.resume.update({ id, name, tags: document.tags, data: document.data }, { context: { scope } });
 	},
@@ -114,23 +135,42 @@ export const letterAdapter: DraftAdapter<LetterDocument, LetterDocument> = {
 	delay: 800,
 	read: (id) => client.coverLetters.getById({ id }),
 	data: (document) => document,
-	withData: (document, data) => ({ ...document, ...letterFields(data) }),
+	withData: (document, data) => ({
+		...document,
+		...letterFields(data),
+		...(JSON.stringify(document.aiOperationIds) !== JSON.stringify(data.aiOperationIds) ? { aiUsage: null } : {}),
+	}),
 	version: (document) => document.revision,
 	matches: (left, right) => Object.keys(changedFields(letterFields(left), letterFields(right))).length === 0,
 	merge: (saved, submitted, current) => ({
 		...saved,
 		...changedFields(letterFields(current), letterFields(submitted)),
+		...(JSON.stringify(saved.aiOperationIds) !== JSON.stringify(current.aiOperationIds) ? { aiUsage: null } : {}),
+		// Unlinking resolves fresh resume details; retain only fields edited while that request was pending.
+		style: {
+			...saved.style,
+			basics: { ...saved.style.basics, ...changedFields(current.style.basics, submitted.style.basics) },
+			picture: { ...saved.style.picture, ...changedFields(current.style.picture, submitted.style.picture) },
+			metadata: { ...saved.style.metadata, ...changedFields(current.style.metadata, submitted.style.metadata) },
+		},
 	}),
 	parse: (value) => coverLetterSchema.parse(dates(value)),
-	save: (document, baseline, sessionId, _force, scope) => {
+	save: (document, baseline, sessionId, _force, scope, proposalApplications, proposalSafety) => {
 		const changes = changedFields(letterFields(document), letterFields(baseline));
 		const input: RouterInput["coverLetters"]["update"] = {
 			id: document.id,
 			expectedRevision: baseline.revision,
 			sessionId,
+			...(proposalSafety ? { proposalSafety } : {}),
+			...(proposalApplications && Object.keys(proposalApplications).length
+				? { proposalApplications: { ...proposalApplications } }
+				: {}),
 			...("name" in changes ? { name: document.name } : {}),
 			...("recipient" in changes ? { recipient: document.recipient } : {}),
 			...("content" in changes ? { content: document.content } : {}),
+			...("aiOperationIds" in changes && document.aiOperationIds !== undefined
+				? { aiOperationIds: document.aiOperationIds }
+				: {}),
 			...("greeting" in changes ? { greeting: document.greeting } : {}),
 			...("signOff" in changes ? { signOff: document.signOff } : {}),
 			...("recipientName" in changes ? { recipientName: document.recipientName } : {}),
@@ -141,13 +181,32 @@ export const letterAdapter: DraftAdapter<LetterDocument, LetterDocument> = {
 			...("senderLinked" in changes ? { senderLinked: document.senderLinked } : {}),
 			...("designLinked" in changes ? { designLinked: document.designLinked } : {}),
 		};
+		if (!document.senderLinked) {
+			const sender: NonNullable<typeof input.sender> = changedFields(document.style.basics, baseline.style.basics);
+			if (document.style.picture.hidden !== baseline.style.picture.hidden)
+				sender.picture = { hidden: document.style.picture.hidden };
+			if (Object.keys(sender).length) input.sender = sender;
+		}
 		const metadata = changedFields(document.style.metadata, baseline.style.metadata);
 		if ("template" in metadata) input.template = document.style.metadata.template;
-		if ("typography" in metadata || "design" in metadata || "page" in metadata)
+		// Language is the letter's own: send it alone so a shared design stays linked, as web's Design does.
+		const page = document.style.metadata.page;
+		const previousPage = baseline.style.metadata.page;
+		const localeChanged = Boolean(page && previousPage && page.locale !== previousPage.locale);
+		const otherPageChanged =
+			Boolean(page && previousPage) &&
+			(page.format !== previousPage.format ||
+				page.marginX !== previousPage.marginX ||
+				page.marginY !== previousPage.marginY ||
+				page.hideIcons !== previousPage.hideIcons ||
+				page.gapX !== previousPage.gapX ||
+				page.gapY !== previousPage.gapY);
+		if (localeChanged && page) input.locale = page.locale;
+		if ("typography" in metadata || "design" in metadata || otherPageChanged)
 			input.metadata = {
 				...("typography" in metadata ? { typography: document.style.metadata.typography } : {}),
 				...("design" in metadata ? { design: document.style.metadata.design } : {}),
-				...("page" in metadata ? { page: document.style.metadata.page } : {}),
+				...("page" in metadata && otherPageChanged ? { page } : {}),
 			};
 		return client.coverLetters.update(input, { context: { scope } });
 	},
@@ -155,6 +214,7 @@ export const letterAdapter: DraftAdapter<LetterDocument, LetterDocument> = {
 		if (copyId) return;
 		const copy = await client.coverLetters.import(
 			{
+				...(document.aiOperationIds ? { aiOperationIds: document.aiOperationIds } : {}),
 				document: {
 					format: "reactive-resume-cover-letter",
 					version: 1,

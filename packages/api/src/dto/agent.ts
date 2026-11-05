@@ -13,6 +13,8 @@ export const uiMessageSchema = z.object({
 export const agentThreadSchema = z.object({
 	id: z.string(),
 	title: z.string(),
+	/** Opening-message preview in history; older servers and non-list responses may omit it. */
+	firstMessage: z.string().nullable().optional(),
 	status: z.string(),
 	scope: z.enum(["document", "application", "career"]),
 	applicationId: z.string().nullable(),
@@ -50,4 +52,8 @@ export const agentConversationSchema = z.object({
 		.object({ kind: z.enum(["resume", "letter"]), id: z.string(), name: z.string(), locked: z.boolean() })
 		.nullable(),
 	isReadOnly: z.boolean(),
+	/** Messages no longer sent to the AI because Knowledge changed after they were written. */
+	history: z.object({ cutoffAt: z.date().nullable(), withheld: z.array(z.string()) }).optional(),
+	/** Replies that ended before they finished: stopped, timed out, failed or cut off by a restart. */
+	interrupted: z.array(z.string()).optional(),
 });

@@ -1,5 +1,7 @@
+import type { StorageReadOptions } from "./read";
 import { del, get, list, put } from "@vercel/blob";
 import { env } from "@reactive-resume/env/server";
+import { readStorageBody } from "./read";
 
 export function blobOptions() {
 	return {
@@ -9,7 +11,12 @@ export function blobOptions() {
 }
 
 export function blobPath(key: string) {
-	if (key.startsWith("/") || key.includes("\\") || key.split("/").some((part) => part === "." || part === "..")) {
+	if (
+		key.startsWith("/") ||
+		/[%?#\\]/.test(key) ||
+		Array.from(key).some((character) => character.charCodeAt(0) < 32) ||
+		key.split("/").some((part) => part === "." || part === "..")
+	) {
 		throw new Error("Invalid storage key");
 	}
 	return `${env.DEPLOYMENT_NAMESPACE}/${key}`;
@@ -37,11 +44,19 @@ export class BlobStorageService {
 		});
 	}
 
-	async read(key: string) {
-		const result = await get(blobPath(key), { ...blobOptions(), access: "private", useCache: false });
+	async read(key: string, options?: StorageReadOptions) {
+		options?.signal?.throwIfAborted();
+		const result = await get(blobPath(key), {
+			...blobOptions(),
+			access: "private",
+			useCache: false,
+			...(options?.signal ? { abortSignal: options.signal } : {}),
+		});
 		if (!result) return null;
 		if (result.statusCode !== 200) throw new Error("Unexpected conditional Blob response");
-		const data = new Uint8Array(await new Response(result.stream).arrayBuffer());
+		const data = options
+			? await readStorageBody(result.stream, options, result.blob.size)
+			: new Uint8Array(await new Response(result.stream).arrayBuffer());
 		return {
 			data,
 			size: data.byteLength,

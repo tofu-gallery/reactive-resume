@@ -3,14 +3,16 @@ import type { CareerProfileData } from "@reactive-resume/schema/career";
 import { useLingui } from "@lingui/react/macro";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AppState, View } from "react-native";
 import { careerProfileDataSchema } from "@reactive-resume/schema/career";
-import { parseAmount } from "./amount";
+import { getCurrencyOptions, parseAmount } from "@reactive-resume/utils/amount";
 import { useCareerTime } from "./hooks";
+import { RoleSuggestions } from "./role-suggestions";
 import { SearchRegionsField } from "./search-regions-field";
 import { client, orpc } from "@/api/client";
 import { getServer, useSession } from "@/auth/session";
+import { useDraft } from "@/features/workspace/hooks";
 import { routes } from "@/routes";
 import { Banner, Button, ChipInput, SelectSheet, Text, TextArea, TextField, useTheme } from "@/ui";
 
@@ -22,13 +24,29 @@ export function Preferences({ initial }: PreferencesProps) {
 	const router = useRouter();
 	const session = useSession();
 	const queryClient = useQueryClient();
-	const [draft, setDraft] = useState(initial);
-	const [amount, setAmount] = useState(
-		initial.minBase.amount === null
-			? ""
-			: new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(initial.minBase.amount),
+	const kept = useDraft(
+		"preferences",
+		{
+			draft: initial,
+			amount:
+				initial.minBase.amount === null
+					? ""
+					: new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(initial.minBase.amount),
+			notice: initial.noticeWeeks === null ? "" : String(initial.noticeWeeks),
+		},
+		true,
 	);
-	const [notice, setNotice] = useState(initial.noticeWeeks === null ? "" : String(initial.noticeWeeks));
+	const draft = kept.value.draft;
+	const currencies = useMemo(
+		() => getCurrencyOptions(locale, draft.minBase.currency),
+		[locale, draft.minBase.currency],
+	);
+	const setDraft = (update: CareerProfileData | ((value: CareerProfileData) => CareerProfileData)) =>
+		kept.setValue((current) => ({ ...current, draft: typeof update === "function" ? update(current.draft) : update }));
+	const amount = kept.value.amount;
+	const setAmount = (amount: string) => kept.setValue((current) => ({ ...current, amount }));
+	const notice = kept.value.notice;
+	const setNotice = (notice: string) => kept.setValue((current) => ({ ...current, notice }));
 	const parsedAmount = parseAmount(amount, locale);
 	const noticeValue =
 		notice.trim() === "" ? null : /^\d+$/.test(notice) && Number(notice) <= 52 ? Number(notice) : undefined;
@@ -39,16 +57,38 @@ export function Preferences({ initial }: PreferencesProps) {
 	const [saved, setSaved] = useState(JSON.stringify(initial));
 	const [error, setError] = useState(false);
 	const [saving, setSaving] = useState(false);
-	const latest = useRef({ json, server: session.server, accountId: account.data?.id });
+	const latest = useRef({
+		blocked: !!kept.blocked,
+		clear: kept.clear,
+		unblock: () => kept.setBlocked(null),
+		raw: kept.value,
+		json,
+		server: session.server,
+		accountId: account.data?.id,
+	});
 	const queue = useRef<Promise<unknown>>(Promise.resolve());
 	const attempted = useRef<string | null>(saved);
 	useLayoutEffect(() => {
-		latest.current = { json, server: session.server, accountId: account.data?.id };
+		latest.current = {
+			blocked: !!kept.blocked,
+			clear: kept.clear,
+			unblock: () => kept.setBlocked(null),
+			raw: kept.value,
+			json,
+			server: session.server,
+			accountId: account.data?.id,
+		};
 	});
 	const flush = useCallback(
 		(retry = false) => {
 			const current = latest.current;
-			if (!current.accountId || !current.json || (!retry && attempted.current === current.json)) return;
+			if (
+				(!retry && current.blocked) ||
+				!current.accountId ||
+				!current.json ||
+				(!retry && attempted.current === current.json)
+			)
+				return;
 			attempted.current = current.json;
 			const queuedJson = current.json;
 			const value = careerProfileDataSchema.parse(JSON.parse(queuedJson));
@@ -60,8 +100,14 @@ export function Preferences({ initial }: PreferencesProps) {
 					current.server,
 				]);
 				if (getServer() !== current.server || identity?.id !== current.accountId) return;
-				await client.career.saveProfile(value);
+				// Recovered Preferences drafts can contain an old memory choice, now owned by Facts.
+				await client.career.updateProfile(
+					{ ...value, memoryMode: undefined },
+					{ context: { scope: JSON.stringify([current.server, current.accountId]) } },
+				);
 				setSaved(queuedJson);
+				current.clear(current.raw);
+				current.unblock();
 				void queryClient.invalidateQueries({ queryKey: orpc.career.profile.key() });
 			});
 			queue.current = write
@@ -94,34 +140,41 @@ export function Preferences({ initial }: PreferencesProps) {
 			<Text accessibilityLiveRegion="polite" color={error ? "dangerText" : "ink3"}>
 				{!valid?.success ? t`Not saved` : error ? t`Not saved` : saving || json !== saved ? t`Saving…` : t`Saved`}
 			</Text>
-			{error ? (
+			{error || kept.blocked ? (
 				<>
-					<Banner tone="danger" message={t`Couldn't save your preferences. Your draft is still here.`} />
+					<Banner
+						tone="danger"
+						message={
+							kept.blocked
+								? t`Recovered an unsaved draft. Review it before saving over the current version.`
+								: t`Couldn't save your preferences. Your draft is still here.`
+						}
+					/>
 					<Button variant="secondary" label={t`Retry`} onPress={() => flush(true)} />
+					{kept.blocked && (
+						<Button
+							variant="ghost"
+							label={t`Use saved version`}
+							onPress={() =>
+								kept.reset({
+									draft: initial,
+									amount:
+										initial.minBase.amount === null
+											? ""
+											: new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(initial.minBase.amount),
+									notice: initial.noticeWeeks === null ? "" : String(initial.noticeWeeks),
+								})
+							}
+						/>
+					)}
 				</>
 			) : null}
-			<SelectSheet
-				label={t`Remember facts from my messages`}
-				value={draft.memoryMode}
-				onChange={(memoryMode) => change({ memoryMode })}
-				options={[
-					{ value: "ask", label: t`Ask first` },
-					{ value: "auto", label: t`Automatically` },
-					{ value: "off", label: t`Never` },
-				]}
-			/>
-			<Text color="ink3">
-				{draft.memoryMode === "ask"
-					? t`The coach proposes each fact in the chat. Nothing is saved until you agree.`
-					: draft.memoryMode === "auto"
-						? t`The coach saves facts you state, and tells you. You can undo.`
-						: t`The coach doesn't remember anything from your messages.`}
-			</Text>
 			<ChipInput
 				label={t`Target roles`}
 				values={draft.targetRoles}
 				onChange={(targetRoles) => change({ targetRoles })}
 			/>
+			<RoleSuggestions locale={locale} onUse={(targetRoles) => change({ targetRoles })} />
 			<ChipInput
 				label={t`Where you want to work`}
 				values={draft.locations}
@@ -156,14 +209,12 @@ export function Preferences({ initial }: PreferencesProps) {
 						: undefined
 				}
 			/>
-			<TextField
+			<SelectSheet
 				label={t`Currency`}
 				value={draft.minBase.currency}
-				autoCapitalize="characters"
-				maxLength={3}
-				onChangeText={(currency) => change({ minBase: { ...draft.minBase, currency: currency.toUpperCase() } })}
-				onBlur={() => flush()}
-				error={!/^[A-Z]{3}$/.test(draft.minBase.currency) ? t`Enter a three-letter currency code.` : undefined}
+				searchable
+				options={currencies}
+				onChange={(currency) => change({ minBase: { ...draft.minBase, currency } })}
 			/>
 			<SelectSheet
 				label={t`Pay period`}

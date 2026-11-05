@@ -2,6 +2,7 @@ import type { FontPairingId, MarginId } from "./design-presets";
 import type { LetterDocument } from "@/draft/types";
 import type { WritableDraft } from "immer";
 import type { ReactNode } from "react";
+import { ph } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { useRouter } from "expo-router";
 import { useState } from "react";
@@ -25,6 +26,8 @@ import { relinkLetter } from "./save";
 import { relinked } from "./write";
 import { useLetterStore } from "@/draft";
 import { applyTextSize } from "@/features/design/presets";
+import { getLocaleOptions } from "@/features/settings/locale-names";
+import { selectableLocales } from "@/i18n";
 import { routes } from "@/routes";
 import { Button, IconButton, ListRow, Segmented, SelectSheet, Switch, Text, TextField, useTheme } from "@/ui";
 
@@ -80,6 +83,12 @@ export function LetterDesign({ id }: { id: string }) {
 
 	return (
 		<ScrollView keyboardShouldPersistTaps="handled">
+			<Group title={t`Language`}>
+				<LetterLanguageField letter={letter} disabled={false} />
+				<Text color="ink2">
+					{t`Writes the greeting, sign-off and date, and the language a new draft uses. Your own words stay as you wrote them.`}
+				</Text>
+			</Group>
 			<Group title={t`Matching the resume`}>
 				{letter.sourceResumeId ? (
 					<>
@@ -164,7 +173,10 @@ function OwnDesign({ letter, disabled }: { letter: LetterDocument; disabled: boo
 						disabled={textSize <= TEXT_SIZE.min}
 						onPress={() => step(-1)}
 					/>
-					<Text variant="mono" accessibilityLiveRegion="polite">{t`${textSize} pt`}</Text>
+					<Text
+						variant="mono"
+						accessibilityLiveRegion="polite"
+					>{t`${ph({ textSize: i18n.number(textSize) })} pt`}</Text>
 					<IconButton
 						icon="plus"
 						variant="secondary"
@@ -245,5 +257,26 @@ function OwnDesign({ letter, disabled }: { letter: LetterDocument; disabled: boo
 				/>
 			</Group>
 		</View>
+	);
+}
+
+type LetterLanguageFieldProps = { letter: LetterDocument; disabled: boolean };
+
+/** The letter's language, independent of whether its design follows the resume. Write and Design both offer it. */
+export function LetterLanguageField({ letter, disabled }: LetterLanguageFieldProps) {
+	const { t, i18n } = useLingui();
+	return (
+		<SelectSheet
+			label={t`Language`}
+			value={letter.style.metadata.page.locale}
+			disabled={disabled}
+			options={getLocaleOptions(i18n, selectableLocales)}
+			searchable
+			onChange={(value) =>
+				useLetterStore.getState().update((draft) => void (draft.style.metadata.page.locale = value), {
+					coalesceKey: "locale",
+				})
+			}
+		/>
 	);
 }

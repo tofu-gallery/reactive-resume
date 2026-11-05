@@ -6,7 +6,10 @@ import type {
 	RenderTask,
 } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { ReactNode } from "react";
+import { ph } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { useEffect, useRef, useState } from "react";
+import { isRTL } from "@reactive-resume/utils/locale";
 import { cn } from "@reactive-resume/utils/style";
 import { AnnotationMode, getDocument, getPdfWorker, RenderingCancelledException } from "./pdfjs";
 import { DEFAULT_PDF_PAGE_SIZE, getPreviewCanvasScale, getScaledPreviewPageSize } from "./preview.shared.utils";
@@ -100,6 +103,7 @@ export function PdfCanvasPage({
 	showPageNumbers,
 	totalPages,
 }: PdfCanvasPageProps) {
+	const { t, i18n } = useLingui();
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const onLoadSuccessRef = useRef(onLoadSuccess);
 	const onRenderSuccessRef = useRef(onRenderSuccess);
@@ -197,16 +201,24 @@ export function PdfCanvasPage({
 	}, [document, pageNumber, pageScale]);
 
 	return (
-		<figure className="shrink-0">
+		// The caption and overlay tags are the app's words: they follow the app's direction, not an RTL resume's.
+		<figure dir={isRTL(i18n.locale) ? "rtl" : "ltr"} className="shrink-0">
 			{caption ??
 				(showPageNumbers ? (
 					<figcaption className="mb-1 text-[0.625rem] font-medium text-ink-3">
-						Page {pageNumber} of {totalPages}
+						<Trans>
+							Page {ph({ pageNumber: i18n.number(pageNumber) })} of {ph({ totalPages: i18n.number(totalPages) })}
+						</Trans>
 					</figcaption>
 				) : null)}
 
-			<div style={scaledPageSize} className={cn("relative aspect-page overflow-hidden rounded-md", className)}>
-				<canvas ref={canvasRef} aria-label={`Resume page ${pageNumber} of ${totalPages}`} className="block size-full" />
+			{/* Not clipped: overlays may reach past the page edge (Check's margin markers); the canvas rounds itself. */}
+			<div style={scaledPageSize} className={cn("relative aspect-page rounded-md", className)}>
+				<canvas
+					ref={canvasRef}
+					aria-label={t`Resume page ${ph({ pageNumber: i18n.number(pageNumber) })} of ${ph({ totalPages: i18n.number(totalPages) })}`}
+					className="block size-full rounded-[inherit]"
+				/>
 				{overlay}
 			</div>
 		</figure>

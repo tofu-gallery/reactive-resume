@@ -1,6 +1,5 @@
 # VCS and editor state
 .git
-.gitignore
 .cursor
 .DS_Store
 .vite-hooks

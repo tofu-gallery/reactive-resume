@@ -16,6 +16,7 @@ import {
 } from "@reactive-resume/ui/components/sheet";
 import { downloadWithAnchor } from "@reactive-resume/utils/file";
 import { exportApplicationsCsv, selectApplicationsForExport } from "../csv";
+import { useApplicationLanes } from "../use-application-lanes";
 import { Combobox } from "@/components/ui/combobox";
 
 type ExportApplicationsSheetProps = {
@@ -27,6 +28,7 @@ type ExportApplicationsSheetProps = {
 
 export function ExportApplicationsSheet({ open, onOpenChange, applications, filtered }: ExportApplicationsSheetProps) {
 	const id = useId();
+	const { lanes, mode } = useApplicationLanes();
 	const [scope, setScope] = useState<ApplicationExportOptions["scope"]>("filtered");
 	const [from, setFrom] = useState("");
 	const [to, setTo] = useState("");
@@ -35,7 +37,7 @@ export function ExportApplicationsSheet({ open, onOpenChange, applications, filt
 
 	return (
 		<Sheet open={open} onOpenChange={onOpenChange}>
-			<SheetContent side="right" className="w-full gap-0 data-[side=right]:sm:max-w-lg">
+			<SheetContent closeLabel={t`Close`} side="right" className="w-full gap-0 data-[side=right]:sm:max-w-lg">
 				<SheetHeader>
 					<SheetTitle>
 						<Trans>Export applications</Trans>
@@ -49,12 +51,14 @@ export function ExportApplicationsSheet({ open, onOpenChange, applications, filt
 					onSubmit={(event) => {
 						event.preventDefault();
 						if (!validRange || selected.length === 0) return;
-						const blob = new Blob([exportApplicationsCsv(selected)], { type: "text/csv;charset=utf-8" });
+						const blob = new Blob([exportApplicationsCsv(selected, mode === "lanes" ? lanes : [])], {
+							type: "text/csv;charset=utf-8",
+						});
 						downloadWithAnchor(blob, `applications-${new Date().toISOString().slice(0, 10)}.csv`);
 						onOpenChange(false);
 					}}
 				>
-					<div className="-mt-1 flex flex-1 flex-col gap-4 overflow-y-auto px-4 pt-1 pb-4">
+					<div className="-mt-1 flex flex-1 flex-col gap-4 overflow-y-auto px-6 pt-1 pb-4">
 						<div className="space-y-1.5">
 							<Label htmlFor={`${id}-scope`}>
 								<Trans>Applications to export</Trans>

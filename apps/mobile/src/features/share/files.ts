@@ -8,6 +8,7 @@ import { letterWords } from "./letter";
 import { getLostCharactersMessage } from "./messages";
 import { safeFileName } from "./model";
 import { client, rest } from "@/api/client";
+import { getAccountScope } from "@/auth/session";
 import { createPreviewPipeline } from "@/preview/pipeline";
 import { showToast } from "@/ui";
 
@@ -68,9 +69,11 @@ type ExportFileOptions = {
 	format: ExportFormat;
 	data?: ResumeData;
 	letter?: boolean;
+	/** The letter's page language, when the caller already read the letter: saves reading it again. */
+	letterLocale?: string;
 };
 
-export async function exportFile({ directory, id, name, format, data, letter }: ExportFileOptions) {
+export async function exportFile({ directory, id, name, format, data, letter, letterLocale }: ExportFileOptions) {
 	let bytes: Uint8Array;
 	if (format === "pdf" && data) {
 		const result = await localPdf(data, letter);
@@ -79,16 +82,14 @@ export async function exportFile({ directory, id, name, format, data, letter }: 
 	} else {
 		let query = "";
 		if (letter && format !== "json") {
-			const document = await client.coverLetters.getById({ id });
-			const words = await letterWords(document.style.metadata.page.locale);
-			query = `?words=${encodeURIComponent(
-				JSON.stringify({
-					greeting: words.greeting("{name}"),
-					teamGreeting: words.teamGreeting,
-					hiringTeam: words.hiringTeam,
-					signOff: words.signOff,
-				}),
-			)}`;
+			const locale = letterLocale ?? (await client.coverLetters.getById({ id })).style.metadata.page.locale;
+			const words = await letterWords(locale);
+			query = `?${new URLSearchParams({
+				"words[greeting]": words.greeting("{name}"),
+				"words[teamGreeting]": words.teamGreeting,
+				"words[hiringTeam]": words.hiringTeam,
+				"words[signOff]": words.signOff,
+			})}`;
 		}
 		const response = await rest(
 			`/${letter ? "cover-letters" : "resumes"}/${encodeURIComponent(id)}/exports/${format}${query}`,
@@ -101,8 +102,12 @@ export async function exportFile({ directory, id, name, format, data, letter }: 
 	return file;
 }
 
-export async function shareExport(file: File, format: ExportFormat) {
+export async function shareExport(file: File, format: ExportFormat, scope?: string) {
 	if (!(await Sharing.isAvailableAsync())) throw new Error(t`File sharing is unavailable on this device.`);
+	if (scope !== undefined && getAccountScope() !== scope) {
+		if (file.exists) file.delete();
+		throw new Error("The account changed before sharing.");
+	}
 	await Sharing.shareAsync(file.uri, { mimeType: mime[format], dialogTitle: t`Save or share file` });
 }
 
@@ -112,4 +117,10 @@ export async function printResume(data: ResumeData, name: string) {
 	warnTextLoss(result);
 	await file.write(result.pdf);
 	await Print.printAsync({ uri: file.uri });
+}
+
+/** Exports the current draft of a linked resume or letter as a PDF and opens the platform Save/Share sheet. */
+export async function shareDocumentPdf(kind: "resume" | "letter", id: string, name: string) {
+	const file = await exportFile({ directory: exportDirectory(), id, name, format: "pdf", letter: kind === "letter" });
+	await shareExport(file, "pdf");
 }

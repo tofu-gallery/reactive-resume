@@ -1,20 +1,24 @@
 import type { EditorSelection } from "@/features/resume/editor/store";
 import type { VersionSummary } from "@/features/resume/share/format";
 import type { Template } from "@reactive-resume/schema/templates";
-import { t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Plural, Trans } from "@lingui/react/macro";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { lazyRouteComponent } from "@tanstack/react-router";
+import { Suspense, useCallback, useLayoutEffect, useRef, useState } from "react";
+import { measureOverflow } from "@reactive-resume/pdf/page-map";
+import { spillingSections } from "@reactive-resume/resume/spill";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { cn } from "@reactive-resume/utils/style";
 import { templates } from "@/dialogs/resume/template/data";
-import { useCurrentBuilderResumeSelector, useResumeData } from "@/features/resume/builder/draft";
+import { useCurrentBuilderResumeSelector, useResumeData, useResumeStore } from "@/features/resume/builder/draft";
 import { CheckPageLayer, PageViewToggle } from "@/features/resume/editor/check/page-layer";
 import { ParserView } from "@/features/resume/editor/check/parser-view";
 import { CanvasStatusPill, usePageScale, ZoomBar } from "@/features/resume/editor/chrome";
-import { measureOverflow, runFit } from "@/features/resume/editor/design/fit";
+import { addSpillPage, runFit } from "@/features/resume/editor/design/fit";
 import { PageOverlay } from "@/features/resume/editor/page-overlay";
 import { markProposals, pendingProposals } from "@/features/resume/editor/proposals/proposals";
 import { useEditorStore } from "@/features/resume/editor/store";
@@ -26,11 +30,27 @@ import { orpc } from "@/libs/orpc/client";
 
 const NONE: readonly never[] = [];
 
+const WebPagePreview = lazyRouteComponent(() => import("@/features/resume/share/web-page-preview"), "WebPagePreview");
+
+/** Share shows the web page; every other mode, the PDF's pages. */
+
+/** The Download & history sheet's width on desktop (the Sheet's `sm:max-w-[440px]`). */
+const SHEET_WIDTH = 440;
+export function PageCanvas() {
+	const [mode] = useEditorMode();
+	if (mode !== "share") return <ResumePageCanvas />;
+	return (
+		<Suspense>
+			<WebPagePreview />
+		</Suspense>
+	);
+}
+
 /**
  * The page canvas: the live resume on the sunken desk, with a caption above the first page, a pointer layer
  * that links lines to entries, and the zoom bar.
  */
-export function PageCanvas() {
+function ResumePageCanvas() {
 	const data = useResumeData();
 	const format = useCurrentBuilderResumeSelector((resume) => resume.data.metadata.page.format);
 	const previewTemplate = useEditorStore((state) => state.previewTemplate);
@@ -39,13 +59,15 @@ export function PageCanvas() {
 	const checkTab = useEditorStore((state) => state.checkTab);
 	const proposals = useEditorStore((state) => state.proposals);
 	const assistantProposals = useEditorStore((state) => (state.assistantOpen ? state.assistantProposals : NONE));
-	const sheetOpen = useEditorStore((state) => state.shareTab !== null);
+	const sheetOpen = useEditorStore((state) => state.sheetTab !== null);
 	const resumeId = useCurrentBuilderResumeSelector((resume) => resume.id);
 	const rendered = useEditorStore((state) => state.rendered);
 	const setRendered = useEditorStore((state) => state.setRendered);
 	const breakpoint = useBreakpoint();
 	const [mode] = useEditorMode();
-	const { canvasRef, fitScale, pageScale } = usePageScale(format);
+	// Desktop: the Download & history sheet covers the canvas's end; the page fits, and centres in, what's left.
+	const shifted = sheetOpen && (breakpoint === "desktop" || breakpoint === "wide");
+	const { canvasRef, fitScale, pageScale } = usePageScale(format, shifted ? SHEET_WIDTH : 0);
 	const isPhone = breakpoint === "mobile";
 
 	// History: the picked version is drawn on the page, read-only, until the user restores it or goes back to now.
@@ -59,7 +81,8 @@ export function PageCanvas() {
 	// highlighted.
 	const markEdits = mode === "check" && checkTab === "writing" && pageView === "page" && proposals.length > 0;
 	const marked = [...(markEdits ? proposals : []), ...assistantProposals];
-	const pendingOnPage = data ? pendingProposals(data, assistantProposals).length : 0;
+	const applications = useResumeStore((state) => state.proposalApplications);
+	const pendingOnPage = data ? pendingProposals(data, assistantProposals, undefined, applications).length : 0;
 	const parser = mode === "check" && pageView === "parser" && !viewing;
 
 	// Design: a hovered or focused template is drawn on the page until it's applied or the pointer leaves.
@@ -67,12 +90,24 @@ export function PageCanvas() {
 		? viewing.data
 		: data && previewTemplate
 			? { ...data, metadata: { ...data.metadata, template: previewTemplate } }
-			: data && marked.length > 0
-				? markProposals(data, marked)
+			: // Only undecided edits change the page: once every one is decided, it draws (and measures) as it is.
+				data && pendingProposals(data, marked, undefined, applications).length > 0
+				? markProposals(data, marked, applications)
 				: undefined;
-	const overflow = data && !previewTemplate && !viewing ? measureOverflow(data, rendered) : null;
-	// Desktop: the page moves 120px aside so it stays visible beside the Share & export sheet.
-	const shifted = sheetOpen && (breakpoint === "desktop" || breakpoint === "wide");
+	// Fit is the resume's as it is: a render with edits marked (old and new text both shown) doesn't count. The callback
+	// keeps one identity (the preview re-reports on every new one), reading whether this render is marked from a ref.
+	const fitRendered = useEditorStore((state) => state.fitRendered);
+	const markedRender = useRef(false);
+	const marking = previewData !== undefined;
+	// A layout effect, so it's current before the preview's own effect reports the render.
+	useLayoutEffect(() => {
+		markedRender.current = marking;
+	}, [marking]);
+	const onRender = useCallback(
+		(render: Parameters<typeof setRendered>[0]) => setRendered(render, markedRender.current),
+		[setRendered],
+	);
+	const overflow = data && !previewTemplate && !viewing ? measureOverflow(data, fitRendered) : null;
 
 	const onSelect = (selection: EditorSelection) => {
 		useEditorStore.setState({ selection });
@@ -98,7 +133,8 @@ export function PageCanvas() {
 					if (isPhone) useEditorStore.setState({ selection: null });
 				}}
 				className={cn(
-					"absolute inset-0 overflow-auto pb-24 outline-none",
+					// The region takes focus to scroll from the keyboard: it shows the ring, inset since it fills its container.
+					"absolute inset-0 overflow-auto pb-24 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent",
 					// Check keeps room above the page for the page-view toggle.
 					mode === "check" && !viewing ? "pt-[68px]" : "pt-7",
 					isPhone ? "px-4" : "px-10",
@@ -111,11 +147,11 @@ export function PageCanvas() {
 					pageScale={pageScale}
 					className={cn(
 						"mx-auto w-fit transition-transform duration-emphasized ease-enter",
-						shifted && "-translate-x-[120px] rtl:translate-x-[120px]",
+						shifted && "-translate-x-[220px] rtl:translate-x-[220px]",
 						parser && "hidden",
 					)}
 					pageClassName={cn("rounded-none shadow-page", viewing && "outline-2 outline-offset-4 outline-ink")}
-					onRender={setRendered}
+					onRender={onRender}
 					renderPageCaption={({ pageNumber }) => (
 						<ResumePageCaption
 							pageNumber={pageNumber}
@@ -200,12 +236,12 @@ function ResumePageCaption(props: ResumePageCaptionProps) {
 		);
 	}
 
-	// Content past the authored pages: a dashed warn line at the page boundary.
-	if (overflow && pageNumber > overflow.authored) {
+	// Every continuation belongs to its authored page, even before the last authored page starts.
+	if (overflow?.spills.some((spill) => spill.pages.includes(pageNumber))) {
 		return (
 			<figcaption className="relative mb-2.5 border-t-[1.5px] border-dashed border-warn">
-				<span className="absolute end-0 -top-2.5 rounded bg-sunken px-1.5 text-[11px] font-semibold text-warn-text">
-					<Trans>Page {pageNumber}</Trans>
+				<span className="absolute end-0 -top-2.5 rounded bg-sunken px-1.5 text-xs font-semibold text-warn-text">
+					<Trans>Page {ph({ pageNumber: i18n.number(pageNumber) })}</Trans>
 				</span>
 			</figcaption>
 		);
@@ -213,29 +249,44 @@ function ResumePageCaption(props: ResumePageCaptionProps) {
 
 	return (
 		<figcaption className="mb-2.5 text-center text-xs font-medium text-ink-3">
-			<Trans>Page {pageNumber}</Trans>
+			<Trans>Page {ph({ pageNumber: i18n.number(pageNumber) })}</Trans>
 		</figcaption>
 	);
 }
 
-type OverflowChipProps = { authored: number; lines: number | null };
+type OverflowChipProps = NonNullable<ReturnType<typeof measureOverflow>>;
 
-/** "Runs onto page 2 by about 6 lines" with Fit, which tightens the design until it fits (one undo step). */
-function OverflowChip({ authored, lines }: OverflowChipProps) {
+/**
+ * Names the first authored page that spills, with two ways out: Add page, which moves the sections that spill off
+ * the last page onto a new one, and Fit, which tightens the design until it fits. Each is one undo step.
+ */
+function OverflowChip({ authored, spills, pageCount }: OverflowChipProps) {
 	const [fitting, setFitting] = useState(false);
+	const first = spills[0];
+	const lines = first?.lines;
 	const next = authored + 1;
+	const data = useResumeData();
+	const pageMap = useEditorStore((state) => state.rendered.pageMap);
+	const canAddPage = !!data && spillingSections(data.metadata.layout.pages, pageMap?.nodes) !== null;
+	const action =
+		"h-6 rounded-md bg-surface px-2.5 text-xs font-semibold whitespace-nowrap text-ink shadow-e1 disabled:opacity-60";
 
 	return (
 		<span className="flex min-h-8 items-center gap-2 rounded-lg bg-warn-soft py-1 ps-3 pe-1.5 text-[13px] text-warn-text">
 			<Icon name="square-split-horizontal" size={18} />
-			{lines ? (
+			{first && first.pages.length === 1 && lines ? (
 				<Plural
 					value={lines}
-					one={`Runs onto page ${next} by about # line`}
-					other={`Runs onto page ${next} by about # lines`}
+					one={`Page ${ph({ page: i18n.number(first.authoredPage) })} runs over by about # line`}
+					other={`Page ${ph({ page: i18n.number(first.authoredPage) })} runs over by about # lines`}
 				/>
 			) : (
-				<Trans>Runs onto page {next}</Trans>
+				<Plural value={pageCount} one="Runs to # page" other="Runs to # pages" />
+			)}
+			{canAddPage && (
+				<button type="button" disabled={fitting} onClick={() => addSpillPage()} className={action}>
+					<Trans>Add page {next}</Trans>
+				</button>
 			)}
 			<button
 				type="button"
@@ -244,7 +295,7 @@ function OverflowChip({ authored, lines }: OverflowChipProps) {
 					setFitting(true);
 					void runFit().finally(() => setFitting(false));
 				}}
-				className="h-6 rounded-md bg-surface px-2.5 text-xs font-semibold whitespace-nowrap text-ink shadow-e1 disabled:opacity-60"
+				className={action}
 			>
 				<Plural value={authored} _1="Fit to one page" other="Fit to # pages" />
 			</button>

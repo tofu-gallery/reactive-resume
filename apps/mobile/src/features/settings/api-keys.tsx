@@ -5,7 +5,7 @@ import Animated from "react-native-reanimated";
 import { openAccountSettings } from "./browser";
 import { SettingsGroup } from "./layout";
 import { client, orpc } from "@/api/client";
-import { useSession } from "@/auth/session";
+import { getAccountScope, useSession } from "@/auth/session";
 import {
 	Banner,
 	ConfirmDialog,
@@ -16,18 +16,27 @@ import {
 	listLayout,
 	showToast,
 	useFirstAppearance,
+	useReducedMotion,
 } from "@/ui";
+
+/** Keys without a permission statement predate access choices and can do everything. */
+function isReadOnly(permissions: Record<string, string[]> | null | undefined): boolean {
+	const api = permissions?.api;
+	return Array.isArray(api) && !api.includes("write") && !api.includes("delete");
+}
 
 type ApiKeysProps = { userId: string };
 export function ApiKeys({ userId }: ApiKeysProps) {
 	const { t, i18n } = useLingui();
 	const { server } = useSession();
+	const scope = getAccountScope();
 	const queryClient = useQueryClient();
 	const [selected, setSelected] = useState<{ id: string; name: string } | null>(null);
 	const keys = useQuery(
 		orpc.auth.apiKeys.list.queryOptions({ queryKey: [...orpc.auth.apiKeys.list.key(), server, userId], retry: false }),
 	);
 	const firstAppearance = useFirstAppearance(!keys.isPending);
+	const reduced = useReducedMotion();
 	const revoke = useMutation({
 		mutationKey: ["settings", "revoke-key"],
 		mutationFn: async (keyId: string) => {
@@ -48,15 +57,19 @@ export function ApiKeys({ userId }: ApiKeysProps) {
 	return (
 		<SettingsGroup
 			title={t`API keys`}
-			note={t`Keys act as you and can access your documents. New keys are created in your browser account settings.`}
+			note={t`New keys start read-only. Create keys in your browser account settings.`}
 		>
 			<ListRow
 				title={t`New API key`}
 				leading="arrow-square-out"
 				onPress={() => {
-					void openAccountSettings("/dashboard/settings/ai")
-						.then(() => keys.refetch())
-						.catch(() => showToast({ message: t`Couldn't open the browser. Try again.` }));
+					void openAccountSettings("/dashboard/settings/ai?newKey=true#api-keys", scope)
+						.then(async (current) => {
+							if (current) await keys.refetch();
+						})
+						.catch(() => {
+							if (getAccountScope() === scope) showToast({ message: t`Couldn't open the browser. Try again.` });
+						});
 				}}
 			/>
 			{keys.isPending ? <ListRow title={t`Loading API keys…`} /> : null}
@@ -69,10 +82,10 @@ export function ApiKeys({ userId }: ApiKeysProps) {
 			) : null}
 			{keys.data?.apiKeys.length === 0 ? <EmptyState title={t`No keys yet.`} /> : null}
 			{keys.data?.apiKeys.map((key, index) => (
-				<Animated.View key={key.id} {...listItemMotion(index, firstAppearance)} layout={listLayout}>
+				<Animated.View key={key.id} {...listItemMotion(index, firstAppearance, { reduced })} layout={listLayout}>
 					<ListRow
 						title={key.name ?? t`Unnamed key`}
-						subtitle={t`Created ${date(key.createdAt)} · Last used ${date(key.lastRequest)} · Expires ${date(key.expiresAt)}`}
+						subtitle={`${isReadOnly(key.permissions) ? t`Read only` : t`Full access`} · ${t`Created ${date(key.createdAt)} · Last used ${date(key.lastRequest)} · Expires ${date(key.expiresAt)}`}`}
 						leading="key"
 						trailing={<Text color="dangerText">{t`Revoke`}</Text>}
 						accessibilityHint={t`Revoke this API key`}

@@ -2,15 +2,18 @@
 import type { MessageContext } from "./transport";
 import type { AgentMessagesApi } from "./transport";
 import type { RouterOutput } from "@/api/client";
+import type { TranscriptLabels } from "@reactive-resume/ai/tools/transcript";
 import type { FileUIPart, UIMessage } from "ai";
 import { Chat, useChat } from "@ai-sdk/react";
-import { t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, t } from "@lingui/core/macro";
 import { ORPCError } from "@orpc/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { lastAssistantMessageIsCompleteWithToolCalls } from "ai";
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { lastAssistantMessageIsCompleteWithApprovalResponses, lastAssistantMessageIsCompleteWithToolCalls } from "ai";
+import { useLayoutEffect, useMemo, useRef } from "react";
+import { transcriptOf as sharedTranscriptOf } from "@reactive-resume/ai/tools/transcript";
 import { resumeAgentStream, sendAgentMessage } from "./transport";
-import { client, orpc, streamClient } from "@/api/client";
+import { orpc, streamClient } from "@/api/client";
 import { getAccountScope, useSession } from "@/auth/session";
 
 export type { MessageContext } from "./transport";
@@ -23,12 +26,6 @@ export const attachmentPart = (attachment: ChatAttachment): FileUIPart => ({
 	mediaType: attachment.mediaType,
 	filename: attachment.filename,
 });
-
-export const textOf = (message: UIMessage) =>
-	message.parts
-		.flatMap((part) => (part.type === "text" ? [part.text] : []))
-		.join("")
-		.trim();
 
 export type WebSource = { url: string; title: string };
 
@@ -74,22 +71,29 @@ export function webSources(message: UIMessage): WebSource[] {
 	return [...sources.values()];
 }
 
-type TranscriptLabels = { user: string; assistant: string; sources: string };
+type TranscriptNames = { user: string; assistant: string; sources: string };
 
-/** The conversation as plain text, speaker by speaker, for Copy transcript. Tool steps are left out. */
-export function transcriptOf(messages: readonly UIMessage[], labels: TranscriptLabels) {
-	return messages
-		.flatMap((message) => {
-			const sources = webSources(message)
-				.map((source) => `${source.title}: ${source.url}`)
-				.join("\n");
-			const content = [textOf(message), ...(sources ? [`${labels.sources}:\n${sources}`] : [])]
-				.filter(Boolean)
-				.join("\n\n");
-			return content ? [`${message.role === "user" ? labels.user : labels.assistant}: ${content}`] : [];
-		})
-		.join("\n\n");
+/** Copy transcript's wording in the reader's language: speakers, edits with their outcome, and question answers. */
+function transcriptLabels(names: TranscriptNames): TranscriptLabels {
+	const statusLabel = { pending: t`proposed`, accepted: t`accepted`, rejected: t`rejected` };
+	return {
+		...names,
+		edit: ({ number, location, before, after, status }) => {
+			const outcome = statusLabel[status];
+			return before.trim()
+				? t`Edit ${ph({ number: i18n.number(number) })} · ${location}: "${before}" → "${after}" (${outcome})`
+				: t`Edit ${ph({ number: i18n.number(number) })} · ${location}: added "${after}" (${outcome})`;
+		},
+		question: (question, answer) => (answer === null ? t`Q: ${question}` : `${t`Q: ${question}`}\n${t`A: ${answer}`}`),
+	};
 }
+
+/** The conversation as plain text for Copy transcript (shared with the web app); `statusOf` gives edits' latest decisions. */
+export const transcriptOf = (
+	messages: readonly UIMessage[],
+	names: TranscriptNames,
+	statusOf?: (id: string) => "pending" | "accepted" | "rejected" | undefined,
+) => sharedTranscriptOf(messages, transcriptLabels(names), statusOf);
 
 /** Conversations for the signed-in server, newest first. */
 export function useThreads() {
@@ -129,6 +133,7 @@ export function useAssistantChat({
 	scope,
 	beforeSend,
 }: UseAssistantChatInput) {
+	const queryClient = useQueryClient();
 	const contextRef = useRef(context);
 	const onFinishRef = useRef(onFinish);
 	const beforeSendRef = useRef(beforeSend);
@@ -140,6 +145,9 @@ export function useAssistantChat({
 
 	// One Chat per conversation (the caller keys it by thread), so callers can hold it outside render (chat-view.tsx).
 	const instance = useMemo(() => {
+		const refreshWebAccess = () => {
+			if (getAccountScope() === scope) void queryClient.invalidateQueries({ queryKey: orpc.webAccess.status.key() });
+		};
 		const agentMessages: AgentMessagesApi = {
 			// The server validates the UI message; bind every request to this conversation's account.
 			send: (input, options) => streamClient.agent.messages.send(input as never, { ...options, context: { scope } }),
@@ -164,34 +172,19 @@ export function useAssistantChat({
 						messageById: (id) => chat.messages.find((message) => message.id === id),
 					}),
 			},
-			sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
-			onFinish: () => onFinishRef.current(),
+			sendAutomaticallyWhen: (input) =>
+				lastAssistantMessageIsCompleteWithToolCalls(input) ||
+				lastAssistantMessageIsCompleteWithApprovalResponses(input),
+			onFinish: () => {
+				refreshWebAccess();
+				onFinishRef.current();
+			},
+			onError: refreshWebAccess,
 		});
 		return chat;
 		// The initial messages are read once, when the chat is created.
 		// oxlint-disable-next-line react-hooks/exhaustive-deps -- the chat takes its messages once; it's keyed by thread
-	}, [threadId, scope]);
+	}, [threadId, scope, queryClient]);
 
 	return { ...useChat<UIMessage>({ chat: instance, throttle: 50 }), instance };
-}
-
-/**
- * A conversation whose connection was switched off or removed continues on `provider` (the default, which its privacy
- * line names), rather than failing on send.
- */
-export function useConversationConnection(
-	summary: { id: string; aiProviderId: string | null } | undefined,
-	provider: { id: string } | undefined,
-) {
-	const queryClient = useQueryClient();
-	const staleId = summary && provider && summary.aiProviderId !== provider.id ? summary.id : null;
-	const providerId = provider?.id;
-	const scope = getAccountScope();
-	useEffect(() => {
-		if (!staleId || !providerId || !scope) return;
-		void client.agent.threads
-			.update({ id: staleId, aiProviderId: providerId }, { context: { scope } })
-			.then(() => refreshThreads(queryClient))
-			.catch(() => undefined);
-	}, [staleId, providerId, queryClient, scope]);
 }

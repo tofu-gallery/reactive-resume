@@ -1,8 +1,8 @@
 import type { FlatRow, OutlineRow, WriteSection } from "./model";
 import type { CustomSectionType, ResumeData, SectionType } from "@reactive-resume/schema/resume/data";
+import { i18n } from "@lingui/core";
 import { plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
-import { useMutation } from "@tanstack/react-query";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { useMemo, useState } from "react";
@@ -33,13 +33,13 @@ import {
 	summarizeContent,
 } from "./model";
 import { resolvePictureUrl } from "./picture-screen";
+import { ResumeLanguage } from "./resume-language";
 import { SectionSheet } from "./section-sheet";
-import { client } from "@/api/client";
 import { useSession } from "@/auth/session";
 import { useIsResumeLocked } from "@/draft";
-import { resume } from "@/draft/runtime";
+import { useUnlockResume } from "@/features/write/unlock";
 import { routes } from "@/routes";
-import { Banner, Button, Chip, Icon, IconButton, ListRow, Sheet, SortableList, Text, showToast, useTheme } from "@/ui";
+import { Banner, Button, Chip, Icon, IconButton, ListRow, Sheet, SortableList, Text, useTheme } from "@/ui";
 
 type OutlineProps = { resumeId: string; imported?: string | undefined; initialSection?: string | undefined };
 
@@ -71,7 +71,9 @@ export function Outline({ resumeId, imported, initialSection }: OutlineProps) {
 			if (!next.delete(id)) next.add(id);
 			return next;
 		});
+	const retainSection = (id: string) => setAdded((current) => (current.has(id) ? current : new Set(current).add(id)));
 	const openEntry = (sectionId: string, entryId: string, focus = false) => {
+		retainSection(sectionId);
 		if (focus) requestFocus(entryId);
 		router.push(routes.entry(resumeId, sectionId, entryId));
 	};
@@ -124,6 +126,7 @@ export function Outline({ resumeId, imported, initialSection }: OutlineProps) {
 						{imported && !dismissedImport ? (
 							<ImportedBanner data={data} source={imported} onDismiss={() => setDismissedImport(true)} />
 						) : null}
+						<ResumeLanguage locale={data.metadata.page.locale} locked={locked} />
 						<BasicsCard resumeId={resumeId} data={data} />
 						<View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: space.s2 }}>
 							<Text variant="micro" color="ink3">
@@ -160,7 +163,7 @@ export function Outline({ resumeId, imported, initialSection }: OutlineProps) {
 							<Divider
 								label={
 									item.label === "page"
-										? t`Page ${item.page + 1}`
+										? t`Page ${i18n.number(item.page + 1)}`
 										: item.label === "sidebar"
 											? t`Sidebar`
 											: t`Hidden sections`
@@ -219,6 +222,7 @@ export function Outline({ resumeId, imported, initialSection }: OutlineProps) {
 					entryId={sheet.entryId}
 					open
 					onClose={() => setSheet(null)}
+					onGone={() => retainSection(entrySection.id)}
 				/>
 			) : null}
 			<AddSectionSheet
@@ -268,7 +272,7 @@ function Handle({ label, disabled, onDrag }: HandleProps) {
 			delayLongPress={250}
 			onLongPress={onDrag}
 			style={{
-				width: size.hit * 0.7,
+				width: size.hit,
 				height: size.hit,
 				alignItems: "center",
 				justifyContent: "center",
@@ -367,7 +371,7 @@ function SectionRow({ data, row, open, locked, lifted, onDrag, onToggle, onMove,
 						color="ink3"
 						accessibilityLabel={plural(entries.length, { one: "# entry", other: "# entries" })}
 					>
-						{entries.length}
+						{i18n.number(entries.length)}
 					</Text>
 				) : null}
 			</Pressable>
@@ -427,7 +431,7 @@ function EntryRow({ data, row, locked, lifted, onDrag, onOpen, onOptions }: Entr
 			<Handle label={t`Reorder ${title || t`Untitled`}`} disabled={locked} onDrag={onDrag} />
 			<Pressable
 				accessibilityRole="button"
-				accessibilityLabel={t`${title || t`Untitled`}, entry ${row.index + 1} of ${row.count}`}
+				accessibilityLabel={t`${title || t`Untitled`}, entry ${i18n.number(row.index + 1)} of ${i18n.number(row.count)}`}
 				onPress={onOpen}
 				style={{ flex: 1, gap: space.s0, paddingVertical: space.s2, minHeight: 44, justifyContent: "center" }}
 			>
@@ -518,12 +522,7 @@ function BasicsCard({ resumeId, data }: { resumeId: string; data: ResumeData }) 
 /** Locked resumes read as they print; Unlock is one tap and reversible. */
 function LockedBanner({ resumeId }: { resumeId: string }) {
 	const { t } = useLingui();
-	const unlock = useMutation({
-		mutationKey: ["write", "unlock", resumeId],
-		mutationFn: () => client.resume.setLocked({ id: resumeId, isLocked: false }),
-		onSuccess: () => resume.refresh(),
-		onError: () => showToast({ message: t`Couldn't unlock this resume. Try again.` }),
-	});
+	const unlock = useUnlockResume(resumeId);
 	return (
 		<Banner
 			tone="info"
@@ -555,7 +554,8 @@ function ImportedBanner({ data, source, onDismiss }: ImportedBannerProps) {
 	);
 }
 
-const SUGGESTED: ("summary" | SectionType)[] = ["experience", "education", "skills", "summary"];
+// Projects are how someone without a job yet shows their work (Check suggests them when Experience is empty).
+const SUGGESTED: ("summary" | SectionType)[] = ["experience", "education", "projects", "skills", "summary"];
 
 /** A blank resume: the first sections to add, as + chips, and an offer to import instead. */
 function StartSuggestions({ onAdd }: { onAdd: (type: "summary" | SectionType) => void }) {

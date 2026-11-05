@@ -1,0 +1,127 @@
+import { expect, it } from "vite-plus/test";
+import { contentDisposition, privateUploadUrl, readResponseBytes } from "./http";
+
+it("private uploads stay on the original server and upload route before credentials are added", () => {
+	expect(privateUploadUrl("/uploads/user/resume.pdf", "https://resume.test")).toBe(
+		"https://resume.test/uploads/user/resume.pdf",
+	);
+	expect(privateUploadUrl("https://resume.test/api/uploads/user/resume.pdf", "https://resume.test")).toBe(
+		"https://resume.test/api/uploads/user/resume.pdf",
+	);
+	for (const source of [
+		"https://other.test/uploads/a.pdf",
+		"//other.test/uploads/a.pdf",
+		"https://user:pass@resume.test/uploads/a.pdf",
+		"/api/auth/sign-out",
+		"/uploads/../api/auth",
+		"data:application/pdf;base64,AA==",
+	]) {
+		expect(() => privateUploadUrl(source, "https://resume.test")).toThrow();
+	}
+});
+
+it("reads exact bytes but rejects oversize streams even with missing or lying length", async () => {
+	expect(await readResponseBytes(new Response(new Uint8Array([1, 2, 3])), 3)).toEqual(new Uint8Array([1, 2, 3]));
+	for (const declared of [null, "1", "100"]) {
+		let canceled = false;
+		const response = new Response(
+			new ReadableStream({
+				start(controller) {
+					controller.enqueue(new Uint8Array([1, 2]));
+					controller.enqueue(new Uint8Array([3, 4]));
+				},
+				cancel() {
+					canceled = true;
+				},
+			}),
+			{ headers: declared ? { "content-length": declared } : {} },
+		);
+		await expect(readResponseBytes(response, 3)).rejects.toThrow("too large");
+		expect(canceled).toBe(true);
+	}
+});
+
+it("abort cancels an outstanding private stream without yielding its bytes", async () => {
+	let canceled = false;
+	const abort = new AbortController();
+	const response = new Response(
+		new ReadableStream({
+			cancel() {
+				canceled = true;
+			},
+		}),
+	);
+	const reading = readResponseBytes(response, 10, abort.signal);
+	abort.abort();
+	await expect(reading).rejects.toMatchObject({ name: "AbortError" });
+	expect(canceled).toBe(true);
+});
+
+const utf8Name = (header: string) => {
+	const encoded = header.match(/filename\*=UTF-8''([^;]+)$/)?.[1];
+	if (!encoded) throw new Error(`Missing filename*: ${header}`);
+	return decodeURIComponent(encoded);
+};
+
+it("keeps an ASCII file name in the RFC filename alone, inline or as an attachment", () => {
+	expect(contentDisposition("Jordan-Long-Resume.pdf")).toBe('attachment; filename="Jordan-Long-Resume.pdf"');
+	expect(contentDisposition("Jordan-Long-Resume.pdf", "inline")).toBe('inline; filename="Jordan-Long-Resume.pdf"');
+});
+
+it.each(["李明-Resume.pdf", "José-Álvarez-Resume.pdf"])(
+	"carries the full Unicode name in filename*: %s",
+	(filename) => {
+		const header = contentDisposition(filename);
+		expect(utf8Name(header)).toBe(filename);
+		expect(header).toContain('filename="');
+		expect(new Response(null, { headers: { "Content-Disposition": header } }).headers.get("Content-Disposition")).toBe(
+			header,
+		);
+	},
+);
+
+it("folds Latin accents into the legacy fallback and leaves other scripts out", () => {
+	expect(contentDisposition("José-Álvarez-Resume.pdf")).toContain('filename="Jose-Alvarez-Resume.pdf"');
+	expect(contentDisposition("李明-Resume.pdf")).toContain('filename="Resume.pdf"');
+	expect(contentDisposition("李明.pdf")).toContain('filename="document.pdf"');
+});
+
+it.each(["Ada＂Lovelace-Resume.pdf", "Ada＼Lovelace-Resume.pdf"])(
+	"keeps compatibility characters from breaking the quoted fallback: %s",
+	(filename) => {
+		const header = contentDisposition(filename);
+		expect(header).toMatch(/^attachment; filename="AdaLovelace-Resume\.pdf"; filename\*=UTF-8''[^;]+$/);
+		expect(utf8Name(header)).toBe(filename);
+	},
+);
+
+it("cannot inject a header or escape the download folder", () => {
+	const header = contentDisposition('../../etc/passwd"\r\nX-Injected: yes\r\n\r\n李明-Resume.pdf');
+	const response = new Response(null, { headers: { "Content-Disposition": header } });
+
+	expect(header).not.toMatch(/[\r\n]/);
+	expect(header).not.toContain("..");
+	expect(header).not.toContain("/");
+	expect(response.headers.get("X-Injected")).toBeNull();
+	expect(response.headers.get("Content-Disposition")).toBe(header);
+	expect(utf8Name(header)).toContain("李明-Resume.pdf");
+});
+
+it.each([
+	{ character: "李", extension: ".pdf", kept: 83 },
+	{ character: "😀", extension: ".json", kept: 62 },
+	{ character: "a", extension: ".docx", kept: 250 },
+])(
+	"bounds long $character names without splitting characters or losing $extension",
+	({ character, extension, kept }) => {
+		const header = contentDisposition(`${character.repeat(2000)}${extension}`);
+		const filename = header.includes("filename*=") ? utf8Name(header) : header.match(/filename="([^"]+)"/)?.[1];
+
+		expect(filename).toBe(`${character.repeat(kept)}${extension}`);
+		expect(new TextEncoder().encode(filename).length).toBeLessThanOrEqual(255);
+		expect(header.length).toBeLessThan(1200);
+		expect(new Response(null, { headers: { "Content-Disposition": header } }).headers.get("Content-Disposition")).toBe(
+			header,
+		);
+	},
+);

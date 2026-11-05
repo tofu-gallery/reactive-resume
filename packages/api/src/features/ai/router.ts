@@ -1,14 +1,20 @@
 import { ORPCError } from "@orpc/client";
 import { AISDKError } from "ai";
 import { flattenError, ZodError, z } from "zod";
+import { aiModelForTask } from "@reactive-resume/ai/task-models";
+import { aiOperationIdsSchema, aiWeeklyUsageSchema, aiUsageSummarySchema } from "@reactive-resume/schema/ai-usage";
 import { resumeDataSchema } from "@reactive-resume/schema/resume/data";
 import { protectedProcedure } from "../../context";
 import { aiRequestRateLimit } from "../../middleware/rate-limit";
 import { aiProvidersService } from "../ai-providers/service";
+import { applicationService, assertApplicationVersion } from "../applications/service";
+import { assertDocumentVersion } from "../documents/ownership";
 import { atsReviewInputSchema, atsReviewOutputSchema, reviewResumeText } from "./ats-review";
 import { improveInputSchema, improveLine, improveOutputSchema } from "./improve";
 import { reportAiContent } from "./reports";
 import { aiService, fileInputSchema } from "./service";
+import { createAiUsage, readAiUsage, readWeeklyAiUsage } from "./usage";
+import { beginWritingReview, readWritingReview, saveWritingReview } from "./writing-review";
 
 /**
  * Every AI procedure fails the same ways: no ENCRYPTION_SECRET, a bad base URL, the provider erroring (its cause kept
@@ -58,7 +64,51 @@ async function getRunnableProvider(userId: string, aiProviderId?: string) {
 }
 
 export const aiRouter = {
+	usage: protectedProcedure
+		.route({
+			method: "GET",
+			path: "/ai/usage",
+			tags: ["AI"],
+			operationId: "getWeeklyAiUsage",
+			summary: "Get this week's AI provider request attempts",
+		})
+		.input(z.object({ includeWebSearch: z.boolean().optional() }).default({}))
+		.output(aiWeeklyUsageSchema)
+		.handler(({ context, input }) => readWeeklyAiUsage(context.user.id, undefined, input.includeWebSearch)),
 	reportContent: reportAiContent,
+	capabilities: protectedProcedure
+		.route({
+			method: "GET",
+			path: "/ai/capabilities",
+			tags: ["AI"],
+			operationId: "getAiCapabilities",
+			summary: "Get supported AI consent and web-search capabilities",
+		})
+		.input(z.object({}).default({}))
+		.output(z.object({ recipientApproval: z.literal(1), explicitNoAi: z.literal(true), nativeWebSearch: z.literal(1) }))
+		.handler(() => ({ recipientApproval: 1 as const, explicitNoAi: true as const, nativeWebSearch: 1 as const })),
+	writingReview: protectedProcedure
+		.route({
+			method: "GET",
+			path: "/ai/writing-review/{resumeId}",
+			tags: ["AI"],
+			operationId: "getWritingReview",
+			summary: "Get the saved writing review for a resume",
+		})
+		.input(z.object({ resumeId: z.string() }))
+		.output(
+			z
+				.object({
+					inputText: z.string(),
+					passages: z.array(z.object({ id: z.string(), where: z.string(), text: z.string() })),
+					review: atsReviewOutputSchema,
+					reviewedAt: z.date(),
+					aiOperationIds: aiOperationIdsSchema.optional(),
+					aiUsage: aiUsageSummarySchema.nullable().optional(),
+				})
+				.nullable(),
+		)
+		.handler(({ context, input }) => readWritingReview(context.user.id, input.resumeId)),
 	parsePdf: protectedProcedure
 		.route({
 			method: "POST",
@@ -70,20 +120,32 @@ export const aiRouter = {
 				"Extracts structured resume data from a PDF file with one of the user's saved AI providers: the one named by `aiProviderId`, or their default. Send the file as a base64-encoded string. Returns a complete ResumeData object and saves nothing.",
 			successDescription: "The PDF was successfully parsed into structured resume data.",
 		})
-		.input(z.object({ aiProviderId: z.string().optional(), file: fileInputSchema }))
+		.input(
+			z.object({
+				aiProviderId: z.string().optional(),
+				file: fileInputSchema,
+				includeProvenance: z.boolean().optional(),
+			}),
+		)
 		.use(aiRequestRateLimit)
 		.errors(aiErrors)
-		.output(resumeDataSchema)
-		.handler(async ({ context, input }) => {
+		.output(resumeDataSchema.extend({ aiOperationIds: aiOperationIdsSchema.optional() }))
+		.handler(async ({ context, input, signal }) => {
 			try {
 				const provider = await getRunnableProvider(context.user.id, input.aiProviderId);
-				return await aiService.parsePdf({
+				await aiProvidersService.authorize({ userId: context.user.id, id: provider.id });
+				signal?.throwIfAborted();
+				const usage = createAiUsage(context.user.id, "import-pdf", provider);
+				const data = await aiService.parsePdf({
+					usage,
 					provider: provider.provider,
-					model: provider.model,
+					model: aiModelForTask(provider, "fast"),
 					apiKey: provider.apiKey,
 					baseURL: provider.baseURL ?? "",
 					file: input.file,
+					signal,
 				});
+				return input.includeProvenance ? { ...data, aiOperationIds: [usage.operationId] } : data;
 			} catch (error) {
 				rethrowAiError(error, "The AI returned resume data in the wrong format. Try again, or choose another model.");
 			}
@@ -104,6 +166,7 @@ export const aiRouter = {
 			z.object({
 				aiProviderId: z.string().optional(),
 				file: fileInputSchema,
+				includeProvenance: z.boolean().optional(),
 				mediaType: z.enum([
 					"application/msword",
 					"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -112,18 +175,24 @@ export const aiRouter = {
 		)
 		.use(aiRequestRateLimit)
 		.errors(aiErrors)
-		.output(resumeDataSchema)
-		.handler(async ({ context, input }) => {
+		.output(resumeDataSchema.extend({ aiOperationIds: aiOperationIdsSchema.optional() }))
+		.handler(async ({ context, input, signal }) => {
 			try {
 				const provider = await getRunnableProvider(context.user.id, input.aiProviderId);
-				return await aiService.parseDocx({
+				await aiProvidersService.authorize({ userId: context.user.id, id: provider.id });
+				signal?.throwIfAborted();
+				const usage = createAiUsage(context.user.id, "import-docx", provider);
+				const data = await aiService.parseDocx({
+					usage,
 					provider: provider.provider,
-					model: provider.model,
+					model: aiModelForTask(provider, "fast"),
 					apiKey: provider.apiKey,
 					baseURL: provider.baseURL ?? "",
 					mediaType: input.mediaType,
 					file: input.file,
+					signal,
 				});
+				return input.includeProvenance ? { ...data, aiOperationIds: [usage.operationId] } : data;
 			} catch (error) {
 				rethrowAiError(error, "The AI returned resume data in the wrong format. Try again, or choose another model.");
 			}
@@ -144,17 +213,41 @@ export const aiRouter = {
 		.use(aiRequestRateLimit)
 		.output(atsReviewOutputSchema)
 		.errors(aiErrors)
-		.handler(async ({ context, input }) => {
+		.handler(async ({ context, input, signal }) => {
 			try {
+				const requestedAt = new Date();
+				const resume = input.resumeId ? await beginWritingReview(context.user.id, input.resumeId) : null;
 				const provider = await getRunnableProvider(context.user.id, input.aiProviderId);
+				await aiProvidersService.authorize({ userId: context.user.id, id: provider.id }, async (tx) => {
+					if (resume) await assertDocumentVersion(tx, context.user.id, { kind: "resume", ...resume });
+				});
+				signal?.throwIfAborted();
 
-				return await reviewResumeText({
+				const usage = createAiUsage(context.user.id, "writing-review", provider, async (tx) => {
+					if (resume) await assertDocumentVersion(tx, context.user.id, { kind: "resume", ...resume });
+				});
+				const review = await reviewResumeText({
+					usage,
 					...input,
+					signal,
 					provider: provider.provider,
 					model: provider.model,
 					apiKey: provider.apiKey,
 					baseURL: provider.baseURL ?? "",
 				});
+				if (input.resumeId && resume)
+					await saveWritingReview({
+						requestGeneration: resume.generation,
+						aiOperationId: usage.operationId,
+						resumeId: input.resumeId,
+						userId: context.user.id,
+						inputText: input.extractedText,
+						passages: input.passages,
+						review,
+						requestedAt,
+						reviewedAt: new Date(),
+					});
+				return review;
 			} catch (error) {
 				rethrowAiError(error, "The AI returned the review in the wrong format. Try again, or choose another model.");
 			}
@@ -171,21 +264,47 @@ export const aiRouter = {
 				"Suggests a rewrite of one line of a resume or cover letter: a stronger verb, an added result, a shorter version, or the user's own request. Returns the new line, a short reason, and whether it states anything the input didn't, so the user can check it. Writes nothing. Requires authentication and AI credentials.",
 			successDescription: "The suggested line.",
 		})
-		.input(improveInputSchema)
+		.input(improveInputSchema.extend({ includeProvenance: z.boolean().optional() }))
 		.use(aiRequestRateLimit)
-		.output(improveOutputSchema)
+		.output(
+			improveOutputSchema.extend({
+				aiOperationIds: aiOperationIdsSchema.optional(),
+				aiUsage: aiUsageSummarySchema.nullable().optional(),
+			}),
+		)
 		.errors(aiErrors)
-		.handler(async ({ context, input }) => {
+		.handler(async ({ context, input, signal }) => {
 			try {
 				const provider = await getRunnableProvider(context.user.id, input.aiProviderId);
+				await aiProvidersService.authorize({ userId: context.user.id, id: provider.id });
+				// The posting comes from the user's own application, never from the client.
+				const application =
+					input.action === "posting" && input.applicationId
+						? await applicationService.getById({ id: input.applicationId, userId: context.user.id })
+						: null;
+				const posting = application?.jobDescription?.slice(0, 12_000);
+				signal?.throwIfAborted();
 
-				return await improveLine({
+				const usage = createAiUsage(context.user.id, "improve", provider, async (tx) => {
+					if (application) await assertApplicationVersion(tx, context.user.id, application);
+				});
+				const result = await improveLine({
+					usage,
 					...input,
+					posting,
+					signal,
 					provider: provider.provider,
-					model: provider.model,
+					model: aiModelForTask(provider, "fast"),
 					apiKey: provider.apiKey,
 					baseURL: provider.baseURL ?? "",
 				});
+				return input.includeProvenance
+					? {
+							...result,
+							aiOperationIds: [usage.operationId],
+							aiUsage: await readAiUsage(context.user.id, [usage.operationId]),
+						}
+					: result;
 			} catch (error) {
 				rethrowAiError(error, "The AI returned suggestions in the wrong format. Try again, or choose another model.");
 			}

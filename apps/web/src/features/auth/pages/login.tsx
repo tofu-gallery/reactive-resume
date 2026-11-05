@@ -7,11 +7,14 @@ import { Link, useNavigate, useRouter, useSearch } from "@tanstack/react-router"
 import { useEffect, useRef } from "react";
 import z from "zod";
 import { Button } from "@reactive-resume/ui/components/button";
-import { FormControl, FormDescription, FormItem, FormLabel, FormMessage } from "@reactive-resume/ui/components/form";
+import { FormControl, FormItem, FormLabel, FormMessage } from "@reactive-resume/ui/components/form";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
 import { toast } from "@reactive-resume/ui/components/toast";
+import { ConnectingClient } from "../components/connecting-client";
+import { GuestTransferNote } from "../components/guest-banner";
 import { SocialAuth } from "../components/social-auth";
+import { authErrorMessage } from "../error";
 import { getAuthRedirectOptions, getOAuthPasskeyOptions, getOAuthSignInOptions, isOAuthRedirect } from "../redirect";
 import { PasswordInput } from "@/components/input/password-input";
 import { authClient } from "@/libs/auth/client";
@@ -31,6 +34,8 @@ type Props = {
 	disableEmailAuth: boolean;
 	disableSignups: boolean;
 	allowGuestLogin: boolean;
+	/** Signing in from a guest session moves the guest's work into that account. */
+	isGuest?: boolean;
 };
 
 type SubmitLoginOptions = {
@@ -43,7 +48,7 @@ type SubmitLoginOptions = {
 };
 
 async function submitLogin({ value, callbackURL, reauthenticate, navigate, queryClient, router }: SubmitLoginOptions) {
-	const toastId = toast.add({ type: "loading", description: t`Signing in...` });
+	const toastId = toast.add({ type: "loading", description: t`Signing in…` });
 
 	try {
 		const isEmail = value.identifier.includes("@");
@@ -63,12 +68,7 @@ async function submitLogin({ value, callbackURL, reauthenticate, navigate, query
 		if (result.error) {
 			toast.add({
 				type: "error",
-				description:
-					result.error.message ||
-					t({
-						comment: "Fallback toast when sign-in fails and no server error message is available",
-						message: "Couldn't sign in. Try again.",
-					}),
+				description: authErrorMessage(result.error, t`Couldn't sign in. Try again.`),
 				id: toastId,
 			});
 			return;
@@ -96,7 +96,7 @@ async function submitLogin({ value, callbackURL, reauthenticate, navigate, query
 	}
 }
 
-export function LoginPage({ disableEmailAuth, disableSignups, allowGuestLogin }: Props) {
+export function LoginPage({ disableEmailAuth, disableSignups, allowGuestLogin, isGuest = false }: Props) {
 	const router = useRouter();
 	const { callbackURL, reauthenticate } = useSearch({ from: "/auth" });
 	const navigate = useNavigate();
@@ -154,9 +154,10 @@ export function LoginPage({ disableEmailAuth, disableSignups, allowGuestLogin }:
 	return (
 		<>
 			<div className="space-y-1 text-center">
-				<h1 className="text-2xl font-semibold tracking-tight">
+				<h1 className="text-[30px] leading-9">
 					<Trans comment="Title on the login page">Sign in to your account</Trans>
 				</h1>
+				<ConnectingClient callbackURL={callbackURL} />
 
 				{!disableSignups && (
 					<div className="text-ink-3">
@@ -180,8 +181,11 @@ export function LoginPage({ disableEmailAuth, disableSignups, allowGuestLogin }:
 				)}
 			</div>
 
+			{isGuest && <GuestTransferNote />}
+
 			{!disableEmailAuth && (
 				<form
+					noValidate
 					className="space-y-6"
 					onSubmit={(event) => {
 						event.preventDefault();
@@ -193,14 +197,15 @@ export function LoginPage({ disableEmailAuth, disableSignups, allowGuestLogin }:
 						{(field) => (
 							<FormItem hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}>
 								<FormLabel>
-									<Trans comment="Label for login identifier input that accepts email or username">Email address</Trans>
+									<Trans comment="Label for login identifier input that accepts email or username">
+										Email or username
+									</Trans>
 								</FormLabel>
 								<FormControl
 									render={
 										<Input
 											autoComplete="section-login username webauthn"
-											placeholder="john.doe@example.com"
-											className="lowercase"
+											placeholder={t`you@example.com or your username`}
 											name={field.name}
 											value={field.state.value}
 											onBlur={field.handleBlur}
@@ -209,9 +214,6 @@ export function LoginPage({ disableEmailAuth, disableSignups, allowGuestLogin }:
 									}
 								/>
 								<FormMessage errors={field.state.meta.errors} />
-								<FormDescription>
-									<Trans>You can also sign in with your username.</Trans>
-								</FormDescription>
 							</FormItem>
 						)}
 					</form.Field>
@@ -225,12 +227,11 @@ export function LoginPage({ disableEmailAuth, disableSignups, allowGuestLogin }:
 									</FormLabel>
 
 									<Button
-										tabIndex={-1}
 										variant="link"
 										nativeButton={false}
-										className="h-auto p-0 text-xs leading-none"
+										className="min-h-11 px-2 py-2 text-xs"
 										render={
-											<Link to="/auth/forgot-password">
+											<Link to="/auth/forgot-password" search={{ callbackURL, reauthenticate }}>
 												<Trans comment="Link label to password reset page from login form">Forgot password?</Trans>
 											</Link>
 										}
@@ -262,7 +263,7 @@ export function LoginPage({ disableEmailAuth, disableSignups, allowGuestLogin }:
 
 			<SocialAuth />
 
-			{allowGuestLogin && (
+			{allowGuestLogin && !getOAuthSignInOptions(callbackURL).oauth_query && (
 				<Button
 					type="button"
 					variant="secondary"

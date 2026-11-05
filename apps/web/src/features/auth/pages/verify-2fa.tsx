@@ -1,8 +1,10 @@
-import { t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useSelector } from "@tanstack/react-form";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
+import { useEffect, useRef } from "react";
 import z from "zod";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Checkbox } from "@reactive-resume/ui/components/checkbox";
@@ -11,6 +13,7 @@ import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
 import { OTPField } from "@reactive-resume/ui/components/otp-field";
 import { toast } from "@reactive-resume/ui/components/toast";
+import { authErrorMessage } from "../error";
 import { getAuthRedirectOptions, getOAuthSignInOptions, isOAuthRedirect } from "../redirect";
 import { authClient } from "@/libs/auth/client";
 import { sessionQueryKey } from "@/libs/root-context";
@@ -45,31 +48,37 @@ function TwoFactorVerificationPage({ backupCode = false }: TwoFactorVerification
 		onSubmit: async ({ value }) => {
 			const toastId = toast.add({
 				type: "loading",
-				description: backupCode ? t`Verifying backup code...` : t`Verifying code...`,
+				description: backupCode ? t`Verifying backup code…` : t`Verifying code…`,
 			});
 			const rawCode = value.code.trim().replaceAll("-", "");
 			const code = backupCode ? `${rawCode.slice(0, 5)}-${rawCode.slice(5)}` : value.code;
 			const options = { code, trustDevice: value.trustDevice, ...getOAuthSignInOptions(callbackURL) };
-			const { data, error } = backupCode
+			let { data, error } = backupCode
 				? await authClient.twoFactor.verifyBackupCode(options)
 				: await authClient.twoFactor.verifyTotp(options);
+			// New backup codes are all capitals; older ones mix cases. A lower-case code that didn't match gets one
+			// retry in capitals; other failures (an expired challenge, rate limits) don't spend another attempt.
+			if (error?.code === "INVALID_BACKUP_CODE" && backupCode && code !== code.toUpperCase())
+				({ data, error } = await authClient.twoFactor.verifyBackupCode({ ...options, code: code.toUpperCase() }));
 
 			if (error) {
 				toast.add({
 					type: "error",
-					description:
-						error.message ||
-						(backupCode
-							? t({
-									comment: "Fallback toast when verifying a backup two-factor authentication code fails",
-									message: "Couldn't verify your backup code. Check the code and try again.",
-								})
-							: t({
-									comment: "Fallback toast when verifying a two-factor authentication code fails",
-									message: "Couldn't verify your code. Check the code and try again.",
-								})),
+					description: authErrorMessage(
+						error,
+						backupCode
+							? t`Couldn't verify your backup code. Check the code and try again.`
+							: t`Couldn't verify your code. Check the code and try again.`,
+					),
 					id: toastId,
 				});
+				if (error.code === "INVALID_TWO_FACTOR_COOKIE") {
+					void navigate({ to: "/auth/login", search: { callbackURL, reauthenticate: true }, replace: true });
+					return;
+				}
+				// A wrong code is cleared and the first box takes focus again, ready for the next try.
+				form.setFieldValue("code", "");
+				focusCode();
 				return;
 			}
 
@@ -82,11 +91,17 @@ function TwoFactorVerificationPage({ backupCode = false }: TwoFactorVerification
 	});
 
 	const isSubmitting = useSelector(form.store, (state) => state.isSubmitting);
+	// Typing the code works at once: the first box (or the backup code field) has focus when the page opens.
+	const codeRef = useRef<HTMLDivElement>(null);
+	const focusCode = () => codeRef.current?.querySelector("input")?.focus();
+	useEffect(() => {
+		codeRef.current?.querySelector("input")?.focus();
+	}, []);
 
 	return (
 		<>
 			<div className="space-y-1 text-center">
-				<h1 className="text-2xl font-semibold tracking-tight">
+				<h1 className="text-[30px] leading-9">
 					{backupCode ? <Trans>Verify with a backup code</Trans> : <Trans>Two-step verification</Trans>}
 				</h1>
 				<div className="text-ink-3">
@@ -99,6 +114,7 @@ function TwoFactorVerificationPage({ backupCode = false }: TwoFactorVerification
 			</div>
 
 			<form
+				noValidate
 				className="grid gap-6"
 				onSubmit={(event) => {
 					event.preventDefault();
@@ -109,6 +125,8 @@ function TwoFactorVerificationPage({ backupCode = false }: TwoFactorVerification
 				<form.Field name="code">
 					{(field) => (
 						<FormItem
+							ref={codeRef}
+							data-route-focus
 							className="justify-self-center"
 							hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}
 						>
@@ -129,6 +147,9 @@ function TwoFactorVerificationPage({ backupCode = false }: TwoFactorVerification
 										/>
 									) : (
 										<OTPField
+											digitLabel={(position, total) =>
+												t`Digit ${ph({ position: i18n.number(position) })} of ${ph({ total: i18n.number(total) })}`
+											}
 											length={6}
 											autoSubmit
 											name={field.name}
@@ -184,6 +205,21 @@ function TwoFactorVerificationPage({ backupCode = false }: TwoFactorVerification
 					</Button>
 				</div>
 			</form>
+
+			{backupCode && (
+				<details className="justify-self-center text-center text-sm text-ink-2">
+					<summary className="cursor-pointer underline underline-offset-2">
+						<Trans>No backup codes either?</Trans>
+					</summary>
+					<p className="mt-2 max-w-sm">
+						<Trans>
+							If you never verified your email address, a password reset turns two-step verification off. Otherwise a
+							reset keeps it on, so ask the person who runs this Reactive Resume server to turn it off for your account.
+							Then sign in with your password and turn it on again with a new authenticator.
+						</Trans>
+					</p>
+				</details>
+			)}
 
 			{!backupCode && (
 				<Button

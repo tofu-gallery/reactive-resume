@@ -4,6 +4,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { i18n } from "@lingui/core";
 import { I18nProvider } from "@lingui/react";
+import { ConfirmDialogProvider } from "@/hooks/use-confirm";
+import { invalidateAccountScope, setAccountScope } from "@/libs/auth/account-scope";
 
 const mocks = vi.hoisted(() => ({
 	selected: null as string | null,
@@ -12,6 +14,7 @@ const mocks = vi.hoisted(() => ({
 	attach: vi.fn(),
 	setState: vi.fn(),
 	invalidate: vi.fn(),
+	navigate: vi.fn(),
 }));
 vi.mock("@tanstack/react-query", async (importOriginal) => ({
 	...(await importOriginal<typeof import("@tanstack/react-query")>()),
@@ -19,7 +22,11 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
 		options.queryKey[0] === "threads" ? { data: mocks.threads, isPending: false } : {},
 	useQueryClient: () => ({ invalidateQueries: mocks.invalidate }),
 }));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn(), Link: () => null }));
+vi.mock("@tanstack/react-router", () => ({
+	useNavigate: () => mocks.navigate,
+	useSearch: () => ({ applicationId: "application-2" }),
+	Link: () => null,
+}));
 vi.mock("@/features/resume/editor/store", () => ({
 	useEditorStore: Object.assign(
 		(select: (state: unknown) => unknown) => select({ assistantThread: mocks.selected, assistantPrompt: null }),
@@ -41,7 +48,10 @@ vi.mock("@/libs/orpc/client", () => ({
 	},
 }));
 vi.mock("@reactive-resume/ui/components/toast", () => ({ toast: { add: vi.fn() } }));
-vi.mock("./chat", () => ({ fileToBase64: async () => "Zm9v", useConversationConnection: () => undefined }));
+vi.mock("./chat", async (importOriginal) => ({
+	...(await importOriginal<typeof import("./chat")>()),
+	fileToBase64: async () => "Zm9v",
+}));
 
 import { AssistantPanel } from "./assistant-panel";
 
@@ -50,13 +60,16 @@ const document: AssistantDocument = {
 	id: "resume-1",
 	name: "Resume",
 	locked: false,
+	jobCopy: true,
+	madeFor: null,
 	posting: null,
 	stateOf: () => "pending",
-	accept: () => {},
+	accept: () => ({ applied: [], stale: [] }),
 	locationOf: () => undefined,
 };
 beforeEach(() => {
 	vi.clearAllMocks();
+	setAccountScope("account-1");
 	mocks.selected = null;
 	mocks.threads = [];
 	mocks.setState.mockImplementation((partial: { assistantThread?: string }) => {
@@ -66,7 +79,63 @@ beforeEach(() => {
 	mocks.attach.mockResolvedValue({ id: "file-1", filename: "posting.txt", mediaType: "text/plain" });
 	i18n.loadAndActivate({ locale: "en-US", messages: {} });
 });
-afterEach(cleanup);
+afterEach(() => {
+	cleanup();
+	invalidateAccountScope();
+});
+
+it("keeps task titles and shows the original message in history, with old-server fallback", () => {
+	mocks.selected = "new";
+	const thread = {
+		id: "history-thread",
+		workingResumeId: document.id,
+		coverLetterId: null,
+		aiProviderId: "provider-1",
+		title: "Tailor summary to payments roles",
+		firstMessage: "I'm applying for payments roles. Please tailor my summary.",
+		lastMessageAt: new Date("2026-11-02T12:00:00Z"),
+		editsProposed: 2,
+		editsAccepted: 1,
+	};
+	mocks.threads = [thread];
+	const panel = () => (
+		<I18nProvider i18n={i18n}>
+			<ConfirmDialogProvider>
+				<AssistantPanel document={document} onClose={() => {}} />
+			</ConfirmDialogProvider>
+		</I18nProvider>
+	);
+	const { rerender } = render(panel());
+	fireEvent.click(screen.getByRole("button", { name: "Past conversations" }));
+	const row = screen.getByRole("button", { name: /Tailor summary to payments roles.*I'm applying/ });
+	expect(row.textContent).toContain(thread.firstMessage);
+	expect(row.textContent).toContain("1 of 2 edits accepted");
+	expect(mocks.start).not.toHaveBeenCalled();
+	mocks.threads = [{ ...thread, firstMessage: undefined }];
+	rerender(panel());
+	expect(screen.queryByText(thread.firstMessage)).toBeNull();
+	expect(screen.getByText(thread.title)).toBeDefined();
+});
+
+it("states resume scope before sending and routes Open Write to this resume", () => {
+	const onClose = vi.fn();
+	render(
+		<I18nProvider i18n={i18n}>
+			<AssistantPanel document={document} onClose={onClose} />
+		</I18nProvider>,
+	);
+	expect(screen.getByText(/Some fields still need Write/)).toBeDefined();
+	expect(screen.getByRole("button", { name: "Translate into…" })).toBeDefined();
+	fireEvent.click(screen.getByRole("button", { name: "Open Write" }));
+	expect(onClose).toHaveBeenCalledOnce();
+	expect(mocks.navigate).toHaveBeenCalledWith({
+		to: "/builder/$resumeId",
+		params: { resumeId: "resume-1" },
+		search: { applicationId: "application-2", mode: undefined, assistant: undefined },
+	});
+	expect(mocks.setState).toHaveBeenCalledWith({ mobileView: "write", drawerOpen: true });
+	expect(mocks.start).not.toHaveBeenCalled();
+});
 
 it("keeps first-message text and attachments when the draft appears in a background thread-list refetch", async () => {
 	const panel = (

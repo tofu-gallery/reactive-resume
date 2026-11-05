@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { fromZonedDateTime } from "./timezone";
+import { formatDateOnly, fromZonedDateTime, formatReadTime } from "./timezone";
 
 describe("wall-clock timezone conversion", () => {
 	it.each([
@@ -18,5 +18,39 @@ describe("wall-clock timezone conversion", () => {
 		["2027-01-01", "09:00", "Invalid/Timezone"],
 	])("rejects nonexistent clock minutes: %s %s %s", (date, time, zone) => {
 		expect(fromZonedDateTime(date, time, zone)).toBeNull();
+	});
+});
+
+describe("formatDateOnly", () => {
+	it("keeps the calendar date and year regardless of the viewer's timezone", () => {
+		expect(formatDateOnly("2027-01-04", "en-US")).toBe("Jan 4, 2027");
+		expect(formatDateOnly("2027-01-04", "de-DE")).toBe("4. Jan. 2027");
+	});
+	it("leaves an invalid or non-date value untouched", () => {
+		expect(formatDateOnly("2027-02-31", "en-US")).toBe("2027-02-31");
+		expect(formatDateOnly("", "en-US")).toBe("");
+	});
+});
+
+describe("formatReadTime", () => {
+	const now = Date.parse("2026-11-02T13:30:00Z");
+	it.each([
+		[0, "now"],
+		[59, "now"],
+		[60, "1 minute ago"],
+		[3_599, "59 minutes ago"],
+		[3_600, "1 hour ago"],
+		[86_399, "23 hours ago"],
+		[86_400, "yesterday"],
+		[259_200, "3 days ago"],
+	])("shows elapsed time without rounding up (%s seconds)", (age, expected) => {
+		expect(formatReadTime(new Date(now - age * 1_000), "en-US", now)).toBe(expected);
+	});
+	it("localizes relative time and keeps future clock skew absolute", () => {
+		expect(formatReadTime(new Date(now - 180_000), "de-DE", now)).toBe("vor 3 Minuten");
+		// An absolute date in the viewer's timezone: Nov 1–3 depending on the host, never a relative "in 1 minute".
+		expect(formatReadTime(new Date(now + 60_000), "en-US", now)).toMatch(/^Nov [1-3], 2026, /);
+		expect(formatReadTime("not a date", "en-US")).toBeNull();
+		expect(formatReadTime(new Date(now), "en-US", Number.NaN)).toBeNull();
 	});
 });

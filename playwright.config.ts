@@ -4,6 +4,9 @@ const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const baseURL = process.env.APP_URL ?? `http://localhost:${port}`;
 const isCI = process.env.CI === "true" || process.env.CI === "1";
 
+// Share a fixed public cron fixture between the disposable Playwright server and its worker tests.
+process.env.CRON_SECRET ||= "isolated-ci-cron-secret-32-characters";
+
 export default defineConfig({
 	testDir: "./tests/e2e/specs",
 	fullyParallel: true,
@@ -34,7 +37,8 @@ export default defineConfig({
 		// so Playwright's group kill misses the server and the job hangs after the tests finish.
 		command: "node apps/server/dist/index.mjs",
 		url: `${baseURL}/api/health`,
-		reuseExistingServer: !isCI,
+		// `pnpm test:e2e:local` sets E2E_NO_REUSE: its port must be this checkout's server, or the run fails.
+		reuseExistingServer: !isCI && process.env.E2E_NO_REUSE !== "1",
 		timeout: 120_000,
 		env: {
 			...process.env,

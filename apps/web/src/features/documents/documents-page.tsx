@@ -1,9 +1,16 @@
 import type { DocumentSort, DocumentSummary, DocumentTypeFilter } from "./filter";
-import { t } from "@lingui/core/macro";
-import { Trans } from "@lingui/react/macro";
+import type { DocumentGroup } from "@reactive-resume/schema/applications/document-groups";
+import type { QueryClient } from "@tanstack/react-query";
+import type { KeyboardEvent, Ref } from "react";
+import { i18n } from "@lingui/core";
+import { ph, t } from "@lingui/core/macro";
+import { Plural, Trans, useLingui } from "@lingui/react/macro";
 import { useHotkey } from "@tanstack/react-hotkeys";
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useNavigate, useRouter } from "@tanstack/react-router";
+import { useEffect, useId, useRef, useState } from "react";
+import { useDebounceValue } from "usehooks-ts";
+import { groupDocumentsByApplication, groupIsExpanded } from "@reactive-resume/schema/applications/document-groups";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Checkbox } from "@reactive-resume/ui/components/checkbox";
 import {
@@ -13,6 +20,7 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@reactive-resume/ui/components/dropdown-menu";
+import { EmptyState } from "@reactive-resume/ui/components/empty-state";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { IconButton } from "@reactive-resume/ui/components/icon-button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@reactive-resume/ui/components/input-group";
@@ -21,15 +29,22 @@ import { NativeSelect } from "@reactive-resume/ui/components/native-select";
 import { SegmentedControl, SegmentedControlItem } from "@reactive-resume/ui/components/segmented-control";
 import { Skeleton } from "@reactive-resume/ui/components/skeleton";
 import { Tabs, TabsCount, TabsList, TabsTrigger } from "@reactive-resume/ui/components/tabs";
+import { useFloatingToolbarSpace } from "@reactive-resume/ui/hooks/use-floating-toolbar-space";
 import { cn } from "@reactive-resume/utils/style";
 import { LinkApplicationDialog, TagsDialog, useBatchActions } from "./document-actions";
 import { DocumentCard, DocumentRow } from "./document-card";
-import { collectTags, filterDocuments } from "./filter";
+import { documentKey } from "./filter";
 import { LibraryError } from "./library-error";
-import { useStartDocument } from "./use-start-document";
+import { useDocumentHistory } from "./library-session";
+import { useNewDocumentsStore } from "./new-documents";
+import { PageNavigation } from "./page-navigation";
+import { useDocumentRemovalMotion } from "./removal-motion";
+import { IMPORT_ACCEPT, useStartDocument } from "./use-start-document";
 import { PageHeader } from "@/components/layout/page-header";
 import { useDialogStore } from "@/dialogs/store";
+import { useShortcutSettings } from "@/features/keyboard-shortcuts/settings";
 import { isEditableElementFocused } from "@/features/resume/builder/draft";
+import { isImeComposing } from "@/libs/keyboard";
 import { orpc } from "@/libs/orpc/client";
 
 export type DocumentsSearch = {
@@ -49,23 +64,75 @@ type DocumentsPageProps = {
 
 /**
  * Documents: every resume and letter in one library, with type tabs, search (/), sort, grid or list, and tag
- * chips once tags exist. A file dropped anywhere on the page imports straight away.
+ * chips once tags exist. A file dropped anywhere on the page opens import confirmation.
  */
 export function DocumentsPage({ search, onSearchChange }: DocumentsPageProps) {
+	const { t } = useLingui();
 	const openDialog = useDialogStore((state) => state.openDialog);
 	const searchRef = useRef<HTMLInputElement>(null);
+	const resultsRef = useRef<HTMLTableElement & HTMLDivElement>(null);
+	const queryClient = useQueryClient();
+	const openOnResults = useRef<{ request: string; client: QueryClient } | null>(null);
+	const router = useRouter();
+	useEffect(
+		() =>
+			router.subscribe("onBeforeNavigate", ({ pathChanged }) => {
+				if (pathChanged) openOnResults.current = null;
+			}),
+		[router],
+	);
+	const searchHintId = useId();
+	const navigate = useNavigate();
+	const markOpened = useNewDocumentsStore((state) => state.markOpened);
 	const [tagsFor, setTagsFor] = useState<DocumentSummary[] | null>(null);
 	const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
+	// Only explicit toggles that differ from the default: a closed job starts collapsed, every other group expanded.
+	const [groupOverrides, setGroupOverrides] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+	const { ref: selectionBarRef, space: selectionBarSpace } = useFloatingToolbarSpace();
 	const [linkFor, setLinkFor] = useState<DocumentSummary | null>(null);
 	// Grid and list animate in only after a switch, never on the page's first render.
 	const [viewSwitched, setViewSwitched] = useState(false);
+	const searchText = search.q.slice(0, 500);
+	const [query, setQuery] = useDebounceValue(searchText, 300);
+	const filterKey = JSON.stringify([search.type, searchText, search.tags, search.public ?? false, search.sort]);
+	const [page, setPage] = useState({ filterKey, offset: 0, total: 0 });
+	const offset = page.filterKey === filterKey ? page.offset : 0;
+	const changePage = (next: number) => {
+		setSelected(new Set());
+		setPage({ filterKey, offset: next, total: pageData?.total ?? page.total });
+	};
+	const input = {
+		type: search.type,
+		q: searchText,
+		tags: search.tags,
+		sort: search.sort,
+		public: search.public ?? false,
+		trashed: false,
+		limit: 100,
+		offset,
+	};
+	// Bind Enter to its intended request, including text not yet released by the debounce.
+	const request = JSON.stringify(input);
 	const {
-		data: documents,
+		data: pageData,
 		isPending,
 		isError,
 		isFetching,
+		isPlaceholderData,
 		refetch,
-	} = useQuery(orpc.documents.list.queryOptions({ input: { trashed: false } }));
+	} = useQuery({
+		gcTime: 0,
+		placeholderData: (previous) => previous,
+		...orpc.documents.page.queryOptions({
+			input: { ...input, q: query },
+		}),
+	});
+	const [lastPage, setLastPage] = useState({ data: pageData, offset });
+	if (pageData && !isPlaceholderData && (pageData !== lastPage.data || offset !== lastPage.offset))
+		setLastPage({ data: pageData, offset });
+	const displayed = pageData ?? lastPage.data;
+	const displayedOffset = pageData && !isPlaceholderData ? offset : lastPage.offset;
+	const rowsCurrent = Boolean(pageData) && !isPlaceholderData && !isError && query === searchText;
 	// The library staggers in on its first appearance only; cards that appear later (filters, a new document) don't.
 	const [intro, setIntro] = useState(true);
 	useEffect(() => {
@@ -83,71 +150,183 @@ export function DocumentsPage({ search, onSearchChange }: DocumentsPageProps) {
 		viewSwitched &&
 		"transition-[opacity,translate] duration-standard ease-enter starting:translate-y-1 starting:opacity-0";
 
-	useHotkey("/", (event) => {
-		if (isEditableElementFocused()) return;
-		event.preventDefault();
-		searchRef.current?.focus();
+	useDocumentRemovalMotion({
+		container: resultsRef,
+		scope: JSON.stringify([filterKey, displayedOffset, view]),
+		trashed: false,
+		data: displayed,
+		fetching: isFetching,
+		failed: isError,
 	});
 
-	const all = documents ?? [];
-	const failed = isError && !documents;
-	const firstRun = !isPending && all.length === 0;
-	const shown = filterDocuments(all, search);
-	const tags = collectTags(all);
-	const counts = {
-		all: all.length,
-		resume: all.filter((document) => document.type === "resume").length,
-		letter: all.filter((document) => document.type === "letter").length,
+	const characterShortcuts = useShortcutSettings((state) => state.characterShortcuts);
+	useHotkey(
+		"/",
+		(event) => {
+			if (isEditableElementFocused()) return;
+			event.preventDefault();
+			searchRef.current?.focus();
+		},
+		{ enabled: characterShortcuts, meta: { name: t`Search documents` } },
+	);
+
+	if (page.filterKey !== filterKey || (pageData && !isPlaceholderData && offset > 0 && offset >= pageData.total)) {
+		setPage({
+			filterKey,
+			total: pageData?.total ?? 0,
+			offset: page.filterKey !== filterKey ? 0 : Math.max(0, Math.floor(((pageData?.total ?? 0) - 1) / 100) * 100),
+		});
+		setSelected(new Set());
+		setTagsFor(null);
+		setLinkFor(null);
+	}
+
+	const shown = displayed?.items ?? [];
+	const groups = groupDocumentsByApplication(shown);
+	const expandedGroup = (group: DocumentGroup<DocumentSummary>) =>
+		group.kind === "document" || groupIsExpanded(group.closed, groupOverrides, group.key);
+	const toggleGroup = (group: DocumentGroup<DocumentSummary>) => {
+		if (group.kind !== "application") return;
+		setGroupOverrides((current) => {
+			const next = new Map(current);
+			next.set(group.key, !groupIsExpanded(group.closed, current, group.key));
+			return next;
+		});
 	};
-	const hasPublic = all.some((document) => document.isPublic);
+	// A closed group's documents are out of the page until it opens, so selection and Select this page follow what is shown.
+	const visibleShown = groups.flatMap((group) => (expandedGroup(group) ? group.documents : []));
+	const shownIndex = new Map(visibleShown.map((document, index) => [documentKey(document), index]));
+	const failed = isError && !displayed;
 	const filtered = search.type !== "all" || search.q.trim() !== "" || search.tags.length > 0 || search.public === true;
-	// Actions apply to the selected documents the filters show.
-	const selection = shown.filter((document) => selected.has(documentKey(document)));
+	const {
+		data: libraryCounts,
+		isPending: countsPending,
+		isError: countsError,
+		isFetching: countsFetching,
+		refetch: refetchCounts,
+	} = useQuery(orpc.documents.counts.queryOptions());
+	const trashCount = libraryCounts?.trash ?? 0;
+	const hadDocuments = useDocumentHistory(
+		shown.length > 0 || (libraryCounts ? libraryCounts.resume + libraryCounts.letter + libraryCounts.trash > 0 : false),
+	);
+	const firstRun = rowsCurrent && !filtered && offset === 0 && pageData?.total === 0 && !hadDocuments;
+	const tags = displayed?.tags ?? [];
+	const counts = {
+		all: (displayed?.counts.resume ?? 0) + (displayed?.counts.letter ?? 0),
+		resume: displayed?.counts.resume ?? 0,
+		letter: displayed?.counts.letter ?? 0,
+	};
+	const hasPublic = displayed?.hasPublic ?? false;
+	// A type tab with nothing of its kind is empty, not filtered: it offers to make one.
+	const emptyType =
+		search.type !== "all" &&
+		search.q.trim() === "" &&
+		search.tags.length === 0 &&
+		search.public !== true &&
+		offset === 0 &&
+		counts[search.type] === 0
+			? search.type
+			: null;
+	// Actions apply to the selected documents the filters and open groups show.
+	const selection = rowsCurrent ? visibleShown.filter((document) => selected.has(documentKey(document))) : [];
 	const selecting = selection.length > 0;
-	const allSelected = selecting && selection.length === shown.length;
-	const setSelectedFor = (document: DocumentSummary, on: boolean) =>
+	const allSelected = selecting && selection.length === visibleShown.length;
+	const setSelectedFor = (document: DocumentSummary, on: boolean) => {
+		if (!rowsCurrent) return;
 		setSelected((current) => {
 			const next = new Set(current);
 			if (on) next.add(documentKey(document));
 			else next.delete(documentKey(document));
 			return next;
 		});
-	const selectAll = (on: boolean) => setSelected(new Set(on ? shown.map(documentKey) : []));
+	};
+	const selectAll = (on: boolean) => {
+		if (on && !rowsCurrent) return;
+		setSelected(new Set(on ? visibleShown.map(documentKey) : []));
+	};
 	const itemProps = (document: DocumentSummary) => ({
-		onTags: (document: DocumentSummary) => setTagsFor([document]),
-		onLink: setLinkFor,
-		selected: selected.has(documentKey(document)),
+		onTags: (document: DocumentSummary) => {
+			if (rowsCurrent) setTagsFor([document]);
+		},
+		onLink: (document: DocumentSummary) => {
+			if (rowsCurrent) setLinkFor(document);
+		},
+		selected: rowsCurrent && selected.has(documentKey(document)),
+		disabled: !rowsCurrent,
 		onSelectedChange: (on: boolean) => setSelectedFor(document, on),
 		selecting,
 	});
 
-	useHotkey("Escape", () => {
-		if (!selecting || tagsFor || linkFor || isEditableElementFocused()) return;
-		selectAll(false);
+	useHotkey(
+		"Escape",
+		() => {
+			if (!selecting || tagsFor || linkFor || isEditableElementFocused()) return;
+			selectAll(false);
+		},
+		{ meta: selecting ? { name: t`Clear selection` } : {} },
+	);
+
+	const openDocument = (document: DocumentSummary) => {
+		markOpened(document.id);
+		if (document.type === "resume") void navigate({ to: "/builder/$resumeId", params: { resumeId: document.id } });
+		else void navigate({ to: "/builder/letter/$coverLetterId", params: { coverLetterId: document.id } });
+	};
+
+	// Replacement requests cannot inherit an earlier Enter, even when their search text is identical.
+	useEffect(() => {
+		const pending = openOnResults.current;
+		if (pending === null) return;
+		if (pending.request !== request || pending.client !== queryClient || isError) {
+			openOnResults.current = null;
+			return;
+		}
+		if (!rowsCurrent) return;
+		openOnResults.current = null;
+		const first = shown[0];
+		if (first) openDocument(first);
 	});
 
-	return (
-		<div className="mx-auto grid w-full max-w-[1180px] content-start gap-5 px-8 py-8 max-sm:px-4 max-sm:py-5">
-			<PageHeader title={<Trans>Documents</Trans>}>
-				{!failed && !firstRun && (
-					<>
-						<Tabs value={search.type} onValueChange={(type) => onSearchChange({ type: type as DocumentTypeFilter })}>
-							<TabsList variant="line" aria-label={t`Document type`}>
-								<TabsTrigger value="all">
-									<Trans>All</Trans>
-									<TabsCount>{counts.all}</TabsCount>
-								</TabsTrigger>
-								<TabsTrigger value="resume">
-									<Trans>Resumes</Trans>
-									<TabsCount>{counts.resume}</TabsCount>
-								</TabsTrigger>
-								<TabsTrigger value="letter">
-									<Trans>Letters</Trans>
-									<TabsCount>{counts.letter}</TabsCount>
-								</TabsTrigger>
-							</TabsList>
-						</Tabs>
+	// The search field is keyboard-complete: Enter opens the top result, ↓ moves into the results, Esc clears, then leaves.
+	const onSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+		if (isImeComposing(event) || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+		if (event.key === "Enter") {
+			event.preventDefault();
+			openOnResults.current = null;
+			if (!searchText.trim() || (isError && query === searchText)) return;
+			const first = shown[0];
+			if (rowsCurrent) {
+				if (first) openDocument(first);
+				return;
+			}
+			openOnResults.current = { request, client: queryClient };
+			// Skip the typing delay: search for what's in the field now.
+			setQuery.flush();
+		} else if (event.key === "ArrowDown") {
+			openOnResults.current = null;
+			// A page of collapsed job groups has no open result links; its headings are the first stop.
+			const first =
+				resultsRef.current?.querySelector<HTMLElement>("a[href]") ??
+				resultsRef.current?.querySelector<HTMLElement>("button[aria-expanded]");
+			if (!first) return;
+			event.preventDefault();
+			first.focus();
+		} else if (event.key === "Escape") {
+			event.preventDefault();
+			openOnResults.current = null;
+			if (searchText) onSearchChange({ q: "" });
+			else event.currentTarget.blur();
+		}
+	};
 
+	return (
+		<div
+			className="mx-auto grid w-full max-w-[1180px] content-start gap-5 px-8 py-8 max-sm:px-4 max-sm:py-5"
+			style={{ paddingBottom: selecting ? selectionBarSpace : undefined }}
+		>
+			<PageHeader
+				title={<Trans>Documents</Trans>}
+				actions={
+					!firstRun && (
 						<div className="ms-auto flex flex-wrap items-center gap-2 max-sm:ms-0 max-sm:w-full">
 							<InputGroup className="w-60 max-sm:w-full">
 								<InputGroupAddon>
@@ -156,14 +335,38 @@ export function DocumentsPage({ search, onSearchChange }: DocumentsPageProps) {
 								<InputGroupInput
 									ref={searchRef}
 									type="search"
-									value={search.q}
+									// The browser's own clear button is hidden; the one below matches the app's icons.
+									className="[&::-webkit-search-cancel-button]:appearance-none"
+									value={searchText}
+									maxLength={500}
 									aria-label={t`Search documents`}
+									aria-describedby={searchHintId}
+									enterKeyHint="go"
 									placeholder={t`Search`}
-									onChange={(event) => onSearchChange({ q: event.target.value })}
+									onChange={(event) => onSearchChange({ q: event.target.value.slice(0, 500) })}
+									onKeyDown={onSearchKeyDown}
 								/>
-								<InputGroupAddon align="inline-end" className="max-sm:hidden pointer-coarse:hidden">
-									<Kbd>/</Kbd>
-								</InputGroupAddon>
+								<span id={searchHintId} className="sr-only">
+									<Trans>Enter opens the first result. Down arrow moves to the results. Escape clears.</Trans>
+								</span>
+								{searchText ? (
+									<InputGroupAddon align="inline-end">
+										<IconButton
+											icon="x"
+											size="icon-xs"
+											variant="ghost"
+											label={t`Clear search`}
+											onClick={() => {
+												onSearchChange({ q: "" });
+												searchRef.current?.focus();
+											}}
+										/>
+									</InputGroupAddon>
+								) : characterShortcuts ? (
+									<InputGroupAddon align="inline-end" className="max-sm:hidden pointer-coarse:hidden">
+										<Kbd>/</Kbd>
+									</InputGroupAddon>
+								) : null}
 							</InputGroup>
 							<div className="w-[150px]">
 								<NativeSelect
@@ -189,14 +392,50 @@ export function DocumentsPage({ search, onSearchChange }: DocumentsPageProps) {
 								</SegmentedControlItem>
 							</SegmentedControl>
 						</div>
+					)
+				}
+			>
+				{!firstRun && (
+					<>
+						<Tabs value={search.type} onValueChange={(type) => onSearchChange({ type: type as DocumentTypeFilter })}>
+							<TabsList variant="line" aria-label={t`Document type`}>
+								<TabsTrigger value="all">
+									<Trans>All</Trans>
+									<TabsCount>{i18n.number(counts.all)}</TabsCount>
+								</TabsTrigger>
+								<TabsTrigger value="resume">
+									<Trans>Resumes</Trans>
+									<TabsCount>{i18n.number(counts.resume)}</TabsCount>
+								</TabsTrigger>
+								<TabsTrigger value="letter">
+									<Trans>Letters</Trans>
+									<TabsCount>{i18n.number(counts.letter)}</TabsCount>
+								</TabsTrigger>
+							</TabsList>
+						</Tabs>
 					</>
 				)}
 			</PageHeader>
 
-			{isError && <LibraryError retrying={isFetching} onRetry={() => void refetch()} />}
+			{(isError || countsError) && (
+				<div className="grid justify-items-start gap-2">
+					<LibraryError
+						retrying={isFetching || countsFetching}
+						onRetry={() => {
+							void refetch();
+							void refetchCounts();
+						}}
+					/>
+					{filtered && (
+						<Button variant="secondary" onClick={() => onSearchChange({ q: "", tags: [], type: "all", public: false })}>
+							<Trans>Clear search and filters</Trans>
+						</Button>
+					)}
+				</div>
+			)}
 
-			{failed ? null : firstRun ? (
-				<FirstRun onChooseFile={() => openDialog("document.new", undefined)} />
+			{failed ? null : firstRun && trashCount === 0 && libraryCounts ? (
+				<FirstRun trashCount={trashCount} onFile={(file) => openDialog("document.new", { file })} />
 			) : (
 				<>
 					{(tags.length > 0 || hasPublic) && (
@@ -210,33 +449,51 @@ export function DocumentsPage({ search, onSearchChange }: DocumentsPageProps) {
 						/>
 					)}
 
-					{isPending ? (
+					{isPending || (firstRun && countsPending) || (!rowsCurrent && !isError && shown.length === 0) ? (
 						<LibrarySkeleton view={view} />
 					) : shown.length === 0 ? (
-						<div className="grid justify-items-center gap-2 py-16 text-center">
-							<Icon name="magnifying-glass" size={28} className="text-ink-3" />
-							<p className="font-semibold">
-								{search.q.trim() ? (
-									<Trans>Nothing matches “{search.q.trim()}”</Trans>
-								) : (
-									<Trans>Nothing matches these filters</Trans>
+						isError ? null : !filtered && offset === 0 ? (
+							<EmptyState
+								title={<Trans>No documents</Trans>}
+								description={
+									trashCount > 0 ? (
+										<Plural value={trashCount} one="Trash has # document." other="Trash has # documents." />
+									) : undefined
+								}
+								action={
+									<Button onClick={() => openDialog("document.new", undefined)}>
+										<Trans>New document</Trans>
+									</Button>
+								}
+							/>
+						) : emptyType ? (
+							<TypeEmpty type={emptyType} />
+						) : (
+							<div className="grid justify-items-center gap-2 py-16 text-center">
+								<Icon name="magnifying-glass" size={28} className="text-ink-3" />
+								<p className="font-display text-[22px] leading-7">
+									{search.q.trim() ? (
+										<Trans>Nothing matches “{search.q.trim()}”</Trans>
+									) : (
+										<Trans>Nothing matches these filters</Trans>
+									)}
+								</p>
+								<p className="text-sm text-ink-2">
+									<Trans>Search covers titles, tags and linked applications.</Trans>
+								</p>
+								{filtered && (
+									<Button
+										variant="secondary"
+										className="mt-2"
+										onClick={() => onSearchChange({ q: "", tags: [], type: "all", public: false })}
+									>
+										<Trans>Clear search and filters</Trans>
+									</Button>
 								)}
-							</p>
-							<p className="text-sm text-ink-2">
-								<Trans>Search covers titles, tags and linked applications.</Trans>
-							</p>
-							{filtered && (
-								<Button
-									variant="secondary"
-									className="mt-2"
-									onClick={() => onSearchChange({ q: "", tags: [], type: "all", public: false })}
-								>
-									<Trans>Clear search and filters</Trans>
-								</Button>
-							)}
-						</div>
+							</div>
+						)
 					) : view === "list" ? (
-						<table className={cn("w-full table-fixed border-collapse", viewEnter)}>
+						<table ref={resultsRef} className={cn("w-full table-fixed border-collapse", viewEnter)}>
 							<caption className="sr-only">
 								<Trans>Documents</Trans>
 							</caption>
@@ -244,10 +501,11 @@ export function DocumentsPage({ search, onSearchChange }: DocumentsPageProps) {
 								<tr className="border-b border-line text-start text-xs font-medium text-ink-3">
 									<th className="w-10 ps-3">
 										<Checkbox
+											disabled={!rowsCurrent}
 											checked={allSelected}
 											indeterminate={selecting && !allSelected}
 											onCheckedChange={(on) => selectAll(on)}
-											aria-label={t`Select all`}
+											aria-label={t`Select this page`}
 										/>
 									</th>
 									<th className="h-10 ps-3 text-start font-medium">
@@ -269,38 +527,75 @@ export function DocumentsPage({ search, onSearchChange }: DocumentsPageProps) {
 									</th>
 								</tr>
 							</thead>
-							<tbody>
-								{shown.map((document, index) => (
-									<DocumentRow
-										key={documentKey(document)}
-										document={document}
-										introIndex={intro ? index : undefined}
-										{...itemProps(document)}
-									/>
-								))}
-							</tbody>
+							{groups.map((group) => {
+								const expanded = expandedGroup(group);
+								return (
+									<tbody key={group.key}>
+										{group.kind === "application" && (
+											<GroupHeadingRow group={group} expanded={expanded} onToggle={() => toggleGroup(group)} />
+										)}
+										{expanded &&
+											group.documents.map((document) => (
+												<DocumentRow
+													key={documentKey(document)}
+													document={document}
+													introIndex={intro ? shownIndex.get(documentKey(document)) : undefined}
+													{...itemProps(document)}
+												/>
+											))}
+									</tbody>
+								);
+							})}
 						</table>
 					) : (
-						<div
-							className={cn(
-								"grid grid-cols-[repeat(auto-fill,minmax(180px,204px))] gap-x-7 gap-y-[22px] max-sm:grid-cols-2 max-sm:gap-4",
-								viewEnter,
-							)}
-						>
-							{shown.map((document, index) => (
-								<DocumentCard
-									key={documentKey(document)}
-									document={document}
-									introIndex={intro ? index : undefined}
-									{...itemProps(document)}
-								/>
-							))}
+						<div ref={resultsRef} className={cn(GRID_CLASS, viewEnter)}>
+							{groups.map((group) => {
+								const expanded = expandedGroup(group);
+								if (group.kind === "document") {
+									const document = group.documents[0];
+									return (
+										<DocumentCard
+											key={group.key}
+											document={document}
+											introIndex={intro ? shownIndex.get(documentKey(document)) : undefined}
+											{...itemProps(document)}
+										/>
+									);
+								}
+								// display: contents lets the group's heading span every column while its cards keep flowing in
+								// the library's grid with the ungrouped documents around them.
+								return (
+									<div key={group.key} className="contents">
+										<div className="col-span-full">
+											<GroupHeading group={group} expanded={expanded} onToggle={() => toggleGroup(group)} />
+										</div>
+										{expanded &&
+											group.documents.map((document) => (
+												<DocumentCard
+													key={documentKey(document)}
+													document={document}
+													introIndex={intro ? shownIndex.get(documentKey(document)) : undefined}
+													{...itemProps(document)}
+												/>
+											))}
+									</div>
+								);
+							})}
 						</div>
 					)}
 				</>
 			)}
 
+			<TrashLink />
+			<PageNavigation
+				offset={displayedOffset}
+				total={displayed?.total ?? page.total}
+				busy={isFetching || !rowsCurrent}
+				onChange={changePage}
+			/>
 			<SelectionBar
+				ref={selectionBarRef}
+				key={`selection:${filterKey}:${offset}`}
 				selection={selection}
 				allSelected={allSelected}
 				onSelectAll={() => selectAll(true)}
@@ -308,17 +603,74 @@ export function DocumentsPage({ search, onSearchChange }: DocumentsPageProps) {
 				onTags={() => setTagsFor(selection)}
 			/>
 			<DropToImport />
-			<TagsDialog documents={tagsFor} onClose={() => setTagsFor(null)} />
-			<LinkApplicationDialog document={linkFor} onClose={() => setLinkFor(null)} />
+			<TagsDialog
+				key={`tags:${filterKey}:${offset}`}
+				documents={rowsCurrent ? tagsFor : null}
+				onClose={() => setTagsFor(null)}
+			/>
+			<LinkApplicationDialog
+				key={`link:${filterKey}:${offset}`}
+				document={rowsCurrent ? linkFor : null}
+				onClose={() => setLinkFor(null)}
+			/>
 		</div>
 	);
 }
 
-const documentKey = (document: DocumentSummary) => `${document.type}:${document.id}`;
-
 const VIEW_KEY = "documents-view";
 // Longest stagger (150ms) plus the D2 entrance (200ms), with room to spare: then the intro classes come off.
 const INTRO_MS = 400;
+const GRID_CLASS =
+	"grid grid-cols-[repeat(auto-fill,minmax(180px,204px))] gap-x-7 gap-y-[22px] max-sm:grid-cols-2 max-sm:gap-4";
+
+type GroupHeadingProps = {
+	group: Extract<DocumentGroup<DocumentSummary>, { kind: "application" }>;
+	expanded: boolean;
+	onToggle: () => void;
+};
+
+/** The job a group's resume and letter share: a disclosure with the company, role, stage and document count. */
+function GroupHeading({ group, expanded, onToggle }: GroupHeadingProps) {
+	const { company, role } = group.application;
+	return (
+		<button
+			type="button"
+			aria-expanded={expanded}
+			onClick={onToggle}
+			className="flex min-h-11 w-full items-center gap-2 rounded-md px-2 text-start transition-colors duration-quick hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+		>
+			<Icon name={expanded ? "caret-down" : "caret-right"} size={16} className="shrink-0 text-ink-3" />
+			<Icon name="briefcase" size={16} className="shrink-0 text-ink-2" />
+			<span className="min-w-0 truncate text-sm font-semibold" dir="auto">
+				{company}
+			</span>
+			{role && (
+				<span className="min-w-0 truncate text-sm text-ink-2" dir="auto">
+					· {role}
+				</span>
+			)}
+			{group.closed && (
+				<span className="shrink-0 rounded-sm bg-sunken px-1.5 text-xs leading-[18px] font-medium text-ink-2">
+					<Trans>Closed</Trans>
+				</span>
+			)}
+			<span className="ms-auto shrink-0 text-xs text-ink-3">
+				<Plural value={group.documents.length} one="# document" other="# documents" />
+			</span>
+		</button>
+	);
+}
+
+/** The list view's heading, spanning every column, with the same disclosure as the grid's. */
+function GroupHeadingRow({ group, expanded, onToggle }: GroupHeadingProps) {
+	return (
+		<tr className="border-b border-line bg-sunken/40">
+			<th colSpan={6} className="p-0">
+				<GroupHeading group={group} expanded={expanded} onToggle={onToggle} />
+			</th>
+		</tr>
+	);
+}
 
 // The last view picked on this device; storage can be unavailable, and then it's the grid.
 function readStoredView(): "grid" | "list" {
@@ -337,49 +689,139 @@ function storeView(view: "grid" | "list") {
 	}
 }
 
-/** The first visit: import is the filled button here, and only here. */
-function FirstRun({ onChooseFile }: { onChooseFile: () => void }) {
+type FirstRunProps = {
+	onFile: (file: File) => void;
+	/** Everything may be in Trash (often the last document, just moved there): the way back stays in sight. */
+	trashCount: number;
+};
+
+/** The first visit: import is the filled button here, and only here. Choose a file opens the file picker itself. */
+function FirstRun({ onFile, trashCount }: FirstRunProps) {
 	const { startBlank, trySample, creating } = useStartDocument();
+	const inputRef = useRef<HTMLInputElement>(null);
 
 	return (
-		<section className="grid max-w-xl gap-4 pt-4 transition-[opacity,translate] duration-emphasized ease-enter starting:translate-y-2 starting:opacity-0">
-			<h2 className="font-display text-[26px] leading-8 font-medium">
-				<Trans>Let's start with what you have</Trans>
-			</h2>
-			<p className="leading-6 text-ink-2">
-				<Trans>
-					Import your current resume and we'll lay out every section for you to refine. Or start fresh. Start with your
-					name. Build from there.
-				</Trans>
-			</p>
-			<div className="flex flex-wrap items-center gap-3 rounded-xl border-[1.5px] border-dashed border-line-2 p-5">
-				<Icon name="file-arrow-up" size={24} className="text-ink-2" />
-				<span className="flex-1 text-sm text-ink-2">
-					<Trans>Drop a PDF, Word or JSON file</Trans>
-				</span>
-				<Button onClick={onChooseFile}>
-					<Trans>Choose a file</Trans>
-				</Button>
-			</div>
-			<div className="flex flex-wrap gap-4 text-sm">
-				<Button
-					variant="link"
-					disabled={creating}
-					className="text-ink-2 underline underline-offset-2 hover:text-ink pointer-coarse:min-h-11"
-					onClick={() => void startBlank()}
-				>
-					<Trans>Start blank</Trans>
-				</Button>
-				<Button
-					variant="link"
-					disabled={creating}
-					className="text-ink-2 underline underline-offset-2 hover:text-ink pointer-coarse:min-h-11"
-					onClick={() => void trySample()}
-				>
-					<Trans>Try a sample</Trans>
-				</Button>
-			</div>
+		<section className="max-w-xl pt-4 transition-[opacity,translate] duration-emphasized ease-enter starting:translate-y-2 starting:opacity-0">
+			<input
+				ref={inputRef}
+				type="file"
+				accept={IMPORT_ACCEPT}
+				className="hidden"
+				aria-label={t`Choose a file to import`}
+				onChange={(event) => {
+					const file = event.target.files?.[0];
+					event.target.value = "";
+					if (file) onFile(file);
+				}}
+			/>
+			<EmptyState
+				title={<Trans>Let's start with what you have</Trans>}
+				description={
+					// Touch can't drop files, so it reads "Choose" there.
+					<>
+						<span className="pointer-coarse:hidden">
+							<Trans>
+								Import your current resume and we'll lay out every section for you to refine, or start fresh. Drop a
+								PDF, Word or JSON file anywhere here.
+							</Trans>
+						</span>
+						<span className="hidden pointer-coarse:inline">
+							<Trans>
+								Import your current resume and we'll lay out every section for you to refine, or start fresh. Choose a
+								PDF, Word or JSON file.
+							</Trans>
+						</span>
+					</>
+				}
+				action={
+					<Button onClick={() => inputRef.current?.click()}>
+						<Icon name="file-arrow-up" size={18} />
+						<Trans>Choose a file</Trans>
+					</Button>
+				}
+				secondary={
+					<>
+						{/* A peer of importing, not a footnote: many people start from nothing. */}
+						<Button variant="secondary" disabled={creating} onClick={() => void startBlank()}>
+							<Trans>Start blank</Trans>
+						</Button>
+						<Button
+							variant="link"
+							disabled={creating}
+							className="text-ink-2 underline underline-offset-2 hover:text-ink pointer-coarse:min-h-11"
+							onClick={() => void trySample()}
+						>
+							<Trans>Try a sample</Trans>
+						</Button>
+					</>
+				}
+			/>
+			{trashCount > 0 && (
+				<p className="mt-4 flex flex-wrap items-center gap-x-2 text-sm text-ink-2">
+					<Plural value={trashCount} one="Trash has # document." other="Trash has # documents." />
+					<Link to="/dashboard/trash" className="font-medium underline underline-offset-2">
+						<Trans>Open Trash</Trans>
+					</Link>
+				</p>
+			)}
 		</section>
+	);
+}
+
+/** Phones have no sidebar, so Trash is a row at the end of the library while it holds anything, as in the app. */
+function TrashLink() {
+	const { data: counts } = useQuery(orpc.documents.counts.queryOptions());
+	const trashCount = counts?.trash ?? 0;
+	if (!trashCount) return null;
+
+	return (
+		<Link
+			to="/dashboard/trash"
+			className="flex h-14 items-center gap-3 rounded-lg border border-line bg-surface px-3.5 transition-colors duration-quick ease-enter active:bg-press sm:hidden"
+		>
+			<Icon name="trash" size={22} className="text-ink-2" />
+			<span className="grid flex-1">
+				<span className="font-medium">
+					<Trans>Trash</Trans>
+				</span>
+				<span className="text-xs text-ink-3">
+					<Plural value={trashCount} one="# document" other="# documents" />
+				</span>
+			</span>
+			<Icon name="caret-right" size={22} className="text-ink-3" />
+		</Link>
+	);
+}
+
+/** Resumes or Letters with none of that kind yet: the way to make the first one. */
+function TypeEmpty({ type }: { type: "resume" | "letter" }) {
+	const openDialog = useDialogStore((state) => state.openDialog);
+	const { newLetter, creating } = useStartDocument();
+
+	return type === "letter" ? (
+		<EmptyState
+			className="mt-4"
+			title={<Trans>No cover letters yet</Trans>}
+			description={<Trans>Write one for a job, or start from your latest resume.</Trans>}
+			action={
+				<Button disabled={creating} onClick={() => void newLetter()}>
+					<Icon name="envelope-simple" size={18} />
+					<Trans>New cover letter</Trans>
+				</Button>
+			}
+		/>
+	) : (
+		<EmptyState
+			className="mt-4"
+			title={<Trans>No resumes yet</Trans>}
+			description={<Trans>Import the one you have, or start blank.</Trans>}
+			action={
+				<Button onClick={() => openDialog("document.new", undefined)}>
+					<Icon name="plus" size={18} />
+					<Trans>New resume</Trans>
+				</Button>
+			}
+		/>
 	);
 }
 
@@ -423,7 +865,7 @@ function TagFilter({ tags, active, onChange, showPublic, publicOnly, onPublicCha
 						key={tag}
 						type="button"
 						aria-pressed={isActive}
-						onClick={() => onChange(isActive ? active.filter((known) => known !== tag) : [...active, tag])}
+						onClick={() => onChange(isActive ? active.filter((known) => known !== tag) : [...active, tag].slice(0, 20))}
 						className={chipClassName(isActive)}
 					>
 						#{tag}
@@ -435,6 +877,7 @@ function TagFilter({ tags, active, onChange, showPublic, publicOnly, onPublicCha
 }
 
 type SelectionBarProps = {
+	ref: Ref<HTMLDivElement>;
 	selection: DocumentSummary[];
 	allSelected: boolean;
 	onSelectAll: () => void;
@@ -442,12 +885,26 @@ type SelectionBarProps = {
 	onTags: () => void;
 };
 
-/** Floats over the library while documents are selected: tags, visibility, locking and Trash for all of them. */
-function SelectionBar({ selection, allSelected, onSelectAll, onClear, onTags }: SelectionBarProps) {
+/**
+ * Floats over the library while documents are selected: tags, visibility, locking and Trash for all of them. On phones
+ * it sits above the tab bar, as the Applications list's bar does.
+ */
+function SelectionBar({ ref, selection, allSelected, onSelectAll, onClear, onTags }: SelectionBarProps) {
+	const lettersOnly = selection.length > 0 && selection.every((document) => document.type === "letter");
 	const batch = useBatchActions();
 	const [busy, setBusy] = useState(false);
 	const count = selection.length;
+	// Toasts sit bottom centre, where this bar is: lift them above it while it's on screen, so a result never hides it.
+	useEffect(() => {
+		const root = document.documentElement;
+		const phone = window.matchMedia("(max-width: 639px)").matches;
+		root.style.setProperty("--toast-bottom", phone ? "calc(8.25rem + env(safe-area-inset-bottom))" : "5.5rem");
+		return () => {
+			root.style.removeProperty("--toast-bottom");
+		};
+	}, []);
 	const run = async (action: () => Promise<unknown>, { clear = false } = {}) => {
+		if (!selection.length) return;
 		setBusy(true);
 		try {
 			await action();
@@ -459,61 +916,66 @@ function SelectionBar({ selection, allSelected, onSelectAll, onClear, onTags }: 
 
 	return (
 		<div
+			ref={ref}
 			role="toolbar"
 			aria-label={t`Selected documents`}
 			aria-hidden={count === 0}
 			inert={count === 0}
 			className={cn(
-				"fixed inset-x-0 bottom-6 z-30 mx-auto flex w-fit max-w-[calc(100vw-32px)] items-center gap-1 rounded-xl border border-line bg-raised p-1.5 shadow-e3 transition-[opacity,translate] duration-standard ease-enter max-sm:bottom-4",
+				"fixed inset-x-0 bottom-6 z-30 mx-auto flex w-fit max-w-[calc(100vw-32px)] items-center gap-1 rounded-xl border border-line bg-raised p-1.5 shadow-e3 transition-[opacity,translate] duration-standard ease-enter max-sm:bottom-[calc(69px+env(safe-area-inset-bottom))]",
 				count === 0 && "pointer-events-none translate-y-2 opacity-0",
 			)}
 		>
 			<span className="px-2 text-sm font-semibold whitespace-nowrap" aria-live="polite">
-				<Trans>{count} selected</Trans>
+				<Trans>{ph({ count: i18n.number(count) })} selected</Trans>
 			</span>
 			{!allSelected && (
 				<Button variant="ghost" size="sm" onClick={onSelectAll} className="max-sm:hidden">
-					<Trans>Select all</Trans>
+					<Trans>Select this page</Trans>
 				</Button>
 			)}
 			<Button variant="ghost" size="sm" disabled={busy} onClick={onTags}>
 				<Icon name="tag" />
 				<span className="max-sm:sr-only">
-					<Trans>Tags</Trans>
+					<Trans>Tags…</Trans>
 				</span>
 			</Button>
 			<DropdownMenu>
 				<DropdownMenuTrigger
 					render={
 						<Button variant="ghost" size="sm" disabled={busy}>
-							<Icon name="globe" />
-							<span className="max-sm:sr-only">
-								<Trans>Sharing</Trans>
-							</span>
+							<Icon name={lettersOnly ? "lock" : "globe"} />
+							<span className="max-sm:sr-only">{lettersOnly ? <Trans>Editing</Trans> : <Trans>Sharing</Trans>}</span>
 							<Icon name="caret-down" size={14} />
 						</Button>
 					}
 				/>
 				<DropdownMenuContent side="top" align="center" className="w-48">
-					<DropdownMenuItem onClick={() => void run(() => batch.setPublic(selection, true))}>
-						<Icon name="globe" />
-						<Trans>Make public</Trans>
-					</DropdownMenuItem>
-					<DropdownMenuItem onClick={() => void run(() => batch.setPublic(selection, false))}>
-						<Icon name="eye-slash" />
-						<Trans>Make private</Trans>
-					</DropdownMenuItem>
-					<DropdownMenuSeparator />
+					{/* Letters have no public link, so a letters-only selection is offered locking alone. */}
+					{lettersOnly ? null : (
+						<>
+							<DropdownMenuItem onClick={() => void run(() => batch.setPublic(selection, true))}>
+								<Icon name="globe" />
+								<Trans>Make public</Trans>
+							</DropdownMenuItem>
+							<DropdownMenuItem onClick={() => void run(() => batch.setPublic(selection, false))}>
+								<Icon name="eye-slash" />
+								<Trans>Make private</Trans>
+							</DropdownMenuItem>
+							<DropdownMenuSeparator />
+						</>
+					)}
 					<DropdownMenuItem onClick={() => void run(() => batch.setLocked(selection, true))}>
 						<Icon name="lock" />
 						<Trans>Lock editing</Trans>
 					</DropdownMenuItem>
 					<DropdownMenuItem onClick={() => void run(() => batch.setLocked(selection, false))}>
 						<Icon name="lock-open" />
-						<Trans>Unlock</Trans>
+						<Trans>Unlock editing</Trans>
 					</DropdownMenuItem>
 				</DropdownMenuContent>
 			</DropdownMenu>
+			<IconButton icon="x" size="icon-sm" label={t`Clear selection`} className="text-ink-2" onClick={onClear} />
 			<Button
 				variant="ghost"
 				size="sm"
@@ -526,12 +988,11 @@ function SelectionBar({ selection, allSelected, onSelectAll, onClear, onTags }: 
 					<Trans>Move to Trash</Trans>
 				</span>
 			</Button>
-			<IconButton icon="x" size="icon-sm" label={t`Clear selection`} className="text-ink-2" onClick={onClear} />
 		</div>
 	);
 }
 
-function LibrarySkeleton({ view }: { view: "grid" | "list" }) {
+export function LibrarySkeleton({ view }: { view: "grid" | "list" }) {
 	if (view === "list") {
 		return (
 			<div className="grid">
@@ -556,7 +1017,7 @@ function LibrarySkeleton({ view }: { view: "grid" | "list" }) {
 	);
 }
 
-/** A file dragged anywhere over the page shows the drop target, and dropping it starts the import. */
+/** A file dragged anywhere over the page shows the drop target, and dropping it opens import confirmation. */
 function DropToImport() {
 	const openDialog = useDialogStore((state) => state.openDialog);
 	const [dragging, setDragging] = useState(false);

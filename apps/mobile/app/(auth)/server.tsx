@@ -2,13 +2,13 @@ import type { ImperativeRouter } from "expo-router";
 import { useLingui } from "@lingui/react/macro";
 import { useRouter, Stack } from "expo-router";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { ActivityIndicator, ScrollView, View } from "react-native";
-import { KeyboardStickyView } from "react-native-keyboard-controller";
+import { ActivityIndicator, View, useWindowDimensions } from "react-native";
+import { KeyboardAwareScrollView, KeyboardStickyView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { hostOf } from "@/auth/auth-header";
 import { serverErrorMessage } from "@/auth/messages";
 import { discover, isAllowedServer, ServerError, toOrigin } from "@/auth/oauth";
-import { DEFAULT_SERVER, useSession } from "@/auth/session";
+import { useSession } from "@/auth/session";
 import { routes } from "@/routes";
 import { Button, Screen, Text, TextField, useTheme } from "@/ui";
 
@@ -26,12 +26,11 @@ const checkDelay = 600;
 export default function CustomServer() {
 	const router = useRouter();
 	const { t, i18n } = useLingui();
-	const { colors, space } = useTheme();
+	const { colors, size, space } = useTheme();
 	const insets = useSafeAreaInsets();
+	const stacked = useWindowDimensions().fontScale > 1.3;
 	const { server } = useSession();
-	const [address, setAddress] = useState(
-		server === DEFAULT_SERVER ? "" : server.startsWith("http:") ? server : hostOf(server),
-	);
+	const [address, setAddress] = useState(server.startsWith("http:") ? server : hostOf(server));
 	const [check, setCheck] = useState<Check>({ state: "idle" });
 	const latest = useRef(0);
 
@@ -71,9 +70,14 @@ export default function CustomServer() {
 	const ready = check.state === "ok";
 
 	return (
-		<Screen scroll={false} edges={["bottom"]}>
+		<Screen
+			scroll={false}
+			edges={["bottom"]}
+			contentStyle={{ width: "100%", maxWidth: size.panel, alignSelf: "center", paddingBottom: 0 }}
+		>
 			<Stack.Screen options={{ headerShown: true, title: t`Another server`, headerBackTitle: t`Back` }} />
-			<ScrollView
+			<KeyboardAwareScrollView
+				extraKeyboardSpace={-insets.bottom}
 				style={{ flex: 1 }}
 				contentInsetAdjustmentBehavior="automatic"
 				contentContainerStyle={{ gap: space.s3 }}
@@ -102,19 +106,20 @@ export default function CustomServer() {
 				<Text variant="callout" color="ink3">
 					{t`Enter the address you open Reactive Resume at in a browser. The app checks it's a Reactive Resume server that allows app sign-in before you continue.`}
 				</Text>
-			</ScrollView>
-			<KeyboardStickyView offset={{ opened: insets.bottom - space.s2 }}>
-				<View style={{ flexDirection: "row", gap: space.s2, paddingTop: space.s2 }}>
+			</KeyboardAwareScrollView>
+			<KeyboardStickyView offset={{ opened: insets.bottom }} style={{ backgroundColor: colors.bg }}>
+				<View style={{ flexDirection: stacked ? "column" : "row", gap: space.s2, paddingVertical: space.s2 }}>
 					{check.state === "error" ? (
 						<Button
 							label={t`Try again`}
 							variant="secondary"
 							size="lg"
 							icon="arrow-clockwise"
+							fullWidth={stacked}
 							onPress={() => void run(address)}
 						/>
 					) : null}
-					<View style={{ flex: 1 }}>
+					<View style={{ flex: stacked ? undefined : 1 }}>
 						<Button
 							label={t`Continue`}
 							size="lg"

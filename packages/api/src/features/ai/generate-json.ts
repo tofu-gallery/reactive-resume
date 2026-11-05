@@ -36,16 +36,19 @@ export async function generateJson<T>(
 	{ system, prompt }: GenerateJsonPrompt,
 	schema: z.ZodType<T>,
 	signal?: AbortSignal,
+	maxRetries?: number,
 ): Promise<T> {
 	const { text } = await generateText({
 		model,
+		...(maxRetries === undefined ? {} : { maxRetries }),
 		abortSignal: aiDeadline(signal),
 		system: `${safetySystemPrompt}\n\n${system ?? ""}`,
 		messages: [{ role: "user", content: prompt }],
 	});
 
-	const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-	const candidate = fenced?.[1] ?? text;
+	const fenceStart = text.indexOf("```");
+	const fenceEnd = fenceStart === -1 ? -1 : text.indexOf("```", fenceStart + 3);
+	const candidate = fenceEnd === -1 ? text : text.slice(fenceStart + 3, fenceEnd);
 
 	const start = candidate.indexOf("{");
 	const end = candidate.lastIndexOf("}");

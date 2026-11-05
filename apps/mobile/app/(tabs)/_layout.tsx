@@ -3,7 +3,6 @@ import { useNetworkState } from "expo-network";
 import { useRouter } from "expo-router";
 import { Tabs } from "expo-router/tabs";
 import { View } from "react-native";
-import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import {
 	SafeAreaInsetsContext,
 	SafeAreaProvider,
@@ -15,7 +14,9 @@ import { AppStrip, BannerAbove } from "@/shell/app-banner";
 import { AppSidebar, PhoneTabBar } from "@/shell/app-tabs";
 import { useKeyCommands } from "@/shell/key-commands";
 import { useIsTablet } from "@/shell/use-is-tablet";
+import { useNewAction } from "@/shell/use-new-action";
 import { useReducedMotion, useTheme } from "@/ui";
+import { KeyboardFrame } from "@/ui/keyboard";
 
 /**
  * Five tabs: Documents, Applications, the raised "+" (opens New as a modal), Career, Settings. Phone: the bottom tab
@@ -25,6 +26,7 @@ import { useReducedMotion, useTheme } from "@/ui";
 export default function TabsLayout() {
 	const router = useRouter();
 	const { t } = useLingui();
+	const openNew = useNewAction();
 	const tablet = useIsTablet();
 	const insets = useSafeAreaInsets();
 	const network = useNetworkState();
@@ -34,7 +36,7 @@ export default function TabsLayout() {
 	useKeyCommands(
 		[
 			{ id: "search", input: "k", title: t`Search`, run: () => router.push(routes.search()) },
-			{ id: "new", input: "n", title: t`New`, run: () => router.push(routes.new()) },
+			{ id: "new", input: "n", title: t`New`, run: openNew },
 		],
 		"global",
 	);
@@ -53,7 +55,7 @@ export default function TabsLayout() {
 			{/* Under a banner the status bar is already cleared, so the tabs' headers must not pad it again. */}
 			<SafeAreaInsetsContext value={offline ? { ...insets, top: 0 } : insets}>
 				<BannerAbove value={offline}>
-					<KeyboardAvoidingView behavior="padding" automaticOffset style={{ flex: 1 }}>
+					<KeyboardFrame behavior="padding" automaticOffset style={{ flex: 1 }}>
 						<SafeAreaView edges={["left", "right"]} style={{ flex: 1 }}>
 							<SafeAreaProvider>
 								<Tabs
@@ -77,7 +79,7 @@ export default function TabsLayout() {
 										listeners={{
 											tabPress: (event) => {
 												event.preventDefault();
-												router.push(routes.new());
+												openNew();
 											},
 										}}
 									/>
@@ -86,7 +88,7 @@ export default function TabsLayout() {
 								</Tabs>
 							</SafeAreaProvider>
 						</SafeAreaView>
-					</KeyboardAvoidingView>
+					</KeyboardFrame>
 				</BannerAbove>
 			</SafeAreaInsetsContext>
 		</View>

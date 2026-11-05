@@ -1,18 +1,33 @@
 import type { RouterOutput } from "@/api/client";
+import type { PostingCapture } from "@reactive-resume/schema/applications/capture";
+import type { ApplicationClosedReason } from "@reactive-resume/schema/applications/data";
 import { useLingui } from "@lingui/react/macro";
 import { ORPCError } from "@orpc/client";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
-import { View } from "react-native";
+import { Platform, View } from "react-native";
+import { supportsNativeWebSearch } from "@reactive-resume/ai/types";
+import { readPastedPostingHeader } from "@reactive-resume/import/job-posting";
+import { postingReadReceipt } from "@reactive-resume/schema/applications/posting-source";
+import { fromZonedDateTime } from "@reactive-resume/utils/timezone";
 import { parseDateOnly } from "./date";
 import { applicationError } from "./error";
+import { LaneNotice } from "./lane-notice";
+import { useApplicationLanes } from "./lane-queries";
+import { getLaneLabel, laneInput, resolveLane } from "./lanes";
+import { PriorNoResponse } from "./prior-no-response";
 import { useApplicationMutations } from "./queries";
-import { getStageLabel } from "./stages";
+import { CLOSED_REASONS, getClosedReasonLabel } from "./stages";
 import { client, orpc } from "@/api/client";
-import { getServer, useSession } from "@/auth/session";
+import { getAccountScope, getServer, useSession } from "@/auth/session";
 import { AIProviderSetupSheet, useHasAIProvider } from "@/features/ai/providers";
+import { WebAccessAttention, webSearchFailure } from "@/features/ai/web-access";
 import { WallClockField } from "@/features/application-detail/date-field";
+import { useNow, useUserTime } from "@/features/application-detail/hooks";
+import { copyForJob } from "@/features/documents/copy-for-job";
+import { defaultCopySource } from "@/features/documents/filter";
+import { useNewDocuments } from "@/features/documents/new-documents";
 import { routes } from "@/routes";
 import {
 	Banner,
@@ -26,11 +41,17 @@ import {
 	Text,
 	TextArea,
 	TextField,
+	showToast,
 	useTheme,
 } from "@/ui";
 
 type ParsedPosting = RouterOutput["applications"]["ai"]["parsePosting"];
-type AddApplicationSheetProps = { onClose: () => void };
+type AddApplicationSheetProps = {
+	onClose: () => void;
+	initialCapture?: PostingCapture | undefined;
+	/** Opened to pick a job inside another flow (Copy for a job, Link to application): returns the new job there. */
+	onAdded?: ((id: string) => void) | undefined;
+};
 const isLink = (value: string) => {
 	try {
 		const url = new URL(value.trim());
@@ -45,44 +66,74 @@ const today = () => {
 };
 
 /** Mounted until an explicit close/discard; unmounting cancels transient posting requests. */
-export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
+export function AddApplicationSheet({ onClose, initialCapture, onAdded }: AddApplicationSheetProps) {
+	const now = useNow();
 	const router = useRouter();
-	const { t } = useLingui();
+	const queryClient = useQueryClient();
+	const { t, i18n } = useLingui();
+	const { timeZone } = useUserTime();
 	const { space } = useTheme();
 	const session = useSession();
+	const accountScope = getAccountScope();
 	const providers = useHasAIProvider();
 	const documentsOptions = orpc.documents.list.queryOptions({ input: { trashed: false } });
 	const documents = useQuery({ ...documentsOptions, queryKey: [...documentsOptions.queryKey, session.server] });
 	const webOptions = orpc.webAccess.status.queryOptions();
 	const web = useQuery({ ...webOptions, queryKey: [...webOptions.queryKey, session.server] });
-	const { create } = useApplicationMutations();
-	const [mode, setMode] = useState<"link" | "text">("link");
-	const [input, setInput] = useState("");
+	const { create, update } = useApplicationMutations();
+	const lanes = useApplicationLanes();
+	const [mode, setMode] = useState<"link" | "text">(initialCapture?.description ? "text" : "link");
+	const [input, setInput] = useState(initialCapture?.description || initialCapture?.url || "");
 	const [query, setQuery] = useState("");
 	const [results, setResults] = useState<RouterOutput["applications"]["ai"]["searchPostings"] | null>(null);
 	const [parsed, setParsed] = useState<ParsedPosting | null>(null);
-	const [company, setCompany] = useState("");
-	const [role, setRole] = useState("");
-	const [location, setLocation] = useState("");
+	const [company, setCompany] = useState(initialCapture?.company ?? "");
+	const [role, setRole] = useState(initialCapture?.role ?? "");
+	const [location, setLocation] = useState(initialCapture?.location ?? "");
 	const [salary, setSalary] = useState("");
+	const authored = useRef(new Set<"role" | "company" | "location" | "salary">());
 	const [source, setSource] = useState("");
-	const [sourceUrl, setSourceUrl] = useState("");
-	const [description, setDescription] = useState("");
-	const [stage, setStage] = useState<"saved" | "applied" | "interview">("saved");
+	const [sourceUrl, setSourceUrl] = useState(initialCapture?.url ?? "");
+	const [description, setDescription] = useState(initialCapture?.description ?? "");
+	const [laneId, setLaneId] = useState("");
+	const selectedLane = lanes.active.find((item) => item.id === laneId);
+	const lane = selectedLane ?? resolveLane(lanes.lanes, { status: "saved" });
+	const laneAvailable = !laneId || !!selectedLane;
+	const stage = lane.category;
+	const [reason, setReason] = useState<ApplicationClosedReason>("not-selected");
+	const [priorToOpen, setPriorToOpen] = useState<string | null>(null);
 	const [initialDate] = useState(today);
 	const [stageDate, setStageDate] = useState(initialDate);
-	const [resumeId, setResumeId] = useState("");
+	// A saved job starts on the most recently edited base resume; a submitted one names what was sent, so it starts empty.
+	const [resumeChoice, setResumeId] = useState<string | null>(null);
+	const resumes = (documents.data ?? []).filter((doc) => doc.type === "resume");
+	const resumeId = resumeChoice ?? (stage === "saved" ? (defaultCopySource(resumes)?.id ?? "") : "");
 	const [letterId, setLetterId] = useState("");
 	const [tags, setTags] = useState<string[]>([]);
 	const [followUpDate, setFollowUpDate] = useState("");
 	const [followUpNote, setFollowUpNote] = useState("");
 	const [notes, setNotes] = useState("");
 	const [setup, setSetup] = useState(false);
-	const [review, setReview] = useState(false);
+	const [review, setReview] = useState(!!initialCapture?.description);
 	const [detailsOpen, setDetailsOpen] = useState(false);
 	const [confirmSearchExit, setConfirmSearchExit] = useState(false);
 	const [busy, setBusy] = useState<"read" | "fill" | "search" | "save" | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	const [searchFailure, setSearchFailure] = useState<string>();
+	const nativeSearchFailure = searchFailure ?? web.data?.testResult?.search?.error;
+	const nativeOptions = orpc.ai.capabilities.queryOptions();
+	const nativeCapabilities = useQuery({
+		...nativeOptions,
+		queryKey: [...nativeOptions.queryKey, session.server],
+		enabled: nativeSearchFailure === "auth" || nativeSearchFailure === "quota",
+	});
+	const nativeSearchProvider =
+		providers.defaultProvider &&
+		supportsNativeWebSearch(providers.defaultProvider) &&
+		nativeCapabilities.data?.nativeWebSearch === 1
+			? providers.defaultProvider
+			: undefined;
+	const nativeSearchLabel = nativeSearchProvider?.label ?? "";
 	const lock = useRef(false);
 	const active = useRef(true);
 	const controller = useRef<AbortController | null>(null);
@@ -99,12 +150,16 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 		lock.current = true;
 		setBusy(action);
 		setError(null);
+		setSearchFailure(undefined);
 		const request = new AbortController();
 		controller.current = request;
 		try {
 			await work(request.signal);
 		} catch (cause) {
-			if (active.current && !request.signal.aborted && getServer() === session.server) {
+			if (current(request.signal)) {
+				const failure = action === "search" ? webSearchFailure(cause) : undefined;
+				setSearchFailure(failure);
+				if (action === "search") void web.refetch();
 				if (action === "read" && mode === "link" && cause instanceof ORPCError && cause.code === "POSTING_UNREADABLE") {
 					setSourceUrl(input.trim());
 					setMode("text");
@@ -113,9 +168,11 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 					setParsed(null);
 				}
 				setError(
-					action === "save"
-						? t`Couldn't confirm the save. Check Applications before retrying to avoid a duplicate.`
-						: applicationError(cause),
+					failure
+						? null
+						: action === "save"
+							? t`Couldn't confirm the save. Check Applications before retrying to avoid a duplicate.`
+							: applicationError(cause),
 				);
 			}
 		} finally {
@@ -123,16 +180,30 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 			if (active.current) setBusy(null);
 		}
 	};
-	const current = (signal: AbortSignal) => active.current && !signal.aborted && getServer() === session.server;
-	const read = () =>
+	const current = (signal: AbortSignal) =>
+		active.current && !signal.aborted && getServer() === session.server && getAccountScope() === accountScope;
+	const read = (useAI = false) =>
 		void run("read", async (signal) => {
-			const result = await client.applications.ai.parsePosting({ input: input.trim() }, { signal });
 			if (!current(signal)) return;
+			const result = await client.applications.ai.parsePosting(
+				{ input: input.trim(), useAI },
+				{ signal, context: { scope: accountScope ?? undefined } },
+			);
+			if (!current(signal)) return;
+			// Read without AI, pasted text fills nothing: take what its first line names ("Role — Company (City)"), as the web
+			// dialog does. The person reviews every field before saving.
+			const guess = mode === "text" && result.filledBy === "none" ? readPastedPostingHeader(input) : null;
+			const fields = {
+				company: result.company || (guess?.company ?? ""),
+				role: result.role || (guess?.role ?? ""),
+				location: result.location || (guess?.location ?? ""),
+				salary: result.salary || (guess?.salary ?? ""),
+			};
 			setParsed(result);
-			setCompany((value) => value || result.company);
-			setRole((value) => value || result.role);
-			setLocation((value) => value || result.location);
-			setSalary((value) => value || result.salary);
+			setCompany((value) => (authored.current.has("company") ? value : fields.company));
+			setRole((value) => (authored.current.has("role") ? value : fields.role));
+			setLocation((value) => (authored.current.has("location") ? value : fields.location));
+			setSalary((value) => (authored.current.has("salary") ? value : fields.salary));
 			setSourceUrl(result.sourceUrl ?? (mode === "link" ? input.trim() : sourceUrl));
 			setDescription(result.jobDescription);
 			setReview(true);
@@ -141,16 +212,23 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 		void run("fill", async (signal) => {
 			const result = await client.applications.ai.autofill({ jobDescription: description.trim() }, { signal });
 			if (!current(signal)) return;
-			setCompany((value) => value || result.company);
-			setRole((value) => value || result.role);
-			setLocation((value) => value || result.location);
-			setSalary((value) => value || result.salary);
+			setCompany((value) => (authored.current.has("company") ? value : result.company));
+			setRole((value) => (authored.current.has("role") ? value : result.role));
+			setLocation((value) => (authored.current.has("location") ? value : result.location));
+			setSalary((value) => (authored.current.has("salary") ? value : result.salary));
 		});
-	const search = () =>
+	const search = (aiProviderId?: string) =>
 		void run("search", async (signal) => {
 			setResults(null);
-			const result = await client.applications.ai.searchPostings({ query: query.trim() }, { signal });
-			if (current(signal)) setResults(result);
+			if (!current(signal)) return;
+			const result = await client.applications.ai.searchPostings(
+				{ query: query.trim(), ...(aiProviderId ? { aiProviderId } : {}) },
+				{ signal, context: { scope: accountScope ?? undefined } },
+			);
+			if (current(signal)) {
+				setResults(result);
+				void web.refetch();
+			}
 		});
 	const changeInput = (value: string) => {
 		setInput(value);
@@ -158,43 +236,102 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 		setError(null);
 		setDescription(mode === "text" ? value : "");
 	};
+	const duplicateOptions = orpc.applications.findPosting.queryOptions({ input: { sourceUrl: sourceUrl.trim() } });
+	const duplicate = useQuery({
+		...duplicateOptions,
+		select: (data) => data.application,
+		queryKey: [...duplicateOptions.queryKey, session.server],
+		enabled: !!sourceUrl.trim(),
+		retry: false,
+	});
 	const validDate = stage === "saved" || !!parseDateOnly(stageDate);
 	const validFollowUp = !followUpDate || !!parseDateOnly(followUpDate);
 	const validUrl = !sourceUrl.trim() || isLink(sourceUrl);
-	const ready = company.trim() && role.trim() && validDate && validFollowUp && validUrl && !busy;
-	const save = () =>
+	const ready =
+		company.trim() &&
+		role.trim() &&
+		validDate &&
+		validFollowUp &&
+		validUrl &&
+		lanes.ready &&
+		laneAvailable &&
+		!busy &&
+		(!sourceUrl.trim() || !duplicate.isPending);
+	const receipt = postingReadReceipt(parsed?.postingSource, i18n.locale, now.getTime());
+	const readAt = receipt?.readAt;
+	const sourceHost = receipt?.sourceHost ?? t`the posting page`;
+	const clipped = !!initialCapture?.truncated || !!parsed?.postingSource.truncated || description.length > 20_000;
+	const postingSource: ParsedPosting["postingSource"] | null = description
+		? {
+				...(parsed?.postingSource ?? { method: "paste", format: "text", completeness: "unknown" }),
+				truncated: clipped,
+				...(clipped ? { completeness: "incomplete" } : {}),
+			}
+		: null;
+	const save = (prepare = false) =>
 		void run("save", async (signal) => {
-			if (!ready) return;
+			if (!ready || duplicate.data || !current(signal)) return;
 			const text = description.slice(0, 20_000);
-			const clipped = description.length > 20_000;
+			const followUpAt = followUpDate ? fromZonedDateTime(followUpDate, "09:00", timeZone) : null;
+			if (followUpDate && !followUpAt)
+				throw new Error(t`This date or time does not exist in your timezone. Choose another time.`);
 			const id = await create.mutateAsync({
 				company: company.trim(),
 				role: role.trim(),
-				status: stage,
+				...laneInput(lane, lanes.supported),
+				...(stage === "closed" ? { closedReason: lane.closedReason ?? reason } : {}),
 				location: location.trim() || null,
 				salary: salary.trim() || null,
 				source: source.trim() || null,
 				sourceUrl: sourceUrl.trim() || null,
 				jobDescription: text || null,
 				requirements: parsed?.requirements ?? [],
-				postingSource:
-					(parsed
-						? { ...parsed.postingSource, ...(clipped ? { truncated: true, completeness: "incomplete" as const } : {}) }
-						: null) ??
-					(text
-						? { method: "paste", format: "text", truncated: clipped, completeness: clipped ? "incomplete" : "unknown" }
-						: null),
+				postingSource,
 				...(stage !== "saved" ? { stageEnteredAt: stageDate } : {}),
 				resumeId: resumeId || null,
-				coverLetterId: stage !== "saved" ? letterId || null : null,
+				coverLetterId: letterId || null,
 				tags,
 				notes: notes || null,
-				followUpAt: followUpDate ? new Date(`${followUpDate}T12:00:00`) : null,
+				followUpAt,
+				followUpDateOnly: false,
 				followUpNote: followUpNote.trim() || null,
 			});
 			if (!current(signal)) return;
+			if (prepare && !onAdded) {
+				const source = resumes.find((resume) => resume.id === resumeId);
+				const chooseCopy = () => {
+					if (!current(signal)) return;
+					onClose();
+					router.push({
+						pathname: routes.new(),
+						params: { step: "copy", applicationId: id, ...(source ? { sourceResumeId: source.id } : {}) },
+					});
+				};
+				if (!source) return chooseCopy();
+				const base = source.name.split(" — ")[0] ?? source.name;
+				let copyId: string;
+				try {
+					copyId = await copyForJob(
+						{ resumeId: source.id, applicationId: id, name: `${base} — ${company.trim()}`.slice(0, 100) },
+						signal,
+					);
+				} catch {
+					if (!current(signal)) return;
+					showToast({ message: t`Couldn't copy the resume. Choose it again to prepare it.` });
+					chooseCopy();
+					return;
+				}
+				if (!current(signal)) return;
+				void queryClient.invalidateQueries({ queryKey: orpc.documents.key() });
+				useNewDocuments.getState().markOpened({ id: copyId, type: "resume" });
+				onClose();
+				router.push(routes.builder(copyId));
+				if (providers.hasAIProvider) router.push({ pathname: routes.assistant(copyId), params: { prepare: "1" } });
+				return;
+			}
 			onClose();
-			router.push(routes.applicationDetails(id));
+			if (onAdded) onAdded(id);
+			else router.push(routes.applicationDetails(id));
 		});
 	const dirty = !!(
 		input ||
@@ -207,9 +344,9 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 		source ||
 		sourceUrl ||
 		description ||
-		stage !== "saved" ||
+		laneId !== "" ||
 		stageDate !== initialDate ||
-		resumeId ||
+		resumeChoice ||
 		letterId ||
 		tags.length ||
 		followUpDate ||
@@ -232,7 +369,26 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 				footer={
 					<>
 						{review ? (
-							<Button label={t`Save job`} fullWidth loading={busy === "save"} disabled={!ready} onPress={save} />
+							<>
+								<Button
+									label={stage === "saved" ? t`Save job` : t`Record application`}
+									variant={onAdded || (stage !== "saved" && resumeId) ? "primary" : "secondary"}
+									fullWidth
+									loading={busy === "save"}
+									disabled={!ready || !!duplicate.data}
+									onPress={() => save()}
+								/>
+								{!onAdded ? (
+									<Button
+										label={t`Save and prepare resume`}
+										variant={stage !== "saved" && resumeId ? "secondary" : "primary"}
+										fullWidth
+										loading={busy === "save"}
+										disabled={!ready || !!duplicate.data}
+										onPress={() => save(true)}
+									/>
+								) : null}
+							</>
 						) : null}
 						{busy === "read" || busy === "search" || busy === "fill" ? (
 							<Button label={t`Cancel request`} variant="ghost" onPress={() => controller.current?.abort()} />
@@ -241,12 +397,70 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 				}
 			>
 				<View style={{ gap: space.s4 }}>
+					<WebAccessAttention failure={searchFailure} />
 					{error && <Banner tone="danger" message={error} />}
+					{initialCapture && (
+						<Banner
+							tone="info"
+							message={t`Shared posting for ${session.server}. Review before saving. Only shared text or URL was received; browser cookies and login sessions stay in the browser. If this browser shares only a URL, select and share the posting text or paste it here.`}
+						/>
+					)}
+					{sourceUrl && duplicate.isError && (
+						<>
+							<Banner
+								tone="warn"
+								message={t`Duplicate check unavailable. Retry before saving; your server may need updating.`}
+							/>
+							<Button label={t`Retry`} onPress={() => void duplicate.refetch()} />
+						</>
+					)}
+					{duplicate.data && (
+						<>
+							<Banner
+								tone="info"
+								message={t`Already tracked: ${duplicate.data.role} at ${duplicate.data.company}. Open it or update only its posting details.`}
+							/>
+							<Button
+								label={t`Open tracked job`}
+								onPress={() => {
+									if (duplicate.data) {
+										onClose();
+										router.push(routes.applicationDetails(duplicate.data.id));
+									}
+								}}
+							/>
+							<Button
+								label={t`Update posting details`}
+								disabled={!ready}
+								onPress={() =>
+									void run("save", async () => {
+										if (!duplicate.data || !ready) return;
+										await update.mutateAsync({
+											id: duplicate.data.id,
+											role: role.trim(),
+											company: company.trim(),
+											...(location.trim() ? { location: location.trim() } : {}),
+											sourceUrl: sourceUrl.trim() || null,
+											...(description.trim() ? { jobDescription: description.slice(0, 20_000), postingSource } : {}),
+										});
+										onClose();
+										if (onAdded) onAdded(duplicate.data.id);
+										else router.push(routes.applicationDetails(duplicate.data.id));
+									})
+								}
+							/>
+						</>
+					)}
 					{busy === "save" && (
 						<Banner tone="info" message={t`Saving the job. Wait for confirmation before making another change.`} />
 					)}
 					{!review ? (
 						<>
+							<Text color="ink2">{t`Use your browser’s Share action to send one posting URL or selected text to Reactive Resume. Receiving shares requires the latest store build; URL and paste import remain available.`}</Text>
+							{Platform.OS === "ios" && (
+								<Text color="ink2">{t`On iOS, choose Keep for review, then reopen app in the Share extension. Reopen Reactive Resume yourself within 15 minutes. Sign in here before sharing.`}</Text>
+							)}
+
 							<Text color="ink2">{t`Paste a job link or posting, then check the role and company. Nothing is saved until you choose Save job.`}</Text>
 							<Segmented
 								value={mode}
@@ -279,6 +493,10 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 									onChangeText={changeInput}
 									editable={!busy}
 									maxLength={100_000}
+									// A longer paste is cut at the limit: say so (web add-application-dialog).
+									{...(input.length >= 100_000
+										? { helper: t`Only the first ${i18n.number(100_000)} characters are kept.` }
+										: {})}
 								/>
 							)}
 							{mode === "text" && !providers.hasAIProvider && (
@@ -303,22 +521,47 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 									)}
 								</>
 							)}
+							{providers.defaultProvider && (
+								<Text color="ink3">{t`Optional AI sends only this posting to ${providers.defaultProvider.label} (${providers.defaultProvider.provider}).`}</Text>
+							)}
+							{providers.hasAIProvider && (
+								<>
+									<Button label={t`Read with AI`} disabled={!!busy || !input.trim()} onPress={() => read(true)} />
+									{providers.defaultProvider ? (
+										<Text variant="caption" color="ink3">
+											{t`Sends the posting text to ${providers.defaultProvider.label} to read it.`}
+										</Text>
+									) : null}
+								</>
+							)}
 							<Text
 								variant="callout"
 								color="ink3"
 							>{t`AI reads pasted text only when you ask. Links can use the page’s own job data without AI.`}</Text>
-							<Button
-								label={t`Read posting`}
-								loading={busy === "read"}
-								disabled={!!busy || !input.trim() || (mode === "link" ? !isLink(input) : !providers.hasAIProvider)}
-								onPress={read}
-							/>
+							{mode === "link" && (
+								<Button
+									label={t`Read posting`}
+									loading={busy === "read"}
+									disabled={!!busy || !isLink(input)}
+									onPress={() => read(false)}
+								/>
+							)}
 							<Button
 								label={t`Fill details manually`}
 								variant="secondary"
 								disabled={!!busy}
 								onPress={() => {
 									if (mode === "link" && isLink(input)) setSourceUrl(input.trim());
+									// Pasted text without AI: fill what its first line names, never over what was typed. Without a
+									// header, nothing from an earlier posting stays behind, as after a read. A read of this same
+									// text (parsed) already filled them.
+									if (mode === "text" && !parsed) {
+										const guess = readPastedPostingHeader(input);
+										if (!authored.current.has("role")) setRole(guess?.role ?? "");
+										if (!authored.current.has("company")) setCompany(guess?.company ?? "");
+										if (!authored.current.has("location")) setLocation(guess?.location ?? "");
+										if (!authored.current.has("salary")) setSalary(guess?.salary ?? "");
+									}
 									setReview(true);
 								}}
 							/>
@@ -350,8 +593,16 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 								label={t`Search`}
 								loading={busy === "search"}
 								disabled={!!busy || query.trim().length < 2 || !web.data?.search}
-								onPress={search}
+								onPress={() => search()}
 							/>
+							{(nativeSearchFailure === "auth" || nativeSearchFailure === "quota") && nativeSearchProvider && (
+								<Button
+									label={t`Retry with ${nativeSearchLabel}`}
+									variant="secondary"
+									disabled={!!busy || query.trim().length < 2}
+									onPress={() => search(nativeSearchProvider.id)}
+								/>
+							)}
 							{results?.length === 0 && <Text>{t`No postings found. Try different keywords.`}</Text>}
 							{results?.map((result) => (
 								<ListRow
@@ -373,13 +624,18 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 						</>
 					) : (
 						<>
+							{readAt && (
+								<Text variant="caption" color="ink3">
+									{t`Read ${readAt} from ${sourceHost}. The employer may have changed it since.`}
+								</Text>
+							)}
 							{parsed && (
 								<Banner
 									tone={parsed.enrichmentWarning || parsed.filledBy === "none" ? "warn" : "info"}
 									message={
 										parsed.enrichmentWarning
 											? t`AI enrichment was unavailable. Review the page details or fill them manually.`
-											: t`Review the details before saving. Retrieved content does not establish that the posting is still open.`
+											: t`Review the details before saving. The employer may have changed or closed the posting since it was read.`
 									}
 								/>
 							)}
@@ -394,25 +650,56 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 									action={{ label: t`Show details`, onPress: () => setDetailsOpen(true) }}
 								/>
 							) : null}
-							{(parsed?.postingSource.truncated || description.length > 20_000) && (
+							{clipped && (
 								<Banner
 									tone="warn"
 									message={t`Description is clipped to 20,000 characters. Review it before preparing.`}
 									action={detailsOpen ? undefined : { label: t`Show details`, onPress: () => setDetailsOpen(true) }}
 								/>
 							)}
-							<TextField label={t`Company`} value={company} onChangeText={setCompany} editable={!busy} />
-							<TextField label={t`Role / title`} value={role} onChangeText={setRole} editable={!busy} />
-							<SelectSheet
-								label={t`Stage`}
-								value={stage}
-								options={["saved", "applied", "interview"].map((value) => ({
-									value: value as typeof stage,
-									label: getStageLabel(value as typeof stage),
-								}))}
-								onChange={setStage}
-								disabled={!!busy}
+							<TextField
+								label={t`Company`}
+								value={company}
+								onChangeText={(value) => {
+									authored.current.add("company");
+									setCompany(value);
+								}}
+								editable={!busy}
 							/>
+							<TextField
+								label={t`Role`}
+								value={role}
+								onChangeText={(value) => {
+									authored.current.add("role");
+									setRole(value);
+								}}
+								editable={!busy}
+							/>
+							<LaneNotice unavailable={!laneAvailable} />
+							<PriorNoResponse
+								company={company}
+								disabled={!!busy}
+								onOpen={(id) => {
+									if (!lock.current && !busy) setPriorToOpen(id);
+									return false;
+								}}
+							/>
+							<SelectSheet
+								label={t`Lane`}
+								value={laneId || lane.id}
+								options={lanes.active.map((item) => ({ value: item.id, label: getLaneLabel(item) }))}
+								onChange={setLaneId}
+								disabled={!!busy || !lanes.ready}
+							/>
+							{stage === "closed" && !lane.closedReason && (
+								<SelectSheet
+									label={t`Reason`}
+									value={reason}
+									options={CLOSED_REASONS.map((value) => ({ value, label: getClosedReasonLabel(value) }))}
+									onChange={setReason}
+									disabled={!!busy}
+								/>
+							)}
 							{stage !== "saved" && (
 								<WallClockField
 									label={t`Application date`}
@@ -431,8 +718,24 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 							/>
 							{detailsOpen ? (
 								<View style={{ gap: space.s4 }}>
-									<TextField label={t`Location`} value={location} onChangeText={setLocation} editable={!busy} />
-									<TextField label={t`Salary range`} value={salary} onChangeText={setSalary} editable={!busy} />
+									<TextField
+										label={t`Location`}
+										value={location}
+										onChangeText={(value) => {
+											authored.current.add("location");
+											setLocation(value);
+										}}
+										editable={!busy}
+									/>
+									<TextField
+										label={t`Salary`}
+										value={salary}
+										onChangeText={(value) => {
+											authored.current.add("salary");
+											setSalary(value);
+										}}
+										editable={!busy}
+									/>
 									<TextField label={t`Source`} value={source} onChangeText={setSource} editable={!busy} />
 									<TextField
 										label={t`Job posting link`}
@@ -451,26 +754,26 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 										label={t`Resume`}
 										value={resumeId}
 										options={[
-											{ value: "", label: t`None` },
-											...docs.filter((doc) => doc.type === "resume").map((doc) => ({ value: doc.id, label: doc.name })),
+											{ value: "", label: t`No resume selected` },
+											...resumes.map((doc) => ({ value: doc.id, label: doc.name })),
 										]}
 										onChange={setResumeId}
 										disabled={!!busy}
 									/>
-									{stage !== "saved" && (
+									{
 										<SelectSheet
-											label={t`Cover letter submitted (optional)`}
+											label={stage === "saved" ? t`Cover letter (optional)` : t`Cover letter submitted (optional)`}
 											value={letterId}
 											options={[
-												{ value: "", label: t`None` },
+												{ value: "", label: t`No cover letter selected` },
 												...docs
-													.filter((doc) => doc.type === "letter")
+													.filter((doc) => doc.type === "letter" && !doc.isLocked)
 													.map((doc) => ({ value: doc.id, label: doc.name })),
 											]}
 											onChange={setLetterId}
 											disabled={!!busy}
 										/>
-									)}
+									}
 									<ChipInput
 										label={t`Tags`}
 										values={tags}
@@ -493,10 +796,14 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 										onChangeText={setFollowUpNote}
 										editable={!busy}
 									/>
+									{providers.defaultProvider && (
+										<Text color="ink3">{t`Optional AI sends only this posting to ${providers.defaultProvider.label} (${providers.defaultProvider.provider}).`}</Text>
+									)}
 									<TextArea label={t`Notes`} value={notes} onChangeText={setNotes} editable={!busy} />
 									<TextArea
 										label={t`Saved description`}
 										value={description}
+										maxLines={12}
 										onChangeText={setDescription}
 										editable={!busy}
 									/>
@@ -530,6 +837,20 @@ export function AddApplicationSheet({ onClose }: AddApplicationSheetProps) {
 				onCancel={() => setConfirmSearchExit(false)}
 			/>
 			<AIProviderSetupSheet open={setup} onClose={() => setSetup(false)} />
+			<ConfirmDialog
+				open={priorToOpen !== null && !busy}
+				title={t`Discard changes?`}
+				message={t`Your unsaved job details will be discarded before opening this application.`}
+				confirmLabel={t`Discard changes`}
+				cancelLabel={t`Keep editing`}
+				destructive
+				onConfirm={() => {
+					if (!priorToOpen || lock.current || busy) return;
+					onClose();
+					router.push(routes.applicationDetails(priorToOpen));
+				}}
+				onCancel={() => setPriorToOpen(null)}
+			/>
 		</>
 	);
 }

@@ -50,7 +50,12 @@ temp
 # AI
 .codex
 .agents/*
+# Tracked agent docs and repo skills; see .agents/docs/README.md. Vendor skills stay local.
 !.agents/docs/
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/fill-translations/
+!.agents/skills/release/
 .claude
 .cursor
 .mcp.json
@@ -89,3 +94,7 @@ temp
 
 # Lingui compile output (the fill-translations gate compiles to validate; the apps load .po directly)
 /apps/*/locales/*.js
+
+# Built browser capture helper
+/apps/web/public/capture-helper/
+/apps/web/public/capture-helper.zip

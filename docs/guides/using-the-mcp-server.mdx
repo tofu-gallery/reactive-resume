@@ -7,7 +7,7 @@ Reactive Resume runs a [Model Context Protocol (MCP)](https://modelcontextprotoc
 
 ## Before you start
 
-- You need a Reactive Resume account.
+- You need a permanent Reactive Resume account. Guest accounts must create an account before connecting apps.
 - Your MCP client must support remote servers over Streamable HTTP, or be able to run the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge.
 - Decide how the client signs in:
   - **OAuth (recommended).** You approve the client in your browser. No secret is copied anywhere.
@@ -17,10 +17,10 @@ Reactive Resume runs a [Model Context Protocol (MCP)](https://modelcontextprotoc
 
 The server address is your instance's address followed by `/mcp`. On the hosted instance it's `https://rxresu.me/mcp`. You can copy it from **Settings** → **AI & developer**, in the **MCP server** section.
 
-<Frame caption="The MCP server section in AI & developer settings">
+<Frame caption="Copy your own instance MCP address">
   <img
     src="/images/guides/using-the-mcp-server/mcp-server-settings.webp"
-    alt="MCP server section showing the address https://rxresu.me/mcp with a Copy button and a Setup guide link"
+    alt="MCP server settings with the local example instance address, Copy and Setup guide, and four settings destinations"
   />
 </Frame>
 
@@ -38,13 +38,13 @@ The server address is your instance's address followed by `/mcp`. On the hosted 
 
   </Step>
   <Step title="Sign in to Reactive Resume">
-    Your client opens a browser window. If you aren't signed in, Reactive Resume asks you to sign in first.
+    Your client opens a browser window. If you aren't signed in, Reactive Resume asks you to sign in first; the sign-in page names the application that's waiting, for example "Sign in to connect Claude."
   </Step>
   <Step title="Approve the connection">
-    Check the application name under **Connect an application**, read what it will be able to do, and select **Allow access**. Select **Deny access** if you don't recognize the application.
+    Check the application name under **Connect an application**, read what it will be able to do, and select **Allow access**. Select **Deny access** if you don't recognize the application. You can disconnect it anytime in **Settings → AI & developer**.
 
-    <Frame caption="The consent screen for a new MCP client">
-      <img src="/images/guides/using-the-mcp-server/oauth-consent.webp" alt="Connect an application screen for a client named Claude, listing access to resumes and job applications, profile information, email address and offline access, with Deny and Allow access buttons" />
+    <Frame caption="Review requested access before allowing a client">
+      <img src="/images/guides/using-the-mcp-server/oauth-consent.webp" alt="Connect an application consent page for Docs example client with requested account and offline-access permissions, Deny and Allow" />
     </Frame>
 
   </Step>
@@ -92,6 +92,8 @@ If your client only runs local commands, use `mcp-remote` as a bridge. It needs 
   Keep the file private, and revoke the key in Settings if it leaks.
 </Warning>
 
+A read-only key or connection lists only the tools that read, so your client doesn't spend context on tools it can't use. Calling a tool that writes anyway answers with the access it needs. When you create a key, **Copy MCP config** copies the server entry above with this instance's address and your key filled in.
+
 ## Set up popular clients
 
 For coding agents, the open-source [`add-mcp`](https://github.com/neon-solutions/add-mcp) CLI adds the server to each agent's configuration in one step. It needs [Node.js](https://nodejs.org), detects the agents you use and lets you choose:
@@ -123,7 +125,7 @@ Then sign in from your agent, as described below.
     npx add-mcp https://rxresu.me/mcp --name reactive-resume -a cursor
     ```
 
-    This adds the server to `.cursor/mcp.json` in your project; add `-g` for `~/.cursor/mcp.json` and all projects. Cursor offers to sign in when it first connects. To use an API key instead, add `--header "x-api-key: YOUR_API_KEY"`.
+    This adds the server to `.cursor/mcp.json` in your project; add `-g` for `~/.cursor/mcp.json` and all projects. Cursor offers to sign in when it first connects; Reactive Resume accepts the callbacks Cursor registers, including `cursor://anysphere.cursor-mcp/oauth/callback`. To use an API key instead, add `--header "x-api-key: YOUR_API_KEY"`, or add `"headers": { "x-api-key": "YOUR_API_KEY" }` to the server entry in `.cursor/mcp.json`. Choose read-only permissions unless you need edits. See [Cursor’s MCP documentation](https://cursor.com/docs/context/mcp).
 
   </Accordion>
   <Accordion title="Codex">
@@ -188,23 +190,23 @@ The server keeps the original 43 tool names and adds API-derived tools for the r
 
 ### Cover letters
 
-| Tool                         | What it does                                                                                                          |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `list_cover_letters`         | Lists your cover letters. Filter by name (`search`), `resumeId` or `applicationId`.                                   |
-| `read_cover_letter`          | Returns one letter, including its `revision`.                                                                         |
-| `create_cover_letter`        | Creates a letter, optionally linked to a resume (for its sender details and design) or an application.                |
-| `update_cover_letter`        | Changes a letter's text, recipient, template or links. Needs the latest `revision` as `expectedRevision`.             |
-| `refresh_cover_letter_style` | Copies the sender details and design from a resume, keeping the letter's text and template. Needs `expectedRevision`. |
-| `duplicate_cover_letter`     | Copies a letter.                                                                                                      |
-| `delete_cover_letter`        | Moves a letter to Trash for 30 days. Needs `expectedRevision`.                                                        |
-| `export_cover_letter`        | Returns a letter as versioned cover-letter JSON.                                                                      |
-| `import_cover_letter`        | Creates a letter from cover-letter JSON produced by `export_cover_letter`.                                            |
+| Tool                         | What it does                                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `list_cover_letters`         | Lists your cover letters. Filter by name (`search`), `resumeId` or `applicationId`.                                 |
+| `read_cover_letter`          | Returns one letter, including its `revision`.                                                                       |
+| `create_cover_letter`        | Creates a letter, optionally linked to a resume (for its sender details and design) or an application.              |
+| `update_cover_letter`        | Changes a letter's text, recipient, template, links, or sender details when unlinked. Needs `expectedRevision`.     |
+| `refresh_cover_letter_style` | Copies a resume's design and, if linked, its sender details. Keeps the text and template. Needs `expectedRevision`. |
+| `duplicate_cover_letter`     | Copies a letter.                                                                                                    |
+| `delete_cover_letter`        | Moves a letter to Trash for 30 days. Needs `expectedRevision`.                                                      |
+| `export_cover_letter`        | Returns a letter as versioned cover-letter JSON.                                                                    |
+| `import_cover_letter`        | Creates a letter from cover-letter JSON produced by `export_cover_letter`.                                          |
 
 ### Applications
 
 | Tool                                | What it does                                                                                                                               |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `list_applications`                 | Lists your applications with contacts, documents and timeline. Filter by stage (`status`) or `tags`.                                       |
+| `list_applications`                 | Lists your applications with contacts, documents and timeline. Filter by stage (`status`), stage ID (`laneId`) or `tags`.                  |
 | `read_application`                  | Returns one application in full.                                                                                                           |
 | `list_application_tags`             | Lists every tag used across applications.                                                                                                  |
 | `get_application_stats`             | Counts applications by stage and source.                                                                                                   |
@@ -242,12 +244,15 @@ Additional tools use `api_` followed by the API router path in snake case. Input
 | Assistant                  | `api_agent_threads_start`, `api_agent_messages_send`, `api_agent_attachments_create`           | Threads, messages, cancellation, resumable replies, proposed edit status and attachments                                  |
 | Account and instance       | `api_auth_export_data`, `api_auth_delete_account`, `api_flags_get`                             | Account export, browser handoff for account deletion, enabled auth providers and platform statistics                      |
 | Integrations               | `api_ai_providers_list`, `api_web_access_status`                                               | Provider list/test/delete and web connection status/test/delete; credential entry uses browser handoffs                   |
+| Application stages         | `api_applications_lanes_get`, `api_applications_lanes_create`, `api_applications_lanes_retire` | Read, add, rename, recolor, reorder and remove stages; list earlier unanswered applications at a company                  |
 
 Resume and letter exports return authenticated REST URLs. Download with your existing credentials or open in your signed-in browser. Letter localization words are encoded in the URL. No generated file is permanently copied into storage by the export tool.
 
 Lists default to 20 results and accept `limit` (up to 100) and `offset`; continue paging until no more results. Array results use `{ items: [...] }` in `structuredContent`. Scalar results use `{ result: ... }`. Dates use ISO 8601. Resume edits can use optimistic concurrency with `expectedUpdatedAt`; letter edits require `expectedRevision`. After a conflict, reread before retrying.
 
 Document listing never deletes expired Trash. Run `api_documents_purge_expired` explicitly to permanently remove documents trashed more than 30 days ago. Individual permanent deletion requires moving the document to Trash first.
+
+To act on several trashed documents in one call, use `api_documents_restore_many` or `api_documents_purge_many` with up to 5,000 documents. Both skip documents that are active, already deleted or owned by another account. `api_documents_empty_trash` permanently deletes every document in your Trash, not only the ones you listed.
 
 ### File limits and references
 
@@ -267,7 +272,7 @@ The server reads storage directly and verifies the account prefix and path segme
 
 ### Browser and streaming workflows
 
-`open_account_settings` opens profile, security, API keys, preferences or account settings. Provider creation/update and web credential entry return their authenticated settings page. `api_resume_set_password` returns the resume's editor link, where you set, change or remove its share password, and `api_resume_verify_password` returns a password-protected public resume's link, where a visitor enters the password. Account deletion, password changes, passkeys, two-factor authentication and provider credentials require user interaction in that browser. Browser preferences, local undo and document selection remain browser workflows; durable edits and history are available through MCP.
+`open_account_settings` opens account, security, AI & developer, API keys, connected applications or preferences. Use the `page` argument, such as `{"page":"api-keys"}`; `section` and other unknown fields are rejected. Older `profile` and `authentication` page names still work. Provider creation/update and web credential entry return their authenticated settings page. `api_resume_set_password` returns the resume's editor link, where you set, change or remove its share password, and `api_resume_verify_password` returns a password-protected public resume's link, where a visitor enters the password. Account deletion, password changes, passkeys, two-factor authentication and provider credentials require user interaction in that browser. Browser preferences, local undo and document selection remain browser workflows; durable edits and history are available through MCP.
 
 MCP is stateless and accepts POST requests with JSON responses. GET/DELETE return 405; there is no standalone SSE subscription. Draft/message streams are collected up to 500,000 characters; `truncated` identifies longer responses. Read the assistant thread for persisted replies. To watch a resume for changes, poll `read_resume` and compare `updatedAt`.
 
@@ -292,7 +297,7 @@ Prompts are ready-made instructions your client can start from. Each takes a res
 | `resume://_meta/schema` | The resume data JSON Schema, listed in `resources/list` and also served at `/schema.json`. Clients use it to build valid patches; tool schemas point to it instead of repeating it, for resume data and for a cover letter's style. Tool results also summarize application timeline entries, posting sources and the account export; their full shapes are in `/api/openapi/spec.json`. |
 | `resume://{id}`         | One resume's full data as JSON. This is a resource template (`resources/templates/list`); find IDs with `list_resumes`.                                                                                                                                                                                                                                                                  |
 
-Your instance also publishes a server card at `/.well-known/mcp/server-card.json` that summarizes the tools, prompts and resources, for clients that discover servers without connecting.
+Your instance also publishes a server card at `/.well-known/mcp/server-card.json` that summarizes the tools, prompts and resources, for clients that discover servers without connecting. An [Agentic Resource Discovery](https://agenticresourcediscovery.org/spec/) catalog at `/.well-known/ard.json` (also served at the older `/.well-known/ai-catalog.json`) points agent registries to that card.
 
 ## How authentication works
 
@@ -301,10 +306,19 @@ This section is for client developers and self-hosters.
 - The server checks `x-api-key: <key>` first, then `Authorization: Bearer <token>`. MCP never accepts account session cookies. Invalid explicit credentials cannot borrow a browser session.
 - A request with neither gets `401` and a `WWW-Authenticate: Bearer resource_metadata="<instance>/.well-known/oauth-protected-resource"` header. OAuth clients use it to discover the authorization server.
 - Authorization server metadata is at `/.well-known/oauth-authorization-server`. The authorization server supports dynamic client registration and PKCE with `S256`.
+- Send `resource=<instance origin>` on authorization, token exchange and refresh requests. The root protected-resource metadata supplies the value; `/mcp` is also accepted. Authorization without `resource` is refused before sign-in: the client's registered `redirect_uri` receives `error=invalid_target` with `state` and `iss`, or the server answers `400 invalid_target` when the client or redirect address does not match a registration.
+- Dynamic registration accepts `https://` callbacks on public hosts, `http://` callbacks on `localhost`, `127.0.0.1` or `[::1]`, and app callbacks on a custom scheme with a host and path (`cursor://anysphere.cursor-mcp/oauth/callback`) or the reverse-domain form (`com.example.app:/callback`). A registration without `application_type` that lists a loopback or custom-scheme callback is registered as `native`. Script, file and browser-internal schemes, credentials, fragments and private-network `https://` hosts are refused. Authorization requires the exact registered callback; only a loopback port may differ.
 - New OAuth clients can request `api:read`, `api:write` and `api:delete`. The consent screen describes these permissions alongside identity scopes. Existing identity-only grants and legacy keys without permission statements retain account-wide access for compatibility.
 - The server checks the user, client and consent grant on every authenticated request. Tokens with `offline_access` outlive the browser session that approved them; other tokens remain bound to their login session. Disabled clients, banned accounts and revoked grants cannot continue using signed tokens. Proof-bound DPoP tokens are rejected: this endpoint supports ordinary bearer access tokens.
 - Revoking a refresh token or signing out in the app leaves already-issued JWT access tokens valid for up to 1 hour. Revoking consent under Connected applications blocks them immediately.
-- Revoke a connection under Settings → AI & developer → Connected applications. Revoking the application grant invalidates existing access and refresh tokens. The authorization provider does not support revoking one self-contained JWT independently of its grant.
+- Disconnect a connection under Settings → AI & developer → Connected applications. Review its named permissions and connected date, select **Disconnect**, then confirm the named application. A message confirms the result. This cannot be undone; reconnect from the application to allow it again. On mobile, **Settings → AI & developer → Connected applications** lists the same connections with **Disconnect**; the app's own sign-in is marked **(this app)** and signs out from **Settings** instead. Disconnecting the application grant invalidates existing access and refresh tokens. The authorization provider does not support revoking one self-contained JWT independently of its grant.
+
+<Frame caption="Confirming a disconnect names the application and explains how to reconnect">
+  <img
+    src="/images/guides/using-the-mcp-server/disconnect-app.png"
+    alt="Disconnect Example desktop assistant confirmation, explaining that access stops now and reconnecting requires connecting from the app, with Cancel and Disconnect actions"
+  />
+</Frame>
 
 ## Troubleshooting
 

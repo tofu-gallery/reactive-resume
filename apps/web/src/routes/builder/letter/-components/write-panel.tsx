@@ -1,16 +1,18 @@
-import type { Application } from "@/features/applications/types";
+import type { ApplicationSummary } from "@/features/applications/types";
 import type { LetterDraft } from "@/features/letters/store";
 import type { CoverLetter } from "@reactive-resume/schema/cover-letter/data";
 import type { CSSProperties, ReactElement, ReactNode } from "react";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
+import { useLingui } from "@lingui/react";
 import { Plural, Trans } from "@lingui/react/macro";
 import { ORPCError } from "@orpc/client";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import { useReducedMotion } from "motion/react";
 import { useId, useRef, useState } from "react";
+import { aiModelForTask } from "@reactive-resume/ai/task-models";
 import { coverLetterTextToHtml, defaultCoverLetterSignOff, greetingName } from "@reactive-resume/resume/cover-letter";
-import { Button, buttonVariants } from "@reactive-resume/ui/components/button";
+import { Button } from "@reactive-resume/ui/components/button";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -22,21 +24,35 @@ import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
 import { Label } from "@reactive-resume/ui/components/label";
 import { NativeSelect } from "@reactive-resume/ui/components/native-select";
-import { SwitchRow } from "@reactive-resume/ui/components/switch";
+import { Switch, SwitchRow } from "@reactive-resume/ui/components/switch";
 import { Textarea } from "@reactive-resume/ui/components/textarea";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { cn } from "@reactive-resume/utils/style";
+import { LetterLanguageField } from "./design-panel";
 import { templates } from "@/dialogs/resume/template/data";
+import { AiResultUsage } from "@/features/ai/usage";
+import { getDisplayLane, getLaneLabel } from "@/features/applications/lanes";
 import { applicationsListQueryOptions } from "@/features/applications/queries";
-import { getStageColor, getStageLabel } from "@/features/applications/stages";
+import { useApplicationLanes } from "@/features/applications/use-application-lanes";
+import { SetUpAi } from "@/features/assistant/provider-setup";
 import { useLetterWords } from "@/features/letters/compose";
 import { countWords, LETTER_LENGTH, letterLength } from "@/features/letters/length";
-import { discardLetterDraft, startLetterDraft, useLetterEditorStore } from "@/features/letters/store";
+import {
+	discardLetterDraft,
+	dismissLetterDraftFailure,
+	startLetterDraft,
+	stopLetterDraft,
+	useLetterEditorStore,
+} from "@/features/letters/store";
 import { useLetterMode } from "@/features/letters/use-letter-mode";
 import { ACCENTS, FONT_PAIRINGS, matchFontPairing, rgbaToHex } from "@/features/resume/editor/design/presets";
+import { useEditorStore } from "@/features/resume/editor/store";
+import { CustomFields } from "@/features/resume/editor/write/basics-card";
+import { TextField, validateEmail, WebsiteField } from "@/features/resume/editor/write/fields";
 import { RichTextEditor } from "@/features/resume/editor/write/rich-text-editor";
 import { AiProviderLoadState } from "@/features/settings/integrations/ai-provider-load-state";
 import { useHasUsableAiProvider } from "@/features/settings/integrations/hooks/use-has-usable-ai-provider";
+import { getAccountGeneration } from "@/libs/auth/account-scope";
 import { getOrpcErrorMessage } from "@/libs/error-message";
 import { ENTER_CLASS } from "@/libs/motion";
 import { client, orpc } from "@/libs/orpc/client";
@@ -68,7 +84,8 @@ function Section({ id, title, aside, children }: SectionProps) {
 	return (
 		<section aria-labelledby={id} className="grid gap-3 px-4 py-5">
 			<div className="flex items-center justify-between gap-3">
-				<h2 id={id} className="text-xs font-semibold text-ink-3">
+				{/* A section heading, a level above the 12px field labels under it (the resume builder's card titles). */}
+				<h2 id={id} className="text-[15px] font-semibold text-ink">
 					{title}
 				</h2>
 				{aside}
@@ -85,18 +102,35 @@ function Section({ id, title, aside, children }: SectionProps) {
 export function LetterWritePanel() {
 	const letter = useLetterEditorStore((state) => state.letter);
 	const draft = useLetterEditorStore((state) => state.draft);
+	const status = useLetterEditorStore((state) => state.status);
 	const { data: applications } = useQuery(applicationsListQueryOptions());
+	// While History shows an older version on the page, Write would edit the current letter beside it: hold it.
+	const viewingVersion = useEditorStore((state) => state.historyVersionId !== null);
 	if (!letter) return null;
 
 	const application = applications?.find((item) => item.id === letter.sourceApplicationId) ?? null;
-	const disabled = letter.isLocked;
+	// While the letter changed elsewhere, typing would only pile onto edits that can't save. Reload first.
+	const conflict = status === "conflict";
+	const disabled = letter.isLocked || conflict || viewingVersion;
 
 	return (
 		<div className="divide-y divide-line">
+			{viewingVersion && !letter.isLocked && (
+				<p className="flex items-center gap-2 bg-info-soft px-4 py-2.5 text-sm text-info-text">
+					<Icon name="clock-counter-clockwise" size={18} />
+					<Trans>You're viewing an earlier version. Go back to now in History to edit.</Trans>
+				</p>
+			)}
 			{letter.isLocked && (
 				<p className="flex items-center gap-2 bg-sunken px-4 py-2.5 text-sm text-ink-2">
 					<Icon name="lock" size={18} />
 					<Trans>This letter is locked. Unlock it from its menu to edit.</Trans>
+				</p>
+			)}
+			{conflict && (
+				<p className="flex items-center gap-2 bg-warn-soft px-4 py-2.5 text-sm text-warn-text">
+					<Icon name="cloud-warning" size={18} />
+					<Trans>This letter changed in another tab. Reload above to keep editing; your edits stay in a copy.</Trans>
 				</p>
 			)}
 			<ForSection letter={letter} application={application} applications={applications ?? []} disabled={disabled} />
@@ -110,18 +144,24 @@ export function LetterWritePanel() {
 	);
 }
 
+/** Today's date in the person's own time zone, as `YYYY-MM-DD`. */
+const todayDate = () => new Date().toLocaleDateString("en-CA");
+
 type ForSectionProps = {
 	letter: CoverLetter;
-	application: Application | null;
-	applications: Application[];
+	application: ApplicationSummary | null;
+	applications: ApplicationSummary[];
 	disabled: boolean;
 };
 
 /** FOR: the application the letter is for. Linking one fills the recipient; without one, drafting uses the resume. */
 function ForSection({ letter, application, applications, disabled }: ForSectionProps) {
+	const { lanes } = useApplicationLanes();
+	const lane = application ? getDisplayLane(lanes, application) : null;
+	const submitted = Boolean(application?.sentCoverLetterVersionId && application.coverLetterId === letter.id);
 	const choices = applications.filter((item) => item.status !== "closed" || item.id === application?.id);
 
-	const choose = (next: Application | null) =>
+	const choose = (next: ApplicationSummary | null) =>
 		void updateLetter({
 			applicationId: next?.id ?? null,
 			// The recipient comes from the application: its company, and its first contact when it has one.
@@ -132,14 +172,24 @@ function ForSection({ letter, application, applications, disabled }: ForSectionP
 
 	const menu = (trigger: ReactElement) => (
 		<DropdownMenu>
-			<DropdownMenuTrigger disabled={disabled} render={trigger} />
+			<DropdownMenuTrigger disabled={disabled || submitted} render={trigger} />
 			<DropdownMenuContent align="end" className="max-h-80 w-72 overflow-y-auto">
 				{choices.map((item) => (
-					<DropdownMenuItem key={item.id} onClick={() => choose(item)}>
+					<DropdownMenuItem
+						key={item.id}
+						disabled={Boolean(item.sentCoverLetterVersionId && item.coverLetterId !== letter.id)}
+						className="data-disabled:opacity-60"
+						onClick={() => choose(item)}
+					>
 						<Icon name="briefcase" />
 						<span className="grid min-w-0">
 							<span className="truncate">{item.role}</span>
 							<span className="truncate text-xs text-ink-3">{item.company}</span>
+							{item.sentCoverLetterVersionId && item.coverLetterId !== letter.id && (
+								<span className="text-xs text-ink-3">
+									<Trans>Letter already sent</Trans>
+								</span>
+							)}
 						</span>
 					</DropdownMenuItem>
 				))}
@@ -163,6 +213,11 @@ function ForSection({ letter, application, applications, disabled }: ForSectionP
 
 	return (
 		<Section id="letter-for" title={<Trans>For</Trans>}>
+			{submitted && (
+				<p className="text-xs text-ink-3">
+					<Trans>This letter is recorded as sent. Its application link stays with that submission.</Trans>
+				</p>
+			)}
 			{application ? (
 				<div className="flex items-center gap-3 rounded-xl border border-line p-3">
 					<span
@@ -176,12 +231,8 @@ function ForSection({ letter, application, applications, disabled }: ForSectionP
 						<span className="flex min-w-0 items-center gap-1.5 text-xs text-ink-3">
 							<span className="truncate">{application.company}</span>
 							<span aria-hidden="true">·</span>
-							<span
-								aria-hidden="true"
-								className="size-1.5 shrink-0 rounded-sm"
-								style={{ background: getStageColor(application.status) }}
-							/>
-							{getStageLabel(application.status)}
+							<span aria-hidden="true" className="size-1.5 shrink-0 rounded-sm" style={{ background: lane?.color }} />
+							<span className="truncate">{lane && getLaneLabel(lane)}</span>
 						</span>
 					</span>
 					{menu(
@@ -208,7 +259,7 @@ function ForSection({ letter, application, applications, disabled }: ForSectionP
 	);
 }
 
-type LetterSectionProps = { letter: CoverLetter; application: Application | null; disabled: boolean };
+type LetterSectionProps = { letter: CoverLetter; application: ApplicationSummary | null; disabled: boolean };
 
 /** TO: name or team, company and date for structured letters; older (freeform) letters keep their recipient block. */
 function ToSection({ letter, application, disabled }: LetterSectionProps) {
@@ -264,13 +315,27 @@ function ToSection({ letter, application, disabled }: LetterSectionProps) {
 					<Label htmlFor={`${id}-date`}>
 						<Trans>Date</Trans>
 					</Label>
-					<Input
-						id={`${id}-date`}
-						type="date"
-						value={letter.letterDate ?? ""}
-						disabled={disabled}
-						onChange={(event) => edit({ letterDate: event.target.value || null })}
-					/>
+					<div className="flex gap-1.5">
+						<Input
+							id={`${id}-date`}
+							type="date"
+							value={letter.letterDate ?? ""}
+							disabled={disabled}
+							onChange={(event) => edit({ letterDate: event.target.value || null })}
+						/>
+						{/* A letter reused later should carry the day it's sent. */}
+						{letter.letterDate !== todayDate() && (
+							<Button
+								variant="ghost"
+								size="sm"
+								className="h-9 shrink-0"
+								disabled={disabled}
+								onClick={() => edit({ letterDate: todayDate() })}
+							>
+								<Trans>Today</Trans>
+							</Button>
+						)}
+					</div>
 				</div>
 			</div>
 			<p className="text-xs text-ink-3">
@@ -285,7 +350,11 @@ function ToSection({ letter, application, disabled }: LetterSectionProps) {
 }
 
 /** FROM: the resume the sender's details come from, and whether they stay live or are copied into the letter. */
-function FromSection({ letter, disabled }: { letter: CoverLetter; disabled: boolean }) {
+type FromSectionProps = { letter: CoverLetter; disabled: boolean };
+
+function FromSection({ letter, disabled: readOnly }: FromSectionProps) {
+	const disabled = useLetterEditorStore((state) => state.changing) || readOnly;
+	const edit = useLetterEditorStore((state) => state.edit);
 	const id = useId();
 	const { data: resumes } = useQuery(orpc.resume.list.queryOptions({ input: {} }));
 	const resume = resumes?.find((item) => item.id === letter.sourceResumeId);
@@ -331,8 +400,8 @@ function FromSection({ letter, disabled }: { letter: CoverLetter; disabled: bool
 					label={t`Use details from “${resume?.name ?? t`the resume`}”`}
 					description={
 						letter.senderLinked
-							? t`Linked. Name, email, phone and city update when the resume does.`
-							: t`Off. The letter keeps its own copy of your details.`
+							? t`Linked. The header (name, contact details, links and photo) updates when the resume does.`
+							: t`Off. Edit this letter’s details below. Turning this on replaces them with the resume’s current details.`
 					}
 					checked={letter.senderLinked}
 					disabled={disabled}
@@ -340,10 +409,89 @@ function FromSection({ letter, disabled }: { letter: CoverLetter; disabled: bool
 				/>
 			) : (
 				<p className="text-xs text-ink-3">
-					<Trans>Your name and contact details come from a resume.</Trans>
+					<Trans>Enter your details below. Choosing a resume replaces them and links its design.</Trans>
 				</p>
 			)}
+			{(!letter.sourceResumeId || !letter.senderLinked) && (
+				<fieldset disabled={disabled} className="grid min-w-0 grid-cols-2 gap-3">
+					<SenderPhoto picture={letter.style.picture} disabled={disabled} />
+					<TextField
+						label={<Trans>Full name</Trans>}
+						wide
+						autoComplete="name"
+						value={letter.style.basics.name}
+						onChange={(name) => edit({ sender: { name } })}
+					/>
+					<TextField
+						label={<Trans>Headline</Trans>}
+						wide
+						value={letter.style.basics.headline}
+						onChange={(headline) => edit({ sender: { headline } })}
+					/>
+					<TextField
+						label={<Trans>Email</Trans>}
+						wide
+						type="email"
+						autoComplete="email"
+						validate={validateEmail}
+						value={letter.style.basics.email}
+						onChange={(email) => edit({ sender: { email } })}
+					/>
+					<TextField
+						label={<Trans>Phone</Trans>}
+						type="tel"
+						autoComplete="tel"
+						value={letter.style.basics.phone}
+						onChange={(phone) => edit({ sender: { phone } })}
+					/>
+					<TextField
+						label={<Trans>Location</Trans>}
+						value={letter.style.basics.location}
+						onChange={(location) => edit({ sender: { location } })}
+					/>
+					<WebsiteField
+						label={<Trans>Website</Trans>}
+						value={letter.style.basics.website}
+						allowInlineLink={false}
+						onChange={(website) => edit({ sender: { website: { url: website.url, label: website.label } } })}
+					/>
+					<CustomFields
+						fields={letter.style.basics.customFields}
+						locked={disabled}
+						edit={(_key, mutate) => {
+							// The latest list, so quick edits in a row build on each other.
+							const fields = useLetterEditorStore.getState().letter?.style.basics.customFields ?? [];
+							const customFields = structuredClone(fields);
+							mutate(customFields);
+							edit({ sender: { customFields } });
+						}}
+					/>
+				</fieldset>
+			)}
 		</Section>
+	);
+}
+
+type SenderPhotoProps = { picture: CoverLetter["style"]["picture"]; disabled: boolean };
+
+/** The photo the letter copied from its resume, which it can leave off. Uploading one is the resume's job. */
+function SenderPhoto({ picture, disabled }: SenderPhotoProps) {
+	const edit = useLetterEditorStore((state) => state.edit);
+	if (!picture.url) return null;
+
+	return (
+		<div className="col-span-full flex items-center gap-3 rounded-lg bg-bg p-2.5">
+			<img src={picture.url} alt="" className="size-10 shrink-0 rounded-md object-cover" />
+			<p className="min-w-0 flex-1 text-xs leading-4 text-ink-2">
+				{picture.hidden ? <Trans>Photo hidden from the page.</Trans> : <Trans>Photo on the page.</Trans>}
+			</p>
+			<Switch
+				aria-label={t`Show photo`}
+				checked={!picture.hidden}
+				disabled={disabled}
+				onCheckedChange={(shown) => edit({ sender: { picture: { hidden: !shown } } })}
+			/>
+		</div>
 	);
 }
 
@@ -352,6 +500,8 @@ function FromSection({ letter, disabled }: { letter: CoverLetter; disabled: bool
  * shows on a green wash until it's kept: it never replaces typed text by itself.
  */
 function BodySection({ letter, application, disabled }: LetterSectionProps) {
+	const account = getAccountGeneration();
+	const sessionId = useLetterEditorStore.getState().sessionId;
 	const words = useLetterWords(letter.style.metadata.page.locale);
 	const edit = useLetterEditorStore((state) => state.edit);
 	const draft = useLetterEditorStore((state) => state.draft);
@@ -359,9 +509,17 @@ function BodySection({ letter, application, disabled }: LetterSectionProps) {
 	const structured = letter.layout === "structured";
 	const name = greetingName(letter.recipientName);
 	const showEditor = writing || countWords(letter.content) > 0;
+	const languageId = useId();
 
 	return (
 		<Section id="letter-body" title={<Trans>Letter</Trans>}>
+			{/* The greeting and sign-off are written in the letter's language, so it's chosen with the words. */}
+			<div className="grid gap-1.5">
+				<Label htmlFor={languageId}>
+					<Trans>Language</Trans>
+				</Label>
+				<LetterLanguageField id={languageId} disabled={disabled} />
+			</div>
 			{structured && (
 				<LetterFramingField
 					letter={letter}
@@ -376,8 +534,19 @@ function BodySection({ letter, application, disabled }: LetterSectionProps) {
 					draft={draft}
 					letter={letter}
 					application={application}
-					onKeep={(text) => {
-						edit({ content: coverLetterTextToHtml(text) });
+					onKeep={(text, aiOperationIds) => {
+						const current = useLetterEditorStore.getState();
+						if (
+							getAccountGeneration() !== account ||
+							current.sessionId !== sessionId ||
+							current.letter?.id !== letter.id ||
+							current.letter.revision !== letter.revision ||
+							draft.phase !== "ready" ||
+							current.draft !== draft ||
+							current.letter.isLocked
+						)
+							return;
+						edit({ content: coverLetterTextToHtml(text), aiOperationIds });
 						discardLetterDraft();
 						setWriting(true);
 						toast.add({ description: t`Draft kept. Edit anything you like.` });
@@ -391,7 +560,27 @@ function BodySection({ letter, application, disabled }: LetterSectionProps) {
 					value={letter.content}
 					disabled={disabled}
 					heightClassName="min-h-[240px]"
-					onChange={(content) => edit({ content })}
+					improve={{ letter: true, applicationId: application?.id }}
+					onChange={(content, options) => {
+						const current = useLetterEditorStore.getState();
+						if (
+							getAccountGeneration() !== account ||
+							current.sessionId !== sessionId ||
+							current.letter?.id !== letter.id ||
+							current.letter.isLocked
+						)
+							return;
+						edit({
+							content,
+							...(options?.aiOperationIds?.length || options?.removedAiOperationIds?.length
+								? {
+										aiOperationIds: [
+											...new Set([...(current.letter.aiOperationIds ?? []), ...(options.aiOperationIds ?? [])]),
+										].filter((id) => !options.removedAiOperationIds?.includes(id)),
+									}
+								: {}),
+						});
+					}}
 				/>
 			) : (
 				<EmptyBody
@@ -404,6 +593,8 @@ function BodySection({ letter, application, disabled }: LetterSectionProps) {
 					}}
 				/>
 			)}
+
+			{(letter.aiOperationIds?.length ?? 0) > 0 && <AiResultUsage usage={letter.aiUsage} />}
 
 			{structured && (
 				<>
@@ -455,11 +646,20 @@ function LetterFramingField({ letter, field, defaultValue, disabled }: LetterFra
 	);
 }
 
-type EmptyBodyProps = { letter: CoverLetter; application: Application | null; disabled: boolean; onWrite: () => void };
+type EmptyBodyProps = {
+	letter: CoverLetter;
+	application: ApplicationSummary | null;
+	disabled: boolean;
+	onWrite: () => void;
+};
 
 function EmptyBody({ letter, application, disabled, onWrite }: EmptyBodyProps) {
 	const providerState = useHasUsableAiProvider();
 	const { hasUsableProvider } = providerState;
+	const draftProvider = providerState.usableProviders[0];
+	const draft = draftProvider
+		? { label: draftProvider.label, model: aiModelForTask(draftProvider, "capable") }
+		: undefined;
 	const hasResume = Boolean(letter.sourceResumeId);
 	const company = application?.company;
 	const canDraft = hasResume || Boolean(application);
@@ -467,7 +667,16 @@ function EmptyBody({ letter, application, disabled, onWrite }: EmptyBodyProps) {
 	return (
 		<div className="grid justify-items-start gap-3 rounded-xl border border-dashed border-line-2 p-4">
 			<p className="text-sm text-ink-2">
-				{company && hasResume ? (
+				{/* Without a provider, drafting isn't on offer yet: say what would make it so. */}
+				{canDraft && !providerState.isUnavailable && !hasUsableProvider ? (
+					company && hasResume ? (
+						<Trans>Start typing, or connect an AI provider to draft from the {company} posting and your resume.</Trans>
+					) : company ? (
+						<Trans>Start typing, or connect an AI provider to draft from the {company} posting.</Trans>
+					) : (
+						<Trans>Start typing, or connect an AI provider to draft from your resume.</Trans>
+					)
+				) : company && hasResume ? (
 					<Trans>Start typing, or draft from what we know: the {company} posting and your resume.</Trans>
 				) : company ? (
 					<Trans>Start typing, or draft from what we know: the {company} posting.</Trans>
@@ -493,13 +702,27 @@ function EmptyBody({ letter, application, disabled, onWrite }: EmptyBodyProps) {
 					<Trans>Write it myself</Trans>
 				</Button>
 			</div>
+			{canDraft && hasUsableProvider && (
+				<p className="text-xs text-ink-3">
+					{application && hasResume
+						? t`Sends this letter's resume and the ${application.company} posting to ${providerState.usableProviders[0]?.label ?? t`your AI provider`} to draft the body.`
+						: application
+							? t`Sends the ${application.company} posting to ${providerState.usableProviders[0]?.label ?? t`your AI provider`} to draft the body.`
+							: t`Sends this letter's resume to ${providerState.usableProviders[0]?.label ?? t`your AI provider`} to draft the body.`}
+				</p>
+			)}
 			{canDraft && <AiProviderLoadState state={providerState} />}
+			{canDraft && hasUsableProvider && (
+				<p className="text-xs text-ink-3">
+					<Trans>
+						Sends the linked resume, posting and letter details to {draft?.label} · {draft?.model}. Your provider may
+						charge.
+					</Trans>
+				</p>
+			)}
 			{canDraft && !providerState.isUnavailable && !hasUsableProvider && (
 				<p className="text-xs text-ink-3">
-					<Trans>Drafting needs an AI provider.</Trans>{" "}
-					<Link to="/dashboard/settings/ai" className={buttonVariants({ variant: "link", size: "sm" })}>
-						<Trans>Open AI settings</Trans>
-					</Link>
+					<Trans>Drafting needs an AI provider.</Trans> <SetUpAi />
 				</p>
 			)}
 		</div>
@@ -509,18 +732,23 @@ function EmptyBody({ letter, application, disabled, onWrite }: EmptyBodyProps) {
 type DraftBoxProps = {
 	draft: Exclude<LetterDraft, { phase: "idle" }>;
 	letter: CoverLetter;
-	application: Application | null;
-	onKeep: (text: string) => void;
+	application: ApplicationSummary | null;
+	onKeep: (text: string, aiOperationIds: string[]) => void;
 };
 
 /** The draft on its green wash, then the dark chip: Keep, Shorter, More personal, Discard. */
 function DraftBox({ draft, letter, application, onKeep }: DraftBoxProps) {
 	const reducedMotion = useReducedMotion();
+	const [pick, setPick] = useState<{ draft: LetterDraft; index: number } | null>(null);
 	// Retrying repeats the last request.
-	const last = useRef<{ variant: "draft" | "shorter" | "personal"; previous?: string }>({ variant: "draft" });
-	const run = (variant: "draft" | "shorter" | "personal", previous?: string) => {
-		last.current = previous ? { variant, previous } : { variant };
-		void startLetterDraft(variant, previous);
+	const last = useRef<{
+		variant: "draft" | "shorter" | "personal";
+		previous?: string;
+		previousAiOperationIds?: string[];
+	}>({ variant: "draft" });
+	const run = (variant: "draft" | "shorter" | "personal", previous?: string, previousAiOperationIds: string[] = []) => {
+		last.current = previous ? { variant, previous, previousAiOperationIds } : { variant };
+		void startLetterDraft(variant, previous, previousAiOperationIds);
 	};
 
 	if (draft.phase === "failed") {
@@ -536,10 +764,14 @@ function DraftBox({ draft, letter, application, onKeep }: DraftBoxProps) {
 					)}
 				</span>
 				<div className="flex gap-1.5">
-					<Button size="sm" variant="secondary" onClick={() => run(last.current.variant, last.current.previous)}>
+					<Button
+						size="sm"
+						variant="secondary"
+						onClick={() => run(last.current.variant, last.current.previous, last.current.previousAiOperationIds)}
+					>
 						<Trans>Try again</Trans>
 					</Button>
-					<Button size="sm" variant="ghost" onClick={discardLetterDraft}>
+					<Button size="sm" variant="ghost" onClick={dismissLetterDraftFailure}>
 						<Trans>Dismiss</Trans>
 					</Button>
 				</div>
@@ -548,8 +780,13 @@ function DraftBox({ draft, letter, application, onKeep }: DraftBoxProps) {
 	}
 
 	const streaming = draft.phase === "streaming";
+	// Earlier versions stay side by side with the newest: "2 of 3", and Accept or a revision uses the one shown.
+	const currentVersion = { text: draft.text, aiOperationIds: draft.aiOperationIds ?? [] };
+	const all = streaming ? [currentVersion] : [...draft.versions, currentVersion];
+	const index = pick?.draft === draft ? Math.min(pick.index, all.length - 1) : all.length - 1;
+	const shown = all[index] ?? currentVersion;
 	// Reduced motion shows the whole draft at once.
-	const text = streaming && reducedMotion ? "" : draft.text;
+	const text = streaming && reducedMotion ? "" : shown.text;
 	const sources =
 		letter.sourceResumeId && application
 			? t`Draft · uses only your resume and the posting`
@@ -575,9 +812,41 @@ function DraftBox({ draft, letter, application, onKeep }: DraftBoxProps) {
 				)}
 			</div>
 			{streaming && (
-				<Button size="sm" variant="ghost" className="w-fit" onClick={discardLetterDraft}>
+				<Button size="sm" variant="ghost" className="w-fit" onClick={stopLetterDraft}>
 					<Trans>Stop</Trans>
 				</Button>
+			)}
+			{draft.phase === "ready" && draft.stopped && index === all.length - 1 && (
+				<p className="text-xs text-ink-3">
+					<Trans>Stopped before the end. Accept it and finish it yourself, or reject it.</Trans>
+				</p>
+			)}
+			{draft.phase === "ready" && all.length > 1 && (
+				<div className="flex items-center gap-1 text-xs text-ink-2">
+					<Button
+						size="icon-xs"
+						variant="ghost"
+						aria-label={t`Previous version`}
+						disabled={index === 0}
+						onClick={() => setPick({ draft, index: index - 1 })}
+					>
+						<Icon name="caret-left" size={16} />
+					</Button>
+					<span className="font-mono tabular-nums">
+						<Trans>
+							{i18n.number(index + 1)} of {i18n.number(all.length)}
+						</Trans>
+					</span>
+					<Button
+						size="icon-xs"
+						variant="ghost"
+						aria-label={t`Next version`}
+						disabled={index === all.length - 1}
+						onClick={() => setPick({ draft, index: index + 1 })}
+					>
+						<Icon name="caret-right" size={16} />
+					</Button>
+				</div>
 			)}
 			{draft.phase === "ready" && (
 				<div
@@ -589,10 +858,10 @@ function DraftBox({ draft, letter, application, onKeep }: DraftBoxProps) {
 					</span>
 					<button
 						type="button"
-						onClick={() => onKeep(draft.text)}
-						className="h-8 rounded-lg bg-accent px-3 text-[13px] font-semibold text-on-accent hover:bg-accent-hover"
+						onClick={() => onKeep(shown.text, shown.aiOperationIds)}
+						className="touch-target relative h-8 rounded-lg bg-accent px-3 text-[13px] font-semibold text-on-accent hover:bg-accent-hover"
 					>
-						<Trans>Keep</Trans>
+						<Trans>Accept</Trans>
 					</button>
 					{(
 						[
@@ -603,8 +872,8 @@ function DraftBox({ draft, letter, application, onKeep }: DraftBoxProps) {
 						<button
 							key={variant}
 							type="button"
-							onClick={() => run(variant, draft.text)}
-							className="h-8 rounded-lg px-2.5 text-[13px] hover:bg-[oklch(1_0_0/0.12)]"
+							onClick={() => run(variant, shown.text, shown.aiOperationIds)}
+							className="touch-target relative h-8 rounded-lg px-2.5 text-[13px] hover:bg-[oklch(1_0_0/0.12)]"
 						>
 							{label}
 						</button>
@@ -612,9 +881,9 @@ function DraftBox({ draft, letter, application, onKeep }: DraftBoxProps) {
 					<button
 						type="button"
 						onClick={discardLetterDraft}
-						className="h-8 rounded-lg px-2.5 text-[13px] hover:bg-[oklch(1_0_0/0.12)]"
+						className="touch-target relative h-8 rounded-lg px-2.5 text-[13px] hover:bg-[oklch(1_0_0/0.12)]"
 					>
-						<Trans>Discard</Trans>
+						<Trans>Reject</Trans>
 					</button>
 				</div>
 			)}
@@ -677,11 +946,15 @@ function LengthSection({ content }: { content: string }) {
 
 /** DESIGN: what the letter looks like, and where to change it. */
 function DesignNote({ letter }: { letter: CoverLetter }) {
+	const { i18n } = useLingui();
 	const [, setMode] = useLetterMode();
 	const { metadata } = letter.style;
-	const pairing = FONT_PAIRINGS.find((option) => option.id === matchFontPairing(metadata))?.label;
+	const pairingLabel = FONT_PAIRINGS.find((option) => option.id === matchFontPairing(metadata))?.label;
 	const accent = ACCENTS.find((option) => option.hex === rgbaToHex(metadata.design.colors.primary))?.label;
-	const summary = [templates[metadata.template].name, pairing && t`${pairing} type`, accent].filter(Boolean).join(", ");
+	const pairing = pairingLabel && i18n._(pairingLabel);
+	const summary = [templates[metadata.template].name, pairing && t`${pairing} type`, accent && i18n._(accent)]
+		.filter(Boolean)
+		.join(", ");
 
 	return (
 		<Section id="letter-design" title={<Trans>Design</Trans>}>

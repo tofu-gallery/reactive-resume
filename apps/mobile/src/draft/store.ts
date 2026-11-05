@@ -1,11 +1,41 @@
 import type { DraftStore, UpdateOptions } from "./types";
+import type { ProposalApplications, ProposalSnapshot } from "@reactive-resume/resume/proposals";
+import type { AiUsageSummary } from "@reactive-resume/schema/ai-usage";
 import type { WritableDraft } from "immer";
 import { produce } from "immer";
 import { create } from "zustand";
+import {
+	acknowledgeProposalApplications,
+	appliedApplications,
+	queueProposalApplications,
+	readProposalApplications,
+	restoreProposalApplications,
+	proposalAiOperationIds,
+} from "@reactive-resume/resume/proposals";
 import { generateId } from "@reactive-resume/utils/string";
 
-type Document = { id: string; isLocked: boolean };
-type Record<D> = { baseline: D; document: D; sessionId: string; copyId?: string };
+type Document = {
+	id: string;
+	isLocked: boolean;
+	aiOperationIds?: string[] | undefined;
+	aiUsage?: AiUsageSummary | null | undefined;
+};
+type Snapshot<T> = ProposalSnapshot<T> & Pick<Document, "aiOperationIds" | "aiUsage">;
+type Record<D> = {
+	baseline: D;
+	document: D;
+	sessionId: string;
+	copyId?: string;
+	proposalApplications?: ProposalApplications;
+	pendingProposalApplications?: ProposalApplications;
+	/**
+	 * Set on drafts this app keeps, which apply assistant edits only through checked decisions. A draft kept by an
+	 * older app lacks it: it's sent without proposalSafety until the server takes it or it's replaced, so updating the
+	 * app never vouches for what the older one queued.
+	 */
+	proposalSafety?: "v1";
+	conflictReason?: "CURRENT_CLIENT_REQUIRED";
+};
 
 export type DraftAdapter<D extends Document, T> = {
 	kind: "resume" | "letter";
@@ -18,7 +48,15 @@ export type DraftAdapter<D extends Document, T> = {
 	version: (document: D) => string | number;
 	parse: (value: unknown) => D;
 	/** `scope` binds the write to the account that owns the draft (the API client refuses it after an account switch). */
-	save: (document: D, baseline: D, sessionId: string, force: boolean, scope: string) => Promise<D>;
+	save: (
+		document: D,
+		baseline: D,
+		sessionId: string,
+		force: boolean,
+		scope: string,
+		proposalApplications?: ProposalApplications,
+		proposalSafety?: "v1",
+	) => Promise<D>;
 	copy: (document: D, copyId: string | undefined, remember: (id: string) => void, scope: string) => Promise<void>;
 	isConflict: (error: unknown) => boolean;
 };
@@ -42,6 +80,8 @@ const emptyState = {
 	status: "idle",
 	locked: false,
 	conflict: null,
+	proposalApplications: {},
+	proposalRevision: null,
 	canUndo: false,
 	canRedo: false,
 } as const;
@@ -62,11 +102,13 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 	let persistenceTimer: ReturnType<typeof setTimeout> | undefined;
 	let queueGeneration = 0;
 	let inflight: Promise<void> | null = null;
+	// A sharing or other metadata write of this app's own: content saves wait for it, then build on its revision.
+	let metadataWrite: { run: Promise<unknown>; record: Record<D> } | null = null;
 	let replaying: Promise<void> | null = null;
 	let resolving = false;
 	let force = false;
-	let undo: T[] = [];
-	let redo: T[] = [];
+	let undo: Snapshot<T>[] = [];
+	let redo: Snapshot<T>[] = [];
 	let last: { at: number; key: string | undefined; coalesce: boolean } | null = null;
 	const prefix = (owner: string) => `reactive-resume:unsaved:${encodeURIComponent(owner)}:${adapter.kind}:`;
 	const key = () => {
@@ -86,9 +128,15 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 		flush,
 	}));
 	const state = store.getState;
+	const checkpoint = (document: D): Snapshot<T> => ({
+		data: adapter.data(document),
+		applications: state().proposalApplications,
+		aiOperationIds: document.aiOperationIds ?? [],
+		aiUsage: document.aiUsage,
+	});
 
-	function publish(document: D) {
-		store.setState({ document, data: adapter.data(document), locked: document.isLocked });
+	function publish(document: D, proposalApplications: ProposalApplications = state().proposalApplications) {
+		store.setState({ document, data: adapter.data(document), locked: document.isLocked, proposalApplications });
 	}
 
 	function history() {
@@ -110,6 +158,17 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 		env.storage.removeItemSync(storageKey);
 		pending.delete(storageKey);
 		notifyPending();
+	}
+
+	function settleStored() {
+		if (!record) return;
+		pending.set(key(), record);
+		if (Object.keys(record.proposalApplications ?? {}).length > 0) {
+			// A clean recovery record retains decisions; it is not an unsaved document in the outbox.
+			env.storage.setItemSync(key(), JSON.stringify(record));
+			pending.delete(key());
+			notifyPending();
+		} else removeStored(key());
 	}
 
 	function persist() {
@@ -153,6 +212,12 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 				document,
 				sessionId: value.sessionId,
 				...(typeof value.copyId === "string" ? { copyId: value.copyId } : {}),
+				proposalApplications: readProposalApplications(value.proposalApplications),
+				pendingProposalApplications: readProposalApplications(value.pendingProposalApplications),
+				...(value.proposalSafety === "v1" ? { proposalSafety: "v1" as const } : {}),
+				...(value.conflictReason === "CURRENT_CLIENT_REQUIRED"
+					? { conflictReason: "CURRENT_CLIENT_REQUIRED" as const }
+					: {}),
 			};
 		} catch {
 			// A corrupt record cannot be restored; it must not permanently block the server copy.
@@ -190,32 +255,65 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 			}
 			if (record && record.document.id !== id) throw new Error("Invalid draft identity.");
 			if (record) {
-				dirty = true;
-				publish(record.document);
-				store.setState({ status: !durable ? "error" : env.online() ? "saving" : "offline" });
+				dirty =
+					!adapter.matches(record.baseline, record.document) ||
+					Object.keys(record.pendingProposalApplications ?? {}).length > 0;
+				publish(record.document, record.proposalApplications ?? {});
+				store.setState({ proposalRevision: adapter.version(record.baseline) });
+				store.setState({ status: !dirty ? "saved" : !durable ? "error" : env.online() ? "saving" : "offline" });
 			}
 			if (!env.online() && record) return;
 			const restored = record?.document;
 			const remote = await adapter.read(id);
 			if (inflight) await inflight;
 			if (!(await currentOwner()) || visit !== generation) return;
+			if (record?.conflictReason && dirty) {
+				store.setState({
+					conflict: { remote, reason: record.conflictReason },
+					locked: remote.isLocked,
+					status: "error",
+				});
+				return;
+			}
+			if (record && !dirty && adapter.version(remote) !== adapter.version(record.baseline)) record = null;
 			if (!record) {
-				record = { document: remote, baseline: remote, sessionId: generateId() };
-				publish(remote);
+				record = { document: remote, baseline: remote, sessionId: generateId(), proposalSafety: "v1" };
+				publish(remote, {});
+				store.setState({ proposalRevision: adapter.version(remote) });
+				settleStored();
 			} else if (adapter.version(remote) < adapter.version(record.baseline)) {
 				return;
+			} else if (
+				adapter.version(remote) > adapter.version(record.baseline) &&
+				Object.keys(record.pendingProposalApplications ?? {}).length > 0
+			) {
+				// Content equality is not an acknowledgement of the queued decision.
+				store.setState({ conflict: { remote }, locked: remote.isLocked, status: "error" });
 			} else if (adapter.matches(remote, record.document) || (restored && adapter.matches(remote, restored))) {
 				// The write may have succeeded without its response. Keep anything typed during this read.
+				if (adapter.version(remote) !== adapter.version(record.baseline)) {
+					record.proposalApplications = {};
+					publish(record.document, {});
+					store.setState({ proposalRevision: adapter.version(remote) });
+				}
 				record.document = adapter.merge(remote, restored ?? record.document, record.document);
 				record.baseline = remote;
-				dirty = !adapter.matches(remote, record.document);
+				// Nothing the draft held is left to send; anything else was typed here.
+				if (
+					restored &&
+					adapter.matches(remote, restored) &&
+					!Object.keys(record.pendingProposalApplications ?? {}).length
+				)
+					record.proposalSafety = "v1";
+				dirty =
+					!adapter.matches(remote, record.document) || Object.keys(record.pendingProposalApplications ?? {}).length > 0;
 				publish(record.document);
 				store.setState({ conflict: null, status: dirty ? "saving" : "saved" });
 				if (dirty) await flush();
 				else {
 					clearTimeout(persistenceTimer);
 					persistenceTimer = undefined;
-					removeStored(key());
+					settleStored();
 				}
 			} else if (adapter.version(remote) > adapter.version(record.baseline)) {
 				store.setState({ conflict: { remote }, locked: remote.isLocked, status: "error" });
@@ -247,12 +345,18 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 		store.setState(emptyState);
 	}
 
-	function queue(document: D) {
+	function queue(document: D, applications: ProposalApplications = state().proposalApplications) {
 		if (!record) return;
+		record.pendingProposalApplications = queueProposalApplications(
+			record.proposalApplications ?? {},
+			applications,
+			record.pendingProposalApplications ?? {},
+		);
+		record.proposalApplications = applications;
 		record.document = document;
 		dirty = true;
 		deferred = null;
-		publish(document);
+		publish(document, applications);
 		store.setState({ status: env.online() ? "saving" : "offline" });
 		schedulePersistence();
 		clearTimeout(timer);
@@ -263,18 +367,34 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 		if (!record || state().locked || resolving) return;
 		const before = adapter.data(record.document);
 		const next = produce(before, recipe);
-		if (next === before) return;
+		const existingSources = record.document.aiOperationIds ?? [];
+		const sources = [...(options.aiOperationIds ?? []), ...proposalAiOperationIds(options.applied ?? [])];
+		const newSources = sources.some((id) => !existingSources.includes(id));
+		if (next === before && !newSources) return;
 		const now = Date.now();
 		const coalesce =
 			!options.newStep &&
 			last?.coalesce &&
 			last.key === options.coalesceKey &&
 			((options.sameStep && options.coalesceKey !== undefined) || now - last.at < (options.coalesceKey ? 1000 : 500));
-		if (!coalesce) undo = [...undo.slice(-199), before];
+		if (!coalesce) undo = [...undo.slice(-199), checkpoint(record.document)];
 		redo = [];
 		last = { at: now, key: options.coalesceKey, coalesce: !options.newStep };
 		history();
-		queue(adapter.withData(record.document, next));
+		const document = adapter.withData(record.document, next);
+		queue(
+			newSources
+				? {
+						...document,
+						aiOperationIds: [...new Set([...(record.document.aiOperationIds ?? []), ...sources])],
+						aiUsage: null,
+					}
+				: document,
+			{
+				...state().proposalApplications,
+				...appliedApplications(options.applied ?? []),
+			},
+		);
 	}
 
 	function updateDocument(recipe: (draft: WritableDraft<D>) => void) {
@@ -283,10 +403,10 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 		const document = produce(before, recipe);
 		if (document === before) return;
 		const fields = (Object.keys(document) as (keyof D)[]).filter((field) => document[field] !== before[field]);
-		const rebase = (snapshot: T) => {
-			const historical = { ...adapter.withData(before, snapshot) };
+		const rebase = (snapshot: ProposalSnapshot<T>): ProposalSnapshot<T> => {
+			const historical = { ...adapter.withData(before, snapshot.data) };
 			for (const field of fields) historical[field] = document[field];
-			return adapter.data(historical);
+			return { data: adapter.data(historical), applications: snapshot.applications };
 		};
 		// Letter data is the document itself: metadata edits must survive later content undo/redo.
 		undo = undo.map(rebase);
@@ -294,15 +414,22 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 		queue(document);
 	}
 
-	function travel(from: T[], to: T[]) {
+	function travel(from: Snapshot<T>[], to: Snapshot<T>[]) {
 		if (!record || state().locked || resolving) return;
 		const next = from.pop();
 		if (next === undefined) return;
-		to.push(adapter.data(record.document));
+		to.push(checkpoint(record.document));
 		if (to.length > 200) to.shift();
 		last = null;
 		history();
-		queue(adapter.withData(record.document, next));
+		queue(
+			{
+				...adapter.withData(record.document, next.data),
+				aiOperationIds: next.aiOperationIds ?? [],
+				aiUsage: next.aiUsage,
+			},
+			restoreProposalApplications(state().proposalApplications, next.applications),
+		);
 	}
 
 	async function flush(): Promise<void> {
@@ -313,6 +440,11 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 			return flush();
 		}
 		if (!record || !dirty || state().conflict || state().locked) return;
+		// Only this draft's own write holds its unsaved edits: a clean draft, another visit or account doesn't wait.
+		if (metadataWrite && metadataWrite.record === record) {
+			await metadataWrite.run.catch(() => undefined);
+			return flush();
+		}
 		if (!env.online()) {
 			store.setState({ status: durable ? "offline" : "error" });
 			return;
@@ -325,18 +457,33 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 				store.setState({ status: "saving" });
 				while (dirty && record === active && !state().conflict && !state().locked) {
 					const submitted = active.document;
-					const saved = await adapter.save(submitted, active.baseline, active.sessionId, force, scope ?? "");
+					const submittedApplications = active.pendingProposalApplications ?? {};
+					const saved = await adapter.save(
+						submitted,
+						active.baseline,
+						active.sessionId,
+						force,
+						scope ?? "",
+						submittedApplications,
+						active.proposalSafety,
+					);
 					if (!(await currentOwner()) || visit !== generation) return;
 					force = false;
+					// The server took what this draft held; what's typed from here on is this app's own.
+					active.proposalSafety = "v1";
+					active.pendingProposalApplications = acknowledgeProposalApplications(
+						active.pendingProposalApplications ?? {},
+						submittedApplications,
+					);
 					active.baseline = saved;
-					dirty = active.document !== submitted;
+					dirty = active.document !== submitted || Object.keys(active.pendingProposalApplications).length > 0;
 					// Only local fields changed since submission overlay the server echo. Server-owned
 					// revision/lock metadata always comes from the save, and typing keeps its references.
 					active.document = adapter.merge(saved, submitted, active.document);
 					publish(active.document);
 					if (dirty) persist();
 					else {
-						removeStored(key());
+						settleStored();
 						store.setState({ status: "saved" });
 					}
 					if (!env.online()) break;
@@ -345,10 +492,15 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 				if (record !== active || visit !== generation) return;
 				store.setState({ status: env.online() ? "error" : "offline" });
 				if (adapter.isConflict(error)) {
+					if ((error as { data?: { reason?: unknown } }).data?.reason === "CURRENT_CLIENT_REQUIRED")
+						active.conflictReason = "CURRENT_CLIENT_REQUIRED";
 					try {
 						const remote = await adapter.read(active.document.id);
 						if ((await currentOwner()) && record === active && visit === generation)
-							store.setState({ conflict: { remote }, locked: remote.isLocked });
+							store.setState({
+								conflict: { remote, ...(active.conflictReason ? { reason: active.conflictReason } : {}) },
+								locked: remote.isLocked,
+							});
 					} catch {
 						/* Retry fetches the conflict again; the local draft stays intact. */
 					}
@@ -363,6 +515,7 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 
 	async function resolveConflict(choice: "keep-mine" | "use-theirs" | "keep-both") {
 		if (!record || !state().conflict || resolving) return;
+		if (choice === "keep-mine" && record.conflictReason) return;
 		resolving = true;
 		const active = record;
 		const visit = generation;
@@ -375,7 +528,11 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 					store.setState({ locked: true, conflict: { remote } });
 					return;
 				}
+				resetHistory();
 				active.baseline = remote;
+				active.proposalApplications = active.pendingProposalApplications ?? {};
+				publish(active.document, active.proposalApplications);
+				store.setState({ proposalRevision: adapter.version(remote) });
 				force = true;
 				store.setState({ conflict: null, locked: false });
 				persist();
@@ -393,11 +550,12 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 					);
 				if (!(await currentOwner()) || record !== active) return;
 				removeStored(key());
-				record = { baseline: remote, document: remote, sessionId: active.sessionId };
+				record = { baseline: remote, document: remote, sessionId: active.sessionId, proposalSafety: "v1" };
 				dirty = false;
 				deferred = null;
 				resetHistory();
-				publish(remote);
+				publish(remote, {});
+				store.setState({ proposalRevision: adapter.version(remote) });
 				store.setState({ conflict: null, status: "saved" });
 			}
 		} catch (error) {
@@ -408,15 +566,108 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 		}
 	}
 
+	/**
+	 * Runs this app's own conditional write of fields next to the data (sharing settings) against the saved revision,
+	 * and takes its answer as that revision. Unlike a refresh, which treats any newer revision as someone else's, this
+	 * keeps Undo, Redo, confirmed assistant decisions and edits typed meanwhile. A revision from elsewhere still fails
+	 * the write's version check, and a draft that changed visit or account in between is left to refresh as before.
+	 */
+	/**
+	 * `conditional: false` is for a write sent without the saved revision (unlocking: a lock from elsewhere can't be
+	 * unseen on a draft whose edits wait for it). Its answer is taken only when the server's data is still the saved
+	 * revision's, so an edit made elsewhere still reaches the draft the usual way.
+	 */
+	async function writeMetadata(
+		write: (baseline: D) => Promise<D>,
+		{ conditional = true }: { conditional?: boolean } = {},
+	): Promise<D> {
+		if (inflight) await inflight;
+		// One at a time: a second change waits for the first's revision, so its version check builds on it.
+		while (metadataWrite && metadataWrite.record === record) await metadataWrite.run.catch(() => undefined);
+		if (!record) throw new Error("No draft is open.");
+		const active = record;
+		const visit = generation;
+		const before = active.baseline;
+		const run = write(before);
+		metadataWrite = { run, record: active };
+		try {
+			const written = await run;
+			const owner = await currentOwner();
+			// A revision a refresh set aside while the write ran is newer than this answer: its lock state stands.
+			const newer = deferred && adapter.version(deferred) > adapter.version(written) ? deferred : null;
+			// The lock state is the server's whether or not the answer becomes the base: an unchecked unlock whose data
+			// is unseen here still unlocks, and the next save then meets that data's version check.
+			if (
+				owner &&
+				record === active &&
+				visit === generation &&
+				!newer &&
+				// An answer older than a revision the draft already took (a refresh during the write) says nothing new.
+				adapter.version(written) >= adapter.version(active.baseline)
+			)
+				store.setState({ locked: written.isLocked });
+			// Checked after every wait: a refresh may have moved the baseline on meanwhile. An answer as new as the
+			// baseline (two writes in one millisecond) is still this write's own.
+			if (
+				owner &&
+				record === active &&
+				visit === generation &&
+				active.baseline === before &&
+				adapter.version(written) >= adapter.version(before) &&
+				(conditional || JSON.stringify(adapter.data(written)) === JSON.stringify(adapter.data(before)))
+			) {
+				active.baseline = written;
+				// Local fields changed since the saved revision stay; the rest is the server's answer.
+				active.document = adapter.merge(written, before, active.document);
+				publish(active.document);
+				if (newer) store.setState({ locked: newer.isLocked });
+				if (dirty) persist();
+				else settleStored();
+			}
+			return written;
+		} catch (error) {
+			// A revision from elsewhere refused the write: read it, so a retry checks against what's saved now.
+			if (adapter.isConflict(error) && record === active) void refresh().catch(() => undefined);
+			throw error;
+		} finally {
+			if (metadataWrite?.run === run) metadataWrite = null;
+			if (record === active) {
+				// A stream event that arrived during the write waited for its answer; anything newer applies now.
+				const late = deferred;
+				if (late && !dirty && !editing && !env.focused()) {
+					deferred = null;
+					applyRemote(late);
+				}
+				if (dirty) void flush();
+			}
+		}
+	}
+
 	async function refresh() {
 		if (!record || !env.online() || resolving) return;
 		const active = record;
 		const remote = await adapter.read(active.document.id);
 		if (!(await currentOwner()) || record !== active) return;
 		if (adapter.version(remote) <= adapter.version(active.baseline)) return;
+		// This app's own sharing or lock write may be what the stream announced: wait for its answer first.
+		if (metadataWrite && metadataWrite.record === active) {
+			// Unsaved edits still learn of a lock from elsewhere at once, so they wait instead of failing to save.
+			if (dirty || inflight) store.setState({ locked: remote.isLocked });
+			deferred = remote;
+			return;
+		}
 		// Never advance the baseline of unsaved data in response to SSE (including our own echo).
 		if (dirty || inflight) {
+			const unlocked = state().locked && !remote.isLocked;
 			store.setState({ locked: remote.isLocked });
+			// Unlocking sends what couldn't be saved while it was locked, without waiting for Retry. Locking and
+			// unlocking moved the server's revision without touching the content: when the content is still what these
+			// edits build on, adopt that revision first; a real change elsewhere still meets them as a conflict.
+			if (unlocked && dirty && !inflight) {
+				if (JSON.stringify(adapter.data(remote)) === JSON.stringify(adapter.data(active.baseline)))
+					active.baseline = remote;
+				void flush();
+			}
 			return;
 		}
 		if (editing || env.focused()) {
@@ -428,10 +679,19 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 
 	function applyRemote(remote: D) {
 		if (!record || dirty || adapter.version(remote) <= adapter.version(record.baseline)) return;
-		if (JSON.stringify(adapter.data(remote)) !== JSON.stringify(adapter.data(record.document))) resetHistory();
+		resetHistory();
 		record.baseline = remote;
 		record.document = remote;
-		publish(remote);
+		record.proposalApplications = {};
+		record.pendingProposalApplications = {};
+		record.proposalSafety = "v1";
+		publish(remote, {});
+		store.setState({ proposalRevision: adapter.version(remote) });
+		try {
+			settleStored();
+		} catch {
+			store.setState({ status: "error" });
+		}
 	}
 
 	async function blur() {
@@ -452,10 +712,30 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 			try {
 				const queued = readStored(storageKey);
 				if (!queued) continue;
+				if (
+					adapter.matches(queued.baseline, queued.document) &&
+					Object.keys(queued.pendingProposalApplications ?? {}).length === 0
+				)
+					continue;
 				if ((await env.scope()) !== owner || visit !== queueGeneration) return;
-				await adapter.save(queued.document, queued.baseline, queued.sessionId, false, owner);
+				const saved = await adapter.save(
+					queued.document,
+					queued.baseline,
+					queued.sessionId,
+					false,
+					owner,
+					queued.pendingProposalApplications ?? {},
+					queued.proposalSafety,
+				);
+				queued.document = adapter.merge(saved, queued.document, queued.document);
 				if (visit !== queueGeneration) return;
-				removeStored(storageKey);
+				queued.baseline = saved;
+				queued.pendingProposalApplications = {};
+				if (Object.keys(queued.proposalApplications ?? {}).length > 0)
+					env.storage.setItemSync(storageKey, JSON.stringify(queued));
+				else removeStored(storageKey);
+				pending.delete(storageKey);
+				notifyPending();
 			} catch {
 				/* Conflicts, locked documents and failures stay queued until opened. */
 			}
@@ -471,6 +751,7 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 
 	function reset() {
 		generation++;
+		metadataWrite = null;
 		clearTimeout(timer);
 		clearTimeout(persistenceTimer);
 		persistenceTimer = undefined;
@@ -494,7 +775,12 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 			if (!storageKey.startsWith(prefix(owner))) continue;
 			try {
 				const queued = readStored(storageKey);
-				if (queued) documents.push(queued.document);
+				if (
+					queued &&
+					(!adapter.matches(queued.baseline, queued.document) ||
+						Object.keys(queued.pendingProposalApplications ?? {}).length > 0)
+				)
+					documents.push(queued.document);
 			} catch {
 				/* An unreadable entry must not hide other recoverable drafts. */
 			}
@@ -522,6 +808,7 @@ export function createDraftStore<D extends Document, T>(adapter: DraftAdapter<D,
 			return () => pendingListeners.delete(listener);
 		},
 		refresh,
+		writeMetadata,
 		replay,
 		blur,
 		clearDraftsFor,

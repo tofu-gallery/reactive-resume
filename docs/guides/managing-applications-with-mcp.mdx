@@ -15,6 +15,8 @@ Once your AI client is connected to the Reactive Resume MCP server, you can run 
 
 Every application sits in one stage: `saved`, `applied`, `screening`, `interview`, `offer` or `closed`. Closing an application takes a reason: `not-selected`, `withdrew`, `accepted-other` or `no-response`. Each application also has a timeline of stage changes, notes and interviews, optional contacts, tags, a follow-up date, a linked resume and letter, and the resume and cover-letter PDFs you sent.
 
+If you've added your own stages, such as **Take-home assignment** or **Ghosted**, each one has an ID and counts as one of those six. The client reads your stages with `api_applications_lanes_get` and passes a stage's ID as `laneId` to `list_applications`, `create_application`, `update_application` or `bulk_update_applications`. Moving to a Closed stage with a preset outcome, such as **Ghosted**, doesn't need a reason. See [Customizing application stages](/guides/customizing-application-stages).
+
 These are the same applications you see in the app's List, Board, Insights and Calendar views. See [Tracking job applications](/guides/tracking-job-applications).
 
 ## Review your pipeline first
@@ -107,12 +109,9 @@ Attach this PDF as the resume I sent to Northwind Games.
 Remove the cover-letter PDF from the Blue Harbor Studio application.
 ```
 
-`attach_application_document` accepts one resume PDF and one cover-letter PDF per application, up to 10 MB each, sent as base64. Attaching a new file replaces the old one.
+`attach_application_document` accepts one resume PDF and one cover-letter PDF per application, up to 10 MiB each. Inline `dataBase64` is limited to 3 MiB of encoded text (about 2.25 MiB of file bytes). For a larger PDF, upload it under your account first and supply its owned `storagePath` instead. Supply exactly one of `dataBase64` or `storagePath`; external URLs and other users' files cannot be used. See [File limits and references](/guides/using-the-mcp-server#file-limits-and-references).
 
-<Warning>
-  Anyone with the address of an attached PDF can download it without signing in. Attaching a file never sends it to an
-  employer.
-</Warning>
+Attaching a new file replaces the old one. Downloading an attached PDF requires authentication as its owner with read permission; other requests receive a 404 response. Attaching a file never sends it to an employer.
 
 If your client can't read files from your computer, attach the PDF in the app instead. See [Managing an application](/guides/managing-an-application).
 
@@ -136,12 +135,40 @@ Draft a cover letter for the Northwind Games application.
 Draft a short follow-up to the recruiter at Northwind Games asking about next steps.
 ```
 
-| Tool                            | What it changes                                                                                                                                                                              |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `score_application_match`       | Saves a new match score on the application, replacing the previous one.                                                                                                                      |
-| `tailor_resume_for_application` | Creates a private copy of the linked resume with a rewritten summary, links the copy to the application in place of the original and adds a timeline note. The original resume is unchanged. |
-| `draft_application_message`     | In cover-letter mode, saves a new cover letter and returns its text and ID. In follow-up mode, returns the text only. It never sends anything.                                               |
-| `autofill_application_from_job` | Returns suggested company, role, location and salary from a pasted posting. It saves nothing.                                                                                                |
+| Tool                            | What it changes                                                                                                                                                                                                                      |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `score_application_match`       | Saves a new match score on the application, replacing the previous one. The score is an editing aid for finding gaps, not a hiring probability or a promise that an applicant tracking system accepts the resume.                    |
+| `tailor_resume_for_application` | Creates an unchanged private copy and asks the existing assistant for pending tailoring proposals. Eligible saved applications link to the copy; submitted document links stay intact. Nothing generated is applied before approval. |
+| `draft_application_message`     | In cover-letter mode, returns draft text for review and the ID of a new linked letter with an empty body. `reviewRequired: true` means the body has not been kept. In follow-up mode, returns text only. It never sends anything.    |
+| `autofill_application_from_job` | Returns suggested company, role, location and salary from a pasted posting. It saves nothing.                                                                                                                                        |
+
+Tailoring uses the same copy and assistant owners as the app. It retains `resumeId` and `name`, and returns `reviewRequired: true`, `generationStatus` and the conversation. The resume and posting go to your connection's capable model; private notes, Knowledge and web access stay out. A completed reply may propose edits or ask for missing facts. If `generationStatus` is `interrupted`, the unchanged copy remains available: open it and continue any returned conversation instead of repeating the copy operation. A cancelled request may also have created its unchanged copy; check your documents before trying again. Copies inherit the source's language and tags.
+
+<Frame caption="A pending proposal from an API-started fictional tailoring conversation, opened in the existing assistant. The copy remains unchanged until Accept.">
+  <img
+    src="/images/guides/career/mcp-tailoring-review.png"
+    alt="Summary proposal removing Passionate from a fictional game developer opening, with a reason and Accept, Edit and Reject buttons."
+  />
+</Frame>
+
+Its proposed edits come back pending, each with the posting requirement it addresses, the assistant's citations and anything nothing checked backs, plus the posting requirements it found, gaps included. Each set names the application whose copy it's for (`tailoredFor`), and recording one as accepted on any other resume is refused. Nothing changes until you approve: your AI client applies an approved edit to that copy with `apply_resume_patch`, passing `proposalApplications` and `proposalSafety`, so the decision is recorded in the same write. If the edit's current wording isn't what the patch writes, or tailoring doesn't allow it on that resume, nothing is written. A structural set (an edit with a `snapshot`) is applied whole. Send `snapshot:<edit id>` as its `proposalApplications` value; this bounded receipt identifies the immutable proposal even when its review summary is long. Prose receipts name the current `after`. Both allow later user refinements in the same save. Older `true` receipts require the saved content to match the proposal exactly, including the whole `snapshot.after` for structural sets. A resume with tailored or reworded assistant edits refuses content changes that don't send `proposalSafety`. The explicit `api_documents_copy_for_job` → `api_agent_threads_start` → `api_agent_messages_send` route remains available when you want to choose each step.
+
+```text
+Copy my resume for the Northwind Games application and ask the Reactive Resume assistant to tailor the copy. Show me each proposed edit with its requirement, citations and flagged claims, and the requirements with gaps. Apply only the ones I approve.
+```
+
+Cover-letter mode uses the app's letter draft prompt and language rules, sending the posting and linked resume text without private notes or design settings. Review the returned `text` in your AI client. Only after you approve it should the client read the new letter's current revision and call `update_cover_letter` with the approved body as escaped HTML paragraphs, `expectedRevision`, and the returned `aiOperationIds`. Those references retain the original provider/model; saving approved text makes no new model request. The returned `coverLetterId` does not mean the draft body has been accepted. A failed draft creates no letter. Follow-up mode neither creates a letter nor logs a reply as sent.
+
+<Frame caption="After an explicit approved save, the letter retains its fictional draft connection and model even after that connection is deleted.">
+  <img
+    src="/images/guides/career/mcp-letter-reviewed-source.png"
+    alt="Letter body with a fictional services paragraph, one AI request attempt from Fictional MCP Letter AI using letter-capable, and its greeting and sign-off fields."
+  />
+</Frame>
+
+```text
+Draft a cover letter for Northwind Games. Show me the returned text first. Keep the linked letter's body empty until I approve it, then save that version with its request sources.
+```
 
 Read anything the AI writes before you use it. You can also tailor resumes and write letters from the app; see [Tailoring a resume for a job](/guides/tailoring-a-resume-for-a-job).
 
@@ -167,16 +194,19 @@ Use Reactive Resume MCP for job applications. Call list_applications before crea
 
 ## Troubleshooting
 
-| Problem                                                  | What to do                                                                                                                                                   |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| The client can't see application tools                   | Reconnect the server and ask the client to refresh its tools.                                                                                                |
-| The client creates duplicates                            | Ask it to list applications first and match on company and role before creating one.                                                                         |
-| A stage change to `rejected` or an archive request fails | Those no longer exist. Use the `closed` stage with a reason.                                                                                                 |
-| Attaching a document fails                               | Only PDFs up to 10 MB are accepted. Attach from the app if your client can't read the file.                                                                  |
-| Scoring, tailoring or drafting fails                     | Check that a default AI provider is set up and tested. For scoring and tailoring, also check that the application has a job description and a linked resume. |
+| Problem                                                  | What to do                                                                                                                                                                                     |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The client can't see application tools                   | Reconnect the server and ask the client to refresh its tools.                                                                                                                                  |
+| The client creates duplicates                            | Ask it to list applications first and match on company and role before creating one.                                                                                                           |
+| A stage change to `rejected` or an archive request fails | Those no longer exist. Use the `closed` stage with a reason.                                                                                                                                   |
+| Attaching a document fails                               | Use a PDF up to 10 MiB. Inline base64 allows 3 MiB encoded (about 2.25 MiB of file bytes); use an owned `storagePath` for larger PDFs. Attach from the app if your client can't read the file. |
+| An attached PDF returns 404                              | Authenticate as the file's owner with read permission. The address alone does not grant access to a signed-out browser or another account.                                                     |
+| Scoring, tailoring or drafting fails                     | Check that a default AI provider is set up and tested. For scoring and tailoring, also check that the application has a job description and a linked resume.                                   |
 
 ## Related guides
 
 - [Using the MCP server](/guides/using-the-mcp-server): connecting a client, and the full tool list.
 - [Tracking job applications](/guides/tracking-job-applications): the Applications views in the app.
 - [Managing an application](/guides/managing-an-application): the application detail sheet.
+
+The legacy numeric `matchScore` remains a 0–100 compatibility assessment, distinct from the qualitative in-app Fit review; no numeric conversion of Fit is invented. It sends visible resume text rather than private notes or design settings. Results include additive request-source details, saved with the application and retained after connection deletion. A changed application or resume invalidates an in-flight score before it is saved.

@@ -1,5 +1,6 @@
 import type { Area } from "react-easy-crop";
 import type z from "zod";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useMutation } from "@tanstack/react-query";
@@ -20,51 +21,39 @@ import { FormControl, FormItem, FormLabel, FormMessage } from "@reactive-resume/
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
 import { InputGroup, InputGroupAddon, InputGroupText } from "@reactive-resume/ui/components/input-group";
+import { Popover, PopoverContent, PopoverTrigger } from "@reactive-resume/ui/components/popover";
 import { Slider } from "@reactive-resume/ui/components/slider";
 import { toast } from "@reactive-resume/ui/components/toast";
 import "react-easy-crop/react-easy-crop.css";
 import { ColorPicker } from "@/components/input/color-picker";
 import { NumberInput } from "@/components/input/number-input";
-import { useCurrentBuilderResumeSelector, useUpdateResumeData } from "@/features/resume/builder/draft";
+import { useCurrentBuilderResumeSelector, useResumeStore, useUpdateResumeData } from "@/features/resume/builder/draft";
 import { useClosingValue } from "@/hooks/use-closing-value";
-import { useConfirm } from "@/hooks/use-confirm";
 import { useSyncFormValues } from "@/hooks/use-sync-form-values";
+import { getAccountGeneration } from "@/libs/auth/account-scope";
 import { getReadableErrorMessage } from "@/libs/error-message";
 import { orpc } from "@/libs/orpc/client";
 import { useAppForm } from "@/libs/tanstack-form";
 
 type PicturePreviewControlsProps = {
-	fileInputRef: React.RefObject<HTMLInputElement | null>;
 	form: PictureSettingsForm;
 	normalizedPictureUrl: string;
 	picture: PictureValues;
 	onAutoSave: () => void;
 	onDeletePicture: () => void;
 	onSelectPicture: () => void;
-	onUploadPicture: (event: React.ChangeEvent<HTMLInputElement>) => void;
 };
 
 function PicturePreviewControls({
-	fileInputRef,
 	form,
 	normalizedPictureUrl,
 	picture,
 	onAutoSave,
 	onDeletePicture,
 	onSelectPicture,
-	onUploadPicture,
 }: PicturePreviewControlsProps) {
 	return (
 		<div className="flex items-center gap-x-4">
-			<input
-				ref={fileInputRef}
-				type="file"
-				accept="image/*"
-				aria-label={t`Upload photo`}
-				className="hidden"
-				onChange={onUploadPicture}
-			/>
-
 			<button
 				type="button"
 				onClick={picture.url ? onDeletePicture : onSelectPicture}
@@ -202,41 +191,6 @@ function PictureGeometryFields({ form, onAutoSave }: PictureFieldProps) {
 							</InputGroupAddon>
 						</InputGroup>
 						<FormMessage errors={field.state.meta.errors} />
-					</FormItem>
-				)}
-			</form.Field>
-
-			<form.Field name="rotation">
-				{(field) => (
-					<FormItem hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}>
-						<FormLabel>
-							<Trans>Rotation</Trans>
-						</FormLabel>
-						<InputGroup>
-							<FormControl
-								render={
-									<NumberInput
-										disabled
-										name={field.name}
-										value={field.state.value}
-										min={0}
-										max={360}
-										step={5}
-										onBlur={field.handleBlur}
-										onValueChange={(value) => {
-											field.handleChange(value);
-											onAutoSave();
-										}}
-									/>
-								}
-							/>
-							<InputGroupAddon align="inline-end">
-								<InputGroupText>°</InputGroupText>
-							</InputGroupAddon>
-						</InputGroup>
-						<p className="text-xs text-ink-3">
-							<Trans>Rotation isn't supported by PDF rendering.</Trans>
-						</p>
 					</FormItem>
 				)}
 			</form.Field>
@@ -502,8 +456,8 @@ function PictureCropDialog({ cropState, aspect, onClose, onUpload }: PictureCrop
 				fileToUpload = new File([blob], cropState.file.name, { type: blob.type });
 			}
 		} catch {
-			// ponytail: canvas crop can fail (tainted image, no context) — fall back to the original file.
-			fileToUpload = cropState.file;
+			toast.add({ type: "error", description: t`Couldn't crop the photo. Try a different photo.` });
+			return;
 		}
 
 		onUpload(fileToUpload);
@@ -527,7 +481,7 @@ function PictureCropDialog({ cropState, aspect, onClose, onUpload }: PictureCrop
 				onCropOpenChangeComplete(open);
 			}}
 		>
-			<DialogContent>
+			<DialogContent closeLabel={t`Close`}>
 				<DialogHeader>
 					<DialogTitle>
 						<Trans>Crop photo</Trans>
@@ -558,7 +512,9 @@ function PictureCropDialog({ cropState, aspect, onClose, onUpload }: PictureCrop
 						<FormLabel className="mb-0">
 							<Trans>Zoom</Trans>
 						</FormLabel>
-						<span className="text-xs text-ink-3 tabular-nums">{zoom.toFixed(1)}×</span>
+						<span className="text-xs text-ink-3 tabular-nums">
+							{i18n.number(zoom, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}×
+						</span>
 					</div>
 					<div className="flex items-center gap-x-3">
 						<Icon name="magnifying-glass-minus" size={16} className="shrink-0 text-ink-3" />
@@ -577,6 +533,12 @@ function PictureCropDialog({ cropState, aspect, onClose, onUpload }: PictureCrop
 					</div>
 				</div>
 
+				{shownCrop && shownCrop.file.size > 10 * 1024 * 1024 && (
+					<p
+						role="status"
+						className="text-sm text-warn-text"
+					>{t`This photo is larger than 10 MB. Use Crop and upload to shrink it.`}</p>
+				)}
 				<DialogFooter className="flex-row flex-wrap justify-between">
 					<Button variant="secondary" onClick={onClose}>
 						<Trans>Cancel</Trans>
@@ -584,6 +546,7 @@ function PictureCropDialog({ cropState, aspect, onClose, onUpload }: PictureCrop
 					<div className="flex flex-wrap gap-2">
 						<Button
 							variant="secondary"
+							disabled={!cropState || cropState.file.size > 10 * 1024 * 1024}
 							onClick={() => {
 								if (!cropState) return;
 								onUpload(cropState.file);
@@ -593,6 +556,7 @@ function PictureCropDialog({ cropState, aspect, onClose, onUpload }: PictureCrop
 							<Trans>Skip and upload</Trans>
 						</Button>
 						<Button
+							disabled={!croppedAreaPixels}
 							onClick={() => {
 								void onConfirmCrop();
 							}}
@@ -672,20 +636,26 @@ function ColorWidthFields(props: ColorWidthFieldsProps) {
 	);
 }
 
-/** Every photo option: upload with crop, address, show or hide, delete, fit, size, rotation, shape, border and shadow. */
-export function PictureSettings() {
+/** Every photo option: upload with crop, address, show or hide, delete, fit, size, shape, border and shadow. */
+type PictureSettingsProps = { locked: boolean };
+
+export function PictureSettings({ locked }: PictureSettingsProps) {
 	const fileInputRef = useRef<HTMLInputElement>(null);
-	const confirm = useConfirm();
 	const appOrigin = window.location.origin;
 
 	const [cropState, setCropState] = useState<CropState | null>(null);
 
+	const resumeId = useCurrentBuilderResumeSelector((resume) => resume.id);
 	const picture = useCurrentBuilderResumeSelector((resume) => resume.data.picture);
 	const normalizedPictureUrl = normalizePictureUrl(picture.url, appOrigin);
+	const generation = getAccountGeneration();
+	const current = () => {
+		const resume = useResumeStore.getState().resume;
+		return generation === getAccountGeneration() && resume?.id === resumeId && !resume.isLocked;
+	};
 	const updateResumeData = useUpdateResumeData();
 
 	const { mutate: uploadFile } = useMutation(orpc.storage.uploadFile.mutationOptions({ meta: { noInvalidate: true } }));
-	const { mutate: deleteFile } = useMutation(orpc.storage.deleteFile.mutationOptions({ meta: { noInvalidate: true } }));
 
 	const persist = (data: PictureValues) => {
 		updateResumeData((draft) => {
@@ -704,43 +674,66 @@ export function PictureSettings() {
 		fileInputRef.current?.click();
 	};
 
-	const onDeletePicture = async () => {
-		if (!picture.url) return;
-		if (!(await confirm(t`Remove this photo?`, { confirmText: t`Remove photo` }))) return;
-
-		const appOrigin = window.location.origin;
-		const pictureUrl = new URL(picture.url, appOrigin);
-		const pictureOrigin = pictureUrl.origin;
-
-		const filename = pictureUrl.pathname.split("/").pop();
-		if (!filename) return;
-
-		// If the picture is from the same origin, attempt to delete it
-		if (pictureOrigin === appOrigin) deleteFile({ filename });
-
-		const removed = { ...picture, url: "" };
-		form.reset(removed);
-		persist(removed);
+	const onDeletePicture = () => {
+		const current = useResumeStore.getState().resume;
+		if (current?.id !== resumeId || current.isLocked || !current.data.picture.url) return;
+		const removedUrl = current.data.picture.url;
+		// Copies and History share the upload; remove only this resume's reference.
+		form.reset({ ...current.data.picture, url: "" });
+		updateResumeData(
+			(draft) => {
+				draft.picture.url = "";
+			},
+			{ newStep: true },
+		);
+		const toastId = toast.add({
+			description: t`Photo removed`,
+			actionProps: {
+				children: t`Undo`,
+				onClick: () => {
+					toast.close(toastId);
+					const state = useResumeStore.getState();
+					const resume = state.resume;
+					if (resume?.id !== resumeId || resume.isLocked || resume.data.picture.url !== "") return;
+					state.updateResumeData(
+						(draft) => {
+							draft.picture.url = removedUrl;
+						},
+						{ newStep: true },
+					);
+				},
+			},
+		});
 	};
 
 	const uploadPictureFile = (file: File) => {
+		if (!current()) return;
+		if (file.size > 10 * 1024 * 1024) {
+			toast.add({ type: "error", description: t`This photo is larger than 10 MB. Use Crop and upload to shrink it.` });
+			return;
+		}
+		const originalUrl = useResumeStore.getState().resume?.data.picture.url;
 		const toastId = toast.add({ type: "loading", description: t`Uploading photo…` });
 
 		uploadFile(file, {
 			onSuccess: ({ url }) => {
-				form.setFieldValue("url", url);
-				handleAutoSave();
 				toast.close(toastId);
+				if (!current() || useResumeStore.getState().resume?.data.picture.url !== originalUrl) return;
+				form.setFieldValue("url", url);
+				updateResumeData(
+					(draft) => {
+						draft.picture.url = url;
+					},
+					{ newStep: true },
+				);
 			},
 			onError: (error) => {
+				if (!current()) return toast.close(toastId);
 				toast.add({
 					type: "error",
 					description: getReadableErrorMessage(
 						error,
-						t({
-							comment: "Fallback toast when uploading profile picture for resume fails",
-							message: "Couldn't upload the photo. Try again.",
-						}),
+						t`Couldn't upload the photo. Choose a readable PNG, JPEG, WebP or GIF photo up to 10 MB, then try again.`,
 					),
 					id: toastId,
 				});
@@ -751,16 +744,37 @@ export function PictureSettings() {
 		});
 	};
 
-	const onUploadPicture = (e: React.ChangeEvent<HTMLInputElement>) => {
+	const onUploadPicture = async (e: React.ChangeEvent<HTMLInputElement>) => {
 		const file = e.target.files?.[0];
-		if (!file) return;
-		if (form.state.values.fit === "contain") {
+		e.target.value = "";
+		if (!file || !current()) return;
+		const imageSrc = URL.createObjectURL(file);
+		const image = new Image();
+		image.src = imageSrc;
+		try {
+			await image.decode();
+			if (!current()) {
+				URL.revokeObjectURL(imageSrc);
+				return;
+			}
+		} catch {
+			URL.revokeObjectURL(imageSrc);
+			e.target.value = "";
+			if (!current()) return;
+			toast.add({
+				type: "error",
+				description: t`This file isn't a readable image. Choose a PNG, JPEG, WebP or GIF photo.`,
+			});
+			return;
+		}
+		if (form.state.values.fit === "contain" && file.size <= 10 * 1024 * 1024) {
+			URL.revokeObjectURL(imageSrc);
 			uploadPictureFile(file);
 			return;
 		}
 
 		// Open the interactive crop step instead of uploading immediately.
-		setCropState({ file, imageSrc: URL.createObjectURL(file) });
+		setCropState({ file, imageSrc });
 	};
 
 	const closeCropDialog = () => {
@@ -769,7 +783,31 @@ export function PictureSettings() {
 	};
 
 	return (
-		<>
+		<div id="sidebar-picture" className="col-span-full flex items-center gap-3 rounded-lg bg-bg p-2.5">
+			<input
+				ref={fileInputRef}
+				type="file"
+				accept="image/*"
+				aria-label={t`Upload photo`}
+				className="hidden"
+				onChange={onUploadPicture}
+			/>
+			{picture.url ? (
+				<img src={normalizedPictureUrl} alt="" className="size-10 shrink-0 rounded-md object-cover" />
+			) : (
+				<span className="grid size-10 shrink-0 place-items-center rounded-md bg-sunken text-ink-3">
+					<Icon name="camera-plus" />
+				</span>
+			)}
+			<p className="min-w-0 flex-1 text-xs leading-4 text-ink-2">
+				{!picture.url ? (
+					<Trans>No photo. Most ATS ignore photos; some regions expect one.</Trans>
+				) : picture.hidden ? (
+					<Trans>Photo hidden from the page.</Trans>
+				) : (
+					<Trans>Photo on the page.</Trans>
+				)}
+			</p>
 			<PictureCropDialog
 				cropState={cropState}
 				aspect={Number(form.state.values.aspectRatio) || 1}
@@ -777,50 +815,68 @@ export function PictureSettings() {
 				onUpload={uploadPictureFile}
 			/>
 
-			<form
-				className="space-y-4"
-				onSubmit={(event) => {
-					event.preventDefault();
-					event.stopPropagation();
-					void form.handleSubmit();
-				}}
-			>
-				<PicturePreviewControls
-					fileInputRef={fileInputRef}
-					form={form}
-					normalizedPictureUrl={normalizedPictureUrl}
-					picture={picture}
-					onAutoSave={handleAutoSave}
-					onDeletePicture={onDeletePicture}
-					onSelectPicture={onSelectPicture}
-					onUploadPicture={onUploadPicture}
+			{!picture.url && (
+				<Button variant="secondary" size="sm" disabled={locked} onClick={onSelectPicture}>
+					<Trans>Add</Trans>
+				</Button>
+			)}
+			<Popover>
+				<PopoverTrigger
+					render={
+						<Button variant="secondary" size="sm" disabled={locked}>
+							{picture.url ? <Trans>Edit</Trans> : <Trans>URL</Trans>}
+						</Button>
+					}
 				/>
+				<PopoverContent align="end" className="max-h-[70svh] w-[360px] overflow-y-auto p-4">
+					<form
+						className="space-y-4"
+						onSubmit={(event) => {
+							event.preventDefault();
+							event.stopPropagation();
+							void form.handleSubmit();
+						}}
+					>
+						<PicturePreviewControls
+							form={form}
+							normalizedPictureUrl={normalizedPictureUrl}
+							picture={picture}
+							onAutoSave={handleAutoSave}
+							onDeletePicture={onDeletePicture}
+							onSelectPicture={onSelectPicture}
+						/>
 
-				<PictureFitField form={form} onAutoSave={handleAutoSave} />
+						{picture.url && (
+							<>
+								<PictureFitField form={form} onAutoSave={handleAutoSave} />
 
-				<div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
-					<PictureGeometryFields form={form} onAutoSave={handleAutoSave} />
+								<div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
+									<PictureGeometryFields form={form} onAutoSave={handleAutoSave} />
 
-					<ColorWidthFields
-						form={form}
-						colorName="borderColor"
-						widthName="borderWidth"
-						colorLabel={t`Border color`}
-						widthLabel={t`Border width`}
-						step={1}
-						onAutoSave={handleAutoSave}
-					/>
-					<ColorWidthFields
-						form={form}
-						colorName="shadowColor"
-						widthName="shadowWidth"
-						colorLabel={t`Shadow color`}
-						widthLabel={t`Shadow width`}
-						step={0.5}
-						onAutoSave={handleAutoSave}
-					/>
-				</div>
-			</form>
-		</>
+									<ColorWidthFields
+										form={form}
+										colorName="borderColor"
+										widthName="borderWidth"
+										colorLabel={t`Border color`}
+										widthLabel={t`Border width`}
+										step={1}
+										onAutoSave={handleAutoSave}
+									/>
+									<ColorWidthFields
+										form={form}
+										colorName="shadowColor"
+										widthName="shadowWidth"
+										colorLabel={t`Shadow color`}
+										widthLabel={t`Shadow width`}
+										step={0.5}
+										onAutoSave={handleAutoSave}
+									/>
+								</div>
+							</>
+						)}
+					</form>
+				</PopoverContent>
+			</Popover>
+		</div>
 	);
 }

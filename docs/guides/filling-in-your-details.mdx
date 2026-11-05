@@ -11,10 +11,10 @@ Open a resume in the editor and make sure **Write** is selected in the editor ba
 
 ## Enter your name and contact details
 
-<Frame caption="The Basics card">
+<Frame caption="Write your details beside the rendered resume">
   <img
     src="/images/guides/filling-in-your-details/basics-card.webp"
-    alt="The Basics card showing the photo row, Full name, Headline, Email, Phone, Location and Website fields, two extra fields with icons, and the Add field button"
+    alt="Resume editor with David Kowalski's fictional sample, editable Basics and a rendered page, plus Write, Design, Check and Share modes"
   />
 </Frame>
 
@@ -24,12 +24,17 @@ Open a resume in the editor and make sure **Write** is selected in the editor ba
     close it. You can also click your name on the page to jump straight to it.
   </Step>
   <Step title="Fill in the fields">
-    - **Full name**: your name as you want it printed. On a blank resume, this field is ready for typing as soon as the
-    editor opens. - **Headline**: a short line under your name, usually your job title or the role you're aiming for,
-    for example "Game Developer". - **Email** and **Phone**: how employers contact you. If an email address looks
-    incomplete, the field tells you what's missing, for example "Add the domain after the @". - **Location**: a city and
-    region is enough, for example "Seattle, WA". - **Website**: your personal site or portfolio. You can leave out
-    `https://`; it's added for you.
+
+    - **Full name**: your name as you want it printed. A blank resume starts with your account name; change it if your resume should show something else.
+
+    - **Headline**: a short line under your name, usually your job title or the role you're aiming for, for example "Game Developer".
+
+    - **Email** and **Phone**: how employers contact you. If an email address looks incomplete, the field tells you what's missing, for example "Add the domain after the @".
+
+    - **Location**: a city and region is enough, for example "Seattle, WA".
+
+    - **Website**: your personal site or portfolio. You can leave out `https://`; it's added for you.
+
   </Step>
   <Step title="Check the page">
     Your details appear in the page header as you type. Leave a field empty to keep it off the page.
@@ -65,33 +70,46 @@ For social profiles you want listed in their own section, such as LinkedIn with 
 
 ## Add a photo
 
+<Frame caption="An unreadable upload receives localized guidance. The existing photo stays unchanged.">
+  <img
+    src="/images/guides/career/photo-upload-error.png"
+    alt="Fictional Morgan Vale resume showing a German unreadable-photo upload error"
+  />
+</Frame>
+
+Unreadable photo files are rejected before cropping. Photos larger than **10 MB** can still be cropped and re-encoded to shrink them; **Skip and upload** is unavailable above the limit. Upload failures give photo-specific guidance without changing the current photo. Native mobile uses its system image picker/crop editor and applies the same upload cap.
+
+If you change the photo URL or remove the photo while an upload is running, your newer choice is kept when that upload finishes. Other photo settings you edit during the upload are kept too.
+
 Whether to include a photo depends on where you're applying. Many applicant tracking systems ignore photos, while some countries expect one. The photo row at the top of the Basics card reminds you of this.
 
 <Steps>
-  <Step title="Open the photo settings">
-    In the photo row, select **Add** (or **Edit** if the resume already has a photo). The photo settings open.
+  <Step title="Choose a photo">
+    In the photo row, select **Add** to open your device's file picker directly. JPEG, PNG, WebP and GIF files work.
+    Appearance controls become available after a photo is added.
   </Step>
-  <Step title="Upload a photo">
-    Select the empty square (**Upload photo**) and choose an image from your device. JPEG, PNG, WebP and GIF files up to 10 MB work.
-
-    You can also paste the address of an image that's already online into the **URL** field.
+  <Step title="Use an image address instead (optional)">
+    Select **URL** beside **Add** to paste the address of an image that's already online. If a photo is already present,
+    select **Edit** to change its **URL** or appearance.
 
   </Step>
   <Step title="Crop it">
-    The **Crop photo** dialog opens. Drag the image to position it and use the **Zoom** slider to frame it, then select **Crop and upload**. Select **Skip and upload** to use the whole image, or **Cancel** to stop.
+    After choosing a file, the **Crop photo** dialog opens. Drag the image to position it and use the **Zoom** slider to frame it, then select **Crop and upload**. Select **Skip and upload** to use the whole image, or **Cancel** to stop.
 
-    The crop frame follows the photo's **Aspect ratio** setting, so set that first if you want a non-square photo. When **Fit** is set to **Contain**, the image uploads without the crop step.
+    The crop frame follows the saved **Aspect ratio** setting. After adding a photo, select **Edit** to change its shape
+    for later uploads. When **Fit** is set to **Contain**, readable images within the size limit upload without the crop
+    step. Larger images still open the crop editor.
 
   </Step>
   <Step title="Adjust how it looks">
-    Change the settings below and watch the page update. Your changes save as you make them.
+    After the photo is added, select **Edit**, then change the settings below and watch the page update. Your changes save as you make them.
   </Step>
 </Steps>
 
-<Frame caption="The photo settings">
+<Frame caption="Adjust a photo without changing your other details">
   <img
     src="/images/guides/filling-in-your-details/photo-popover.webp"
-    alt="The photo settings popover with the photo preview, URL field, visibility toggle, Fit, Size, Rotation, Aspect ratio, Border radius, Border width and Shadow width controls"
+    alt="Photo settings with the fictional sample picture, image size, fit, border and shadow controls"
   />
 </Frame>
 
@@ -100,25 +118,26 @@ Whether to include a photo depends on where you're applying. Many applicant trac
 | Eye icon next to **URL**   | Hides the photo from the page without deleting it (**Hide photo** / **Show photo**). The photo row then says "Photo hidden from the page." |
 | **Fit**                    | **Cover** fills the frame and trims the edges. **Contain** shows the whole image inside the frame.                                         |
 | **Size**                   | The photo's width on the page, from 32 to 512 pt.                                                                                          |
-| **Rotation**               | Disabled because the PDF engine does not support rotation.                                                                                 |
 | **Aspect ratio**           | Width divided by height, from 0.5 to 2.5. The three buttons set square (1), landscape (1.5) or portrait (0.5).                             |
 | **Border radius**          | Rounds the corners, from 0 to 100 pt. The buttons set square corners, slightly rounded, or a circle.                                       |
-| **Border width** and color | Draws a border around the photo. Select the color circle to pick its color.                                                                |
-| **Shadow width** and color | Adds a shadow behind the photo. Select the color circle to pick its color.                                                                 |
+| **Border width** and color | Draws a border around the photo. Select the color square to pick its color.                                                                |
+| **Shadow width** and color | Adds a shadow behind the photo. Select the color square to pick its color.                                                                 |
 
-<Frame caption="Cropping a new photo before it uploads">
+<Frame caption="Frame a photo before uploading">
   <img
     src="/images/guides/filling-in-your-details/crop-picture-dialog.webp"
-    alt="The Crop photo dialog with the photo inside a square crop frame, a Zoom slider, and Cancel, Skip and upload, and Crop and upload buttons"
+    alt="Crop photo dialog showing the bundled sample photo, Zoom, Cancel, Skip and upload and Crop and upload"
   />
 </Frame>
 
 To remove the photo, open the photo settings and select the photo preview (**Remove photo**).
 
-<Warning>
-  Confirm **Remove photo** to remove the image. Your size, fit, border and other photo settings are kept. To take the
-  photo off the page but keep it, use the eye icon instead.
-</Warning>
+<Tip>
+  The photo is removed right away, and a **Photo removed** message offers **Undo** to put it back. Your size, fit,
+  border and other photo settings are kept. Removing the photo from one resume does not delete the uploaded file, so
+  copies of the resume and earlier versions in history keep their photo. To take the photo off the page but keep it, use
+  the eye icon instead.
+</Tip>
 
 <Note>
   Uploaded photos are resized to at most 800 × 800 pixels and saved as JPEG, so transparent backgrounds become solid.
@@ -141,10 +160,10 @@ The summary is a short statement under your header that says who you are and wha
   </Step>
 </Steps>
 
-<Frame caption="The summary while you're editing it">
+<Frame caption="The current formatting toolbar under Summary">
   <img
     src="/images/guides/filling-in-your-details/summary-editor.webp"
-    alt="The Summary section open, with the summary text, the formatting toolbar with an Improve button, and a footer reading 2–3 sentences reads best and 424 characters"
+    alt="Focused Summary field with Bold, Italic, Underline, Link, list, Text alignment, More formatting and Improve controls"
   />
 </Frame>
 

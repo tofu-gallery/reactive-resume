@@ -510,26 +510,30 @@ export function Prepare() {
 	const time = useTime(INTERVIEW_AT);
 	const tabsRef = useRef<HTMLDivElement>(null);
 	const prepare = t`Prepare`;
+	const interviewPrep = t({ message: "Interview prep", context: "Application workspace tab: plan for an interview" });
 
-	// The product's tabs in its own order; Apply and Saved aren't part of this day, so they're labels, not buttons.
+	// The product's tabs in its own order; Apply and Library aren't part of this day, so they're labels, not buttons.
 	const tabs: { label: string; step?: number; badge?: ReactNode }[] = [
 		{
 			label: t({ message: "Fit", context: "Application workspace tab: how well a job fits your experience" }),
 			step: STEP.fit,
 		},
 		{ label: t`Apply` },
-		{ label: prepare, step: STEP.plan, badge: step >= STEP.debrief ? null : <Countdown /> },
-		{ label: t`Practice`, step: STEP.practise },
+		{ label: interviewPrep, step: STEP.plan, badge: step >= STEP.debrief ? null : <Countdown /> },
+		{
+			label: t({ message: "Practice", context: "Application workspace tab: rehearse interview answers" }),
+			step: STEP.practise,
+		},
 		{ label: t`Debrief`, step: STEP.debrief },
 		{ label: t`Messages`, step: STEP.messages, badge: step > STEP.messages ? i18n.number(1) : null },
-		{ label: t({ message: "Saved", context: "Application workspace tab: earlier results kept for this job" }) },
+		{ label: t({ message: "Library", context: "Application workspace tab: earlier results kept for this job" }) },
 	];
 	// The interview itself has no tab: Practise stays in front beneath the pause.
 	const frontStep = step === STEP.interview ? STEP.practise : step;
 	const dialLabels: Record<number, string> = {
 		[STEP.fit]: t({ message: "Fit", context: "Application workspace tab: how well a job fits your experience" }),
-		[STEP.plan]: prepare,
-		[STEP.practise]: t`Practice`,
+		[STEP.plan]: interviewPrep,
+		[STEP.practise]: t({ message: "Practice", context: "Application workspace tab: rehearse interview answers" }),
 		[STEP.interview]: t`Interview`,
 		[STEP.debrief]: t`Debrief`,
 	};
@@ -557,7 +561,7 @@ export function Prepare() {
 			data-scene={SCENE.prepare}
 			data-pin
 			aria-labelledby="prepare-title"
-			className="relative h-[310vh] motion-reduce:h-svh min-[900px]:h-[330vh]"
+			className="relative h-[310vh] min-[900px]:h-[330vh]"
 		>
 			<div className="sticky top-0 h-svh overflow-clip [--db1:clamp(0,(var(--p)-.88)*30,1)] [--db2:clamp(0,(var(--p)-.9)*30,1)] [--db3:clamp(0,(var(--p)-.93)*30,1)] [--db4:clamp(0,(var(--p)-.96)*30,1)] [--e1:clamp(0,(var(--p)-.19)*30,1)] [--e2:clamp(0,(var(--p)-.36)*30,1)] [--e3:clamp(0,(var(--p)-.53)*30,1)] [--e4:clamp(0,(var(--p)-.84)*30,1)] [--fb:clamp(0,(var(--p)-.655)*30,1)] [--in:clamp(0,var(--p)/.06,1)] [--k1:clamp(0,(var(--p)-.4)*40,1)] [--k2:clamp(0,(var(--p)-.43)*40,1)] [--k3:clamp(0,(var(--p)-.46)*40,1)] [--k4:clamp(0,(var(--p)-.49)*40,1)] [--mc:clamp(0,(var(--p)-.13)*30,1)] [--mr:clamp(0,(var(--p)-.085)*25,1)] [--nw:calc(clamp(0,(var(--p)-.69)*20,1)*(1-clamp(0,(var(--p)-.83)*20,1)))] [--pl:clamp(0,var(--p)/.1,1)] [--s1:clamp(0,(var(--p)-.215)*40,1)] [--s2:clamp(0,(var(--p)-.24)*40,1)] [--s3:clamp(0,(var(--p)-.265)*40,1)] [--s4:clamp(0,(var(--p)-.29)*40,1)] [--s5:clamp(0,(var(--p)-.315)*40,1)] [--ty:clamp(0,(var(--p)-.56)/.08,1)]">
 				{/* The day's light through the window: high and cool in the morning, long and warm by late afternoon, gone at dusk. */}
@@ -611,7 +615,7 @@ export function Prepare() {
 				</SceneCaption>
 
 				{/* The application's folder. Its sheets share one cell; the one in front is the tab in front. */}
-				<div className="@container absolute inset-x-(--gutter) top-[calc(10vh+16vw+44px)] bottom-[3vh] flex [transform:translateY(calc((1-var(--in))*12vh+var(--nw)*3vh))_scale(calc(1-var(--nw)*.03))] flex-col font-ui text-[13px] leading-[1.45] opacity-[calc((1-var(--nw))*clamp(0,var(--p)*20,1))] [transition:transform_.5s_var(--ease)] min-[900px]:start-auto min-[900px]:end-[4vw] min-[900px]:top-[14vh] min-[900px]:bottom-auto min-[900px]:h-[min(600px,74vh)] min-[900px]:w-[min(54vw,820px)] min-[900px]:text-[clamp(13px,1.06vw,16px)]">
+				<div className="@container absolute inset-x-(--gutter) top-[calc(10vh+16vw+44px)] bottom-[3vh] flex [transform:translateY(calc((1-var(--in))*12vh+var(--nw)*3vh))_scale(calc(1-var(--nw)*.03))] flex-col font-ui text-[13px] leading-[1.45] opacity-[calc(clamp(0,1-var(--nw)*2,1)*clamp(0,var(--p)*20,1))] [transition:transform_.5s_var(--ease)] min-[900px]:start-auto min-[900px]:end-[4vw] min-[900px]:top-[14vh] min-[900px]:bottom-auto min-[900px]:h-[min(600px,74vh)] min-[900px]:w-[min(54vw,820px)] min-[900px]:text-[clamp(13px,1.06vw,16px)]">
 					<div className="relative z-1 -mb-px flex shrink-0 items-end">
 						<div
 							ref={tabsRef}
@@ -705,13 +709,15 @@ export function Prepare() {
 				<Doodle
 					name="plane"
 					wipe="1"
+					sizes="9vw"
 					className="end-[21vw] top-[6vh] z-4 w-[9vw] [transform:translate(calc(var(--dir)*(1-var(--pl))*30vw),calc((1-var(--pl))*-30vh))_scaleX(calc(var(--dir)*-1))_rotate(calc(-18deg+var(--pl)*14deg))] opacity-[calc(.8*(1-clamp(0,(var(--p)-.12)*12,1)))]! [transition:transform_.4s_var(--ease)] max-[900px]:hidden"
 				/>
 
-				{/* The interview: the folder is put away and the line sits on the empty desk beside the clock. */}
+				{/* The interview: the folder is put away first (it fades in the first half), then the line sits on the empty desk
+				    beside the clock (the second half), so no frame shows both. */}
 				<div
 					aria-hidden={step !== STEP.interview}
-					className="pointer-events-none absolute inset-x-(--gutter) top-[calc(10vh+16vw+44px)] bottom-[3vh] flex flex-col items-center justify-center gap-4 text-center opacity-(--nw) min-[900px]:start-auto min-[900px]:end-[4vw] min-[900px]:top-[14vh] min-[900px]:bottom-auto min-[900px]:h-[min(600px,74vh)] min-[900px]:w-[min(54vw,820px)]"
+					className="pointer-events-none absolute inset-x-(--gutter) top-[calc(10vh+16vw+44px)] bottom-[3vh] flex flex-col items-center justify-center gap-4 text-center opacity-[clamp(0,var(--nw)*2-1,1)] min-[900px]:start-auto min-[900px]:end-[4vw] min-[900px]:top-[14vh] min-[900px]:bottom-auto min-[900px]:h-[min(600px,74vh)] min-[900px]:w-[min(54vw,820px)]"
 				>
 					<p className="[transform:scale(calc(.94+var(--nw)*.06))] font-display text-[clamp(44px,6vw,108px)] leading-none tracking-[-.02em] text-accent-text italic">
 						{t`Deep breath.`}

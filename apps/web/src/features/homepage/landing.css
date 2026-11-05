@@ -160,7 +160,7 @@
 	--graphite: oklch(0.38 0.01 95 / 0.3);
 	/* Horizontal motion that points somewhere (slides, flights) is multiplied by this so it mirrors in RTL. */
 	--dir: 1;
-	/* How dark Share's sky is while it's on screen; the engine writes it. */
+	/* Default ink before the scroll engine updates the individual consumers. */
 	--nt: 0;
 }
 
@@ -177,23 +177,29 @@
 
 .landing [data-scene] {
 	--p: 0;
+	/* Pinned scenes replace this with their exit progress once the engine measures them. */
+	--out: 0;
 }
 
-/* Pinned scenes have explicit heights, so offscreen demos can skip rendering without moving the scroll positions. */
-.landing [data-pin]:not(#top) {
+/*
+ * Pinned scenes have explicit heights, so offscreen demos can skip rendering without moving the scroll positions. The
+ * scroll engine marks the scenes within a screen or two `data-warm`, so they render before they arrive.
+ */
+.landing [data-pin]:not(#top, [data-warm]) {
 	content-visibility: auto;
 }
 
-/* Reduced motion renders every scene at its end state; the pinned scenes also collapse to one screen. */
+/*
+ * Reduced motion renders every scene at its end state; the pinned scenes also collapse to one screen. Unlayered, so it
+ * beats each scene's `h-[…]` utilities at every width.
+ */
 @media (prefers-reduced-motion: reduce) {
 	.landing [data-scene] {
 		--p: 1;
 	}
-}
 
-@media (prefers-reduced-motion: no-preference) {
-	html:has(.landing) {
-		scroll-behavior: smooth;
+	.landing [data-pin] {
+		height: 100svh;
 	}
 }
 
@@ -215,6 +221,15 @@
 		opacity: calc(0.8 * var(--doodle-fade, 1));
 		filter: brightness(0.92);
 	}
+}
+
+/*
+ * The template wall fades into the page above and below its middle, clearing the bands where Design's closing headline
+ * sits. Once the wall reaches its resting size those bands are empty anyway, so this only softens the oversized frames
+ * on the way in and stops the words from sitting on thumbnails at low contrast.
+ */
+@utility design-wall {
+	mask-image: linear-gradient(to bottom, transparent 18.5%, #000 20%, #000 81%, transparent 88%);
 }
 
 /* One of the hero's career fragments: it drifts from (--x, --y) to (--tx, --ty) as the page assembles (--e). */
@@ -613,4 +628,12 @@
 @utility paper-grain {
 	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2.2 0 0 0 -.9'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
 	background-size: 220px;
+}
+
+/*
+ * Arabic, Persian, Urdu and Hebrew have no italic convention, and their fonts ship none: the browser would slant the
+ * glyphs. The accent colour still carries the emphasis.
+ */
+:where(:lang(ar), :lang(fa), :lang(ur), :lang(he), :lang(ps)) :is(.italic, em, i) {
+	font-style: normal;
 }

@@ -4,39 +4,54 @@ import { t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useRouteContext } from "@tanstack/react-router";
 import { m } from "motion/react";
 import { useId, useRef, useState } from "react";
+import { careerProfileDataSchema } from "@reactive-resume/schema/career";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { SegmentedControl, SegmentedControlItem } from "@reactive-resume/ui/components/segmented-control";
 import { Textarea } from "@reactive-resume/ui/components/textarea";
+import { parseAmount } from "@reactive-resume/utils/amount";
 import { cn } from "@reactive-resume/utils/style";
-import { useDebouncedSave } from "../hooks";
+import { CurrencySelect } from "../currency-select";
+import { DraftRecovery } from "../draft-recovery";
+import { useDebouncedSave, useSessionDraft } from "../hooks";
 import { CareerLoadError, CareerLoading } from "../load-state";
+import { RoleSuggestions } from "../role-suggestions";
 import { useCareerTime, useNow } from "../shared";
-import { parseAmount } from "./amount";
 import { SearchRegionsField } from "./search-regions-field";
+import { getAccountGeneration } from "@/libs/auth/clear-account-data";
 import { toastError } from "@/libs/error-message";
 import { D2, EASE } from "@/libs/motion";
 import { client, orpc } from "@/libs/orpc/client";
 
 const saveFailed = (error: unknown) => toastError(error, t`Couldn't save your preferences. Try again.`);
 
-/** The Preferences profile, saved whole. The cache updates at once; a failed save puts the server copy back. */
+/** The cache updates at once; a failed save puts the server copy back. */
 export function useProfile() {
 	const queryClient = useQueryClient();
+	const { session } = useRouteContext({ strict: false });
+	// The page belongs to the account it rendered for. Binding the write here keeps a profile read before a session
+	// swap from being re-labelled as the new account's, even if the transport's global scope moved on.
+	const [owner] = useState(() => session?.user.id ?? null);
 	const queryKey = orpc.career.profile.queryKey();
 	const query = useQuery(orpc.career.profile.queryOptions());
 	const profile = query.data;
+	const mutationKey = [...orpc.career.updateProfile.key(), owner];
 	const mutation = useMutation({
-		...orpc.career.saveProfile.mutationOptions(),
+		...orpc.career.updateProfile.mutationOptions({ context: owner ? { accountId: owner } : {} }),
+		mutationKey,
+		scope: { id: `career-memory:${owner}` },
 		onError: (error) => {
-			void queryClient.invalidateQueries({ queryKey });
+			// A failed earlier choice must not overwrite the next queued choice's optimistic cache.
+			if (queryClient.isMutating({ mutationKey }) === 1) void queryClient.invalidateQueries({ queryKey });
 			saveFailed(error);
 		},
 	});
-	const save = (next: CareerProfileData) => {
-		queryClient.setQueryData(queryKey, next);
+	const save = (next: Partial<CareerProfileData>) => {
+		queryClient.setQueryData(queryKey, (current: CareerProfileData | undefined) =>
+			current ? { ...current, ...next } : current,
+		);
 		mutation.mutate(next);
 	};
 	return { profile, save, isError: query.isError, retry: () => void query.refetch() };
@@ -56,8 +71,18 @@ function PreferencesForm({ initial }: PreferencesFormProps) {
 	const { i18n } = useLingui();
 	const queryClient = useQueryClient();
 	const now = useNow();
-	const [draft, setDraft] = useState(initial);
+	const kept = useSessionDraft(
+		"preferences",
+		initial,
+		(value) => {
+			const parsed = careerProfileDataSchema.safeParse(value);
+			return parsed.success ? parsed.data : undefined;
+		},
+		true,
+	);
+	const { value: draft, setValue: setDraft } = kept;
 	const [saved, setSaved] = useState(initial);
+	const generation = useRef(getAccountGeneration());
 	const saves = useRef<Promise<unknown>>(Promise.resolve());
 	const [status, setStatus] = useState<{ saving: boolean; failed: boolean; at: number | null }>({
 		saving: false,
@@ -70,34 +95,44 @@ function PreferencesForm({ initial }: PreferencesFormProps) {
 	const change = (patch: Partial<CareerProfileData>) => {
 		const next = { ...draft, ...patch };
 		setDraft(next);
-		// Times elsewhere follow the new timezone at once; the server copy follows within 2 seconds.
-		queryClient.setQueryData(orpc.career.profile.queryKey(), next);
 	};
 
 	// Called directly (not through a mutation hook) so the flush on unmount still saves.
-	const flush = useDebouncedSave(JSON.stringify(draft), JSON.stringify(saved), (json) => {
+	const flush = useDebouncedSave(JSON.stringify(kept.restored ? saved : draft), JSON.stringify(saved), (json) => {
 		const next = JSON.parse(json) as CareerProfileData;
 		setStatus((current) => ({ ...current, saving: true, failed: false }));
-		const operation = saves.current.then(() => client.career.saveProfile(next));
+		const operation = saves.current.then(() => {
+			if (generation.current !== getAccountGeneration()) throw new Error("Account changed");
+			// A recovered Preferences draft must not restore an old Facts memory choice.
+			return client.career.updateProfile({ ...next, memoryMode: undefined });
+		});
 		saves.current = operation.catch(() => undefined);
 		operation
 			.then(() => {
+				if (generation.current !== getAccountGeneration()) return;
+				queryClient.setQueryData(orpc.career.profile.queryKey(), (current: CareerProfileData | undefined) => ({
+					...next,
+					memoryMode: current?.memoryMode ?? next.memoryMode,
+				}));
 				setSaved(next);
+				kept.clear(next);
 				setStatus({ saving: false, failed: false, at: Date.now() });
 			})
 			.catch((error: unknown) => {
+				if (generation.current !== getAccountGeneration()) return;
 				setStatus((current) => ({ ...current, saving: false, failed: true }));
 				void queryClient.invalidateQueries({ queryKey: orpc.career.profile.queryKey() });
 				saveFailed(error);
 			});
 	});
 
-	const failed = status.failed && !status.saving;
+	const failed = kept.restored || (status.failed && !status.saving);
 	const dirty = !failed && (status.saving || JSON.stringify(draft) !== JSON.stringify(saved));
 	const justNow = status.at !== null && now.getTime() - status.at < 60_000;
 
 	return (
 		<div className="grid max-w-[820px] gap-[18px]" onBlur={() => flush()}>
+			<DraftRecovery {...kept} />
 			<div className="flex items-center gap-2">
 				<h2 className="flex-1 text-[17px] font-semibold">
 					<Trans>What you're looking for</Trans>
@@ -146,6 +181,8 @@ function PreferencesForm({ initial }: PreferencesFormProps) {
 					/>
 				</div>
 			</div>
+
+			<RoleSuggestions onUse={(targetRoles) => change({ targetRoles })} />
 
 			<div className="grid gap-1.5">
 				<label htmlFor={`${id}-priorities`} className="text-xs font-medium text-ink-2">
@@ -235,23 +272,22 @@ function PreferencesForm({ initial }: PreferencesFormProps) {
 						</span>
 					</div>
 				</div>
-
-				<div className="grid gap-2 text-xs text-ink-3">
-					<p>
-						<Trans>Times are shown in {timeZone}.</Trans>{" "}
-						<Link to="/dashboard/settings/preferences" className="underline underline-offset-2 hover:text-ink">
-							<Trans>Change timezone</Trans>
-						</Link>
-					</p>
-				</div>
 			</section>
+			<div className="grid gap-2 text-xs text-ink-3">
+				<p>
+					<Trans>Times are shown in {timeZone}.</Trans>{" "}
+					<Link to="/dashboard/settings/preferences" className="underline underline-offset-2 hover:text-ink">
+						<Trans>Change timezone</Trans>
+					</Link>
+				</p>
+			</div>
 		</div>
 	);
 }
 
 /** An input-like box holding a prefix/suffix and a bare input; focus rings the whole box. */
 const fieldShell =
-	"flex h-9 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 transition-[border-color,box-shadow] duration-quick focus-within:border-accent focus-within:shadow-[0_0_0_3px_var(--accent-soft)] pointer-coarse:h-11";
+	"flex h-9 items-center gap-1.5 rounded-md border border-control-border bg-raised px-2.5 transition-[border-color,box-shadow] duration-quick focus-within:border-accent focus-within:shadow-[0_0_0_3px_var(--accent-soft)] pointer-coarse:h-11";
 
 const bareSelect =
 	"field-sizing-content cursor-pointer appearance-none bg-transparent text-ink-3 outline-none hover:text-ink focus-visible:text-ink";
@@ -284,7 +320,7 @@ function ChipField({ label, placeholder, value, onChange }: ChipFieldProps) {
 			<label htmlFor={id} className="text-xs font-medium text-ink-2">
 				{label}
 			</label>
-			<div className="flex min-h-10 flex-wrap items-center gap-[5px] rounded-md border border-line-2 bg-raised p-[5px] transition-[border-color,box-shadow] duration-quick focus-within:border-accent focus-within:shadow-[0_0_0_3px_var(--accent-soft)]">
+			<div className="flex min-h-10 flex-wrap items-center gap-1 rounded-md border border-control-border bg-raised p-1 transition-[border-color,box-shadow] duration-quick focus-within:border-accent focus-within:shadow-[0_0_0_3px_var(--accent-soft)]">
 				{value.map((chip) => (
 					<span
 						key={chip}
@@ -322,8 +358,6 @@ type SalaryFieldProps = {
 	onChange: (value: CareerProfileData["minBase"]) => void;
 };
 
-const currencies = Intl.supportedValuesOf("currency");
-
 /** Minimum base: currency prefix and period suffix are small selects; the amount gets separators on blur. */
 function SalaryField({ id, locale, value, onChange }: SalaryFieldProps) {
 	const number = new Intl.NumberFormat(locale, { maximumFractionDigits: 2 });
@@ -332,31 +366,19 @@ function SalaryField({ id, locale, value, onChange }: SalaryFieldProps) {
 	const [invalid, setInvalid] = useState(false);
 	const formatted = value.amount === null ? "" : number.format(value.amount);
 
-	const symbol = (currency: string) =>
-		new Intl.NumberFormat(locale, { style: "currency", currency, currencyDisplay: "symbol" })
-			.formatToParts(0)
-			.find((part) => part.type === "currency")?.value ?? currency;
-
 	const periods = { hour: t`/ hour`, month: t`/ month`, year: t`/ year` };
 
 	return (
-		<div className="grid gap-1.5">
+		<div className="grid gap-1.5 sm:col-span-2">
 			<label htmlFor={id} className="text-xs font-medium text-ink-2">
 				<Trans>Minimum base salary</Trans>
 			</label>
 			<span className={fieldShell}>
-				<select
-					aria-label={t`Currency`}
+				<CurrencySelect
 					value={value.currency}
-					onChange={(event) => onChange({ ...value, currency: event.target.value })}
-					className={cn(bareSelect, "text-sm")}
-				>
-					{currencies.map((currency) => (
-						<option key={currency} value={currency}>
-							{symbol(currency)}
-						</option>
-					))}
-				</select>
+					onChange={(currency) => onChange({ ...value, currency })}
+					className="h-auto w-auto border-0 bg-transparent px-0 text-sm shadow-none"
+				/>
 				<input
 					id={id}
 					inputMode="decimal"

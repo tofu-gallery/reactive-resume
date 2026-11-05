@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { ORPCError } from "@orpc/client";
 import { createRouterClient } from "@orpc/server";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
+import { createCoverLetterResumeData } from "@reactive-resume/resume/cover-letter";
 import { defaultResumeData } from "@reactive-resume/schema/resume/default";
+import { truncateCascade } from "../../test-database";
+import { coverLettersRouter } from "./router";
+import { coverLetterService as service } from "./service";
 
 const fixture = vi.hoisted(() => ({
 	db: undefined as ReturnType<typeof drizzle> | undefined,
@@ -15,20 +18,12 @@ vi.mock("@reactive-resume/db/client", () => ({
 	get db() {
 		return fixture.db;
 	},
+	getPool: () => fixture.pool,
 }));
 vi.mock("../../context", async () => {
 	const { os } = await vi.importActual<typeof import("@orpc/server")>("@orpc/server");
 	return { protectedProcedure: os.$context<{ user: { id: string } }>() };
 });
-vi.mock("../resume/service", () => ({
-	resumeService: {
-		getById: async ({ id, userId }: { id: string; userId: string }) => {
-			const result = await getPool().query("SELECT id, data FROM resume WHERE id=$1 AND user_id=$2", [id, userId]);
-			if (!result.rows[0]) throw new ORPCError("NOT_FOUND");
-			return result.rows[0];
-		},
-	},
-}));
 
 function getPool(): Pool {
 	if (!fixture.pool) throw new Error("Test database is not initialized");
@@ -37,7 +32,6 @@ function getPool(): Pool {
 
 // Opt-in real PostgreSQL tests. Use a disposable database; all tables live in an isolated schema.
 describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned persistence", () => {
-	let service: typeof import("./service").coverLetterService;
 	const schemaName = `cover_letter_test_${randomUUID().replaceAll("-", "")}`;
 	let admin: Pool;
 
@@ -49,46 +43,513 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 			options: `-c search_path=${schemaName}`,
 		});
 		fixture.db = drizzle({ client: fixture.pool });
-		await fixture.pool.query(
-			`CREATE TABLE "user" (id text PRIMARY KEY); CREATE TABLE resume (id text PRIMARY KEY, user_id text, data jsonb); CREATE TABLE application (id text PRIMARY KEY, user_id text, company text NOT NULL DEFAULT '', contacts jsonb NOT NULL DEFAULT '[]', cover_letter_id text, updated_at timestamptz, resume_id text, status text DEFAULT 'saved', sent_resume_version_id text);`,
-		);
-		// The migrations that shape the letter tables, in order.
-		for (const name of [
-			"20260905121445_cover_letter_library",
-			"20261001042749_v6_release",
-			"20261009132123_left_proteus",
-		]) {
-			const migration = await readFile(
-				new URL(`../../../../../migrations/${name}/migration.sql`, import.meta.url),
-				"utf8",
+		const migrations = new URL("../../../../../migrations/", import.meta.url);
+		for (const name of (await readdir(migrations)).filter((name) => /^\d+_/.test(name)).sort()) {
+			await fixture.pool.query(
+				(await readFile(new URL(`${name}/migration.sql`, migrations), "utf8")).replaceAll('"public".', ""),
 			);
-			// This fixture owns only the letter tables; full upgrade coverage lives in the DB package.
-			for (const statement of migration.split("--> statement-breakpoint")) {
-				const sql = statement.trim().replace(/^--[^\n]*\n/, "");
-				if (
-					/^(?:CREATE TABLE|ALTER TABLE) "cover_letter(?:_version)?"|^CREATE (?:UNIQUE )?INDEX .* ON "cover_letter(?:_version)?"/.test(
-						sql,
-					) ||
-					/^ALTER TABLE "application" .*"sent_cover_letter_version_id"/.test(sql)
-				) {
-					await fixture.pool.query(sql.replaceAll('"public".', ""));
-				}
-			}
 		}
-		service = (await import("./service")).coverLetterService;
-	});
+	}, 30_000);
 	afterAll(async () => {
 		await fixture.pool?.end();
 		await admin?.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
 		await admin?.end();
 	});
 	beforeEach(async () => {
-		await getPool().query('TRUNCATE "user",resume,application,cover_letter CASCADE');
-		await getPool().query("INSERT INTO \"user\" VALUES ('alice'),('bob')");
-		await getPool().query("INSERT INTO resume VALUES ('alice-resume','alice',$1),('bob-resume','bob',$1)", [
+		await truncateCascade(getPool(), [
+			"user",
+			"released_username",
+			"resume",
+			"resume_version",
+			"application",
+			"cover_letter",
+			"agent_threads",
+			"agent_messages",
+		]);
+		await getPool().query(
+			"INSERT INTO \"user\" (id,name,email,username,display_username) VALUES ('alice','alice','alice@example.test','alice','alice'),('bob','bob','bob@example.test','bob','bob')",
+		);
+		await getPool().query(
+			"INSERT INTO resume (id,user_id,name,slug,data) VALUES ('alice-resume','alice','Resume','resume',$1),('bob-resume','bob','Resume','resume',$1)",
+			[defaultResumeData],
+		);
+		await getPool().query(
+			"INSERT INTO application (id,user_id,company,role) VALUES ('alice-app','alice','',''),('bob-app','bob','','')",
+		);
+	});
+
+	// A real proposal: an accepted receipt needs its current wording in the saved document, and a resume set records
+	// the job it tailors to (none here).
+	const proposing = (status: "accepted" | "pending" | "rejected", kind: "resume" | "letter", after: string) => ({
+		id: "message",
+		role: "assistant",
+		parts: [
+			{
+				type: "tool-propose_edits",
+				toolCallId: "call",
+				state: "output-available",
+				output: {
+					...(kind === "resume" ? { tailoredFor: null } : {}),
+					edits: [
+						{
+							id: "edit",
+							status,
+							target: { sectionId: kind === "letter" ? "letter" : "summary", field: "content" },
+							location: "",
+							before: "<p>Original</p>",
+							after,
+							why: "",
+						},
+					],
+				},
+			},
+		],
+	});
+	async function proposalThread(
+		id: string,
+		owner: string,
+		kind: "resume" | "letter",
+		documentId: string,
+		status: "accepted" | "pending" | "rejected" = "pending",
+		after = kind === "letter" ? "<p>Rewritten</p>" : "<p>Original</p><p>Added</p>",
+	) {
+		await getPool().query(
+			`INSERT INTO agent_threads (id,user_id,title,working_resume_id,cover_letter_id) VALUES ($1,$2,'Proposal',$3,$4)`,
+			[id, owner, kind === "resume" ? documentId : null, kind === "letter" ? documentId : null],
+		);
+		await getPool().query(
+			`INSERT INTO agent_messages (id,user_id,thread_id,role,sequence,ui_message) VALUES ($1,$2,$3,'assistant',0,$4)`,
+			[id, owner, id, proposing(status, kind, after)],
+		);
+	}
+	async function outcomes() {
+		return (
+			await getPool().query(
+				`SELECT t.id,t.edits_accepted AS accepted,m.ui_message->'parts'->0->'output'->'edits'->0->>'status' AS status FROM agent_threads t JOIN agent_messages m ON m.thread_id=t.id ORDER BY t.id`,
+			)
+		).rows;
+	}
+
+	it("serializes streamed message rewrites with document receipts at the actual PostgreSQL read barrier", async () => {
+		const letter = await service.create({ userId: "alice", name: "Concurrent receipt", content: "<p>Old</p>" });
+		await proposalThread("streaming", "alice", "letter", letter.id, "pending", "<p>New</p>");
+		const { upsertAssistantUiMessage } = await import("../agent/messages-persistence");
+		let release!: () => void;
+		const paused = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let read!: () => void;
+		const captured = new Promise<void>((resolve) => {
+			read = resolve;
+		});
+		// Pause only after the real SELECT executes. The production transaction must still hold its locks.
+		let intercepted = false;
+		const instrument = (target: object): object =>
+			new Proxy(target, {
+				get(target, key, receiver) {
+					const value = Reflect.get(target, key, receiver);
+					if (key === "transaction")
+						return (callback: (tx: object) => Promise<unknown>) =>
+							value.call(target, (tx: object) => callback(instrument(tx)));
+					if (key === "select" || key === "from" || key === "where" || key === "orderBy" || key === "for")
+						return (...args: unknown[]) => instrument(value.apply(target, args));
+					if (key === "then")
+						return (resolve: (rows: unknown) => void, reject: (error: unknown) => void) =>
+							value.call(
+								target,
+								async (rows: unknown) => {
+									if (!intercepted) {
+										intercepted = true;
+										read();
+										await paused;
+									}
+									resolve(rows);
+								},
+								reject,
+							);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+		const database = fixture.db;
+		if (!database) throw new Error("Missing database");
+		const writing = upsertAssistantUiMessage(
+			{
+				userId: "alice",
+				threadId: "streaming",
+				rowId: "streaming",
+				message: proposing("pending", "letter", "<p>New</p>") as never,
+				status: "completed",
+			},
+			instrument(database) as never,
+		);
+		await captured;
+		let committed = false;
+		const saving = service
+			.update({
+				userId: "alice",
+				id: letter.id,
+				expectedRevision: letter.revision,
+				content: "<p>New</p>",
+				proposalApplications: { edit: true },
+			})
+			.then((result) => {
+				committed = true;
+				return result;
+			});
+		let blocked = false;
+		try {
+			for (let attempt = 0; attempt < 100 && !committed && !blocked; attempt++) {
+				const result = await getPool().query(
+					"SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0) AS blocked",
+				);
+				blocked = result.rows[0].blocked;
+			}
+		} finally {
+			release();
+		}
+		await Promise.all([writing, saving]);
+		expect(blocked).toBe(true);
+		expect(await outcomes()).toEqual([{ id: "streaming", accepted: 1, status: "accepted" }]);
+		expect((await service.getById({ userId: "alice", id: letter.id })).content).toBe("<p>New</p>");
+	});
+
+	it("atomically saves letter acceptance/Undo/Redo while isolating users, documents and explicit rejection", async () => {
+		const letter = await service.create({ userId: "alice", name: "Assistant letter", content: "<p>Original</p>" });
+		const other = await service.create({ userId: "alice", name: "Other letter" });
+		// A resume that shares the letter's id: only the thread's document kind tells them apart.
+		await getPool().query("INSERT INTO resume (id,user_id,name,slug,data) VALUES ($1,'alice','Same id','same-id',$2)", [
+			letter.id,
 			defaultResumeData,
 		]);
-		await getPool().query("INSERT INTO application VALUES ('alice-app','alice'),('bob-app','bob')");
+		await proposalThread("own", "alice", "letter", letter.id);
+		await proposalThread("other-document", "alice", "letter", other.id);
+		await proposalThread("other-user", "bob", "letter", letter.id);
+		await proposalThread("resume", "alice", "resume", letter.id);
+		await proposalThread("rejected", "alice", "letter", letter.id, "rejected");
+		const accepted = await service.update({
+			userId: "alice",
+			id: letter.id,
+			expectedRevision: letter.revision,
+			content: "<p>Rewritten</p>",
+			proposalApplications: { edit: true },
+		});
+		expect(await outcomes()).toEqual([
+			{ id: "other-document", accepted: 0, status: "pending" },
+			{ id: "other-user", accepted: 0, status: "pending" },
+			{ id: "own", accepted: 1, status: "accepted" },
+			{ id: "rejected", accepted: 0, status: "rejected" },
+			{ id: "resume", accepted: 0, status: "pending" },
+		]);
+		const undone = await service.update({
+			userId: "alice",
+			id: letter.id,
+			expectedRevision: accepted.revision,
+			content: "<p>Original</p>",
+			proposalApplications: { edit: false },
+		});
+		expect((await outcomes()).find((row) => row.id === "own")).toMatchObject({ accepted: 0, status: "pending" });
+		await service.update({
+			userId: "alice",
+			id: letter.id,
+			expectedRevision: undone.revision,
+			content: "<p>Rewritten</p>",
+			proposalApplications: { edit: true },
+		});
+		expect((await outcomes()).find((row) => row.id === "own")).toMatchObject({ accepted: 1, status: "accepted" });
+		await expect(
+			service.update({
+				userId: "alice",
+				id: letter.id,
+				expectedRevision: accepted.revision,
+				content: "<p>Stale</p>",
+				proposalApplications: { edit: false },
+			}),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect((await outcomes()).find((row) => row.id === "own")).toMatchObject({ accepted: 1, status: "accepted" });
+	});
+
+	it("rolls back letter content and revision if proposal synchronization fails", async () => {
+		const letter = await service.create({ userId: "alice", name: "Atomic letter", content: "<p>Original</p>" });
+		await proposalThread("own", "alice", "letter", letter.id);
+		await getPool()
+			.query(`CREATE FUNCTION reject_proposal_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'simulated status storage failure'; END $$;
+		CREATE TRIGGER reject_proposal_update BEFORE UPDATE ON agent_messages FOR EACH ROW EXECUTE FUNCTION reject_proposal_update();`);
+		try {
+			await expect(
+				service.update({
+					userId: "alice",
+					id: letter.id,
+					expectedRevision: letter.revision,
+					content: "<p>Rewritten</p>",
+					proposalApplications: { edit: true },
+				}),
+			).rejects.toThrow();
+			expect(await service.getById({ userId: "alice", id: letter.id })).toMatchObject({
+				content: "<p>Original</p>",
+				revision: letter.revision,
+			});
+			expect(await outcomes()).toEqual([{ id: "own", accepted: 0, status: "pending" }]);
+		} finally {
+			await getPool().query(
+				"DROP TRIGGER reject_proposal_update ON agent_messages; DROP FUNCTION reject_proposal_update()",
+			);
+		}
+	});
+
+	it("persists resume acceptance, Undo and Redo through the real router with the saved document", async () => {
+		const { crudRouter } = await import("../resume/crud");
+		const { resumeService } = await import("../resume/service");
+		const client = createRouterClient(crudRouter, { context: { user: { id: "alice" } } as never });
+		await proposalThread("own", "alice", "resume", "alice-resume");
+		let current: Awaited<ReturnType<typeof client.update>> = await resumeService.getById({
+			id: "alice-resume",
+			userId: "alice",
+		});
+		for (const [applied, content] of [
+			[true, "<p>Original</p><p>Added</p>"],
+			[false, "<p>Original</p>"],
+			[true, "<p>Original</p><p>Added</p>"],
+		] as const) {
+			const data = structuredClone(current.data);
+			data.summary.content = content;
+			const saved = await client.update({
+				id: current.id,
+				data,
+				expectedUpdatedAt: current.updatedAt,
+				proposalApplications: { edit: applied },
+			});
+			current = { ...current, ...saved };
+			expect((await resumeService.getById({ id: current.id, userId: "alice" })).data.summary.content).toBe(content);
+			expect(await outcomes()).toEqual([
+				{ id: "own", accepted: applied ? 1 : 0, status: applied ? "accepted" : "pending" },
+			]);
+		}
+	});
+
+	it("saves structural proposal snapshots and their explicit Undo/Redo through the resume router", async () => {
+		const { crudRouter } = await import("../resume/crud");
+		const { documentView, loadDocument, resolveDocumentEdits } = await import("../agent/document");
+		const { createEntry } = await import("@reactive-resume/resume/entries");
+		const { buildAgentTools } = await import("../agent/tools");
+		const { pruneAgentModelContext } = await import("../agent/context");
+		const { ToolLoopAgent, isStepCount, convertToModelMessages } = await import("ai");
+		const { MockLanguageModelV4 } = await import("ai/test");
+		const seeded = structuredClone(defaultResumeData);
+		seeded.basics.name = "VISIBLE_NAME";
+		seeded.summary = { ...seeded.summary, hidden: true, content: "<p>HIDDEN_SUMMARY</p>" };
+		seeded.sections.projects = { ...seeded.sections.projects, hidden: true, title: "HIDDEN_SECTION" };
+		seeded.sections.skills.items = [
+			{ ...createEntry("skills"), id: "secret-skill", hidden: true, name: "HIDDEN_ITEM" },
+		] as typeof seeded.sections.skills.items;
+		seeded.customSections = [
+			{
+				...seeded.sections.certifications,
+				id: "secret-custom",
+				type: "certifications",
+				hidden: true,
+				title: "HIDDEN_CUSTOM",
+			},
+		];
+		seeded.metadata.notes = "PRIVATE_NOTES";
+		seeded.picture.url = "https://fictional.invalid/PRIVATE_PICTURE";
+		await getPool().query("UPDATE resume SET data=$1 WHERE id='alice-resume'", [seeded]);
+		const { applyResumeProposals } = await import("@reactive-resume/resume/proposals");
+		const document = await loadDocument("alice", { kind: "resume", id: "alice-resume" });
+		if (!document.resume) throw new Error("Missing resume");
+		const original = structuredClone(document.resume);
+		const request = {
+			title: "Review headline",
+			changes: [
+				{
+					kind: "field",
+					target: { sectionId: "basics", field: "headline" },
+					before: "",
+					value: "Design lead",
+					why: "User supplied.",
+				},
+			],
+		};
+		for (const change of [
+			{
+				kind: "entry",
+				sectionId: "certifications",
+				type: "cover-letter",
+				entryJson: JSON.stringify({ ...createEntry("cover-letter"), content: "<p>Fictional letter</p>" }),
+				why: "User supplied.",
+			},
+			{
+				kind: "section",
+				type: "cover-letter",
+				title: "Letter",
+				entriesJson: JSON.stringify([{ ...createEntry("cover-letter"), content: "<p>Fictional letter</p>" }]),
+				why: "User supplied.",
+			},
+		]) {
+			expect(() => resolveDocumentEdits(document, { title: "Letter", changes: [change] } as never)).toThrow(
+				"This suggestion couldn't be prepared",
+			);
+		}
+		let output: ReturnType<typeof resolveDocumentEdits> | undefined;
+		const captures: string[] = [];
+		let step = 0;
+		const tools = buildAgentTools({
+			document: "resume",
+			externalSearch: false,
+			signal: new AbortController().signal,
+			handlers: {
+				readDocument: async () => documentView(document),
+				readAttachment: async () => ({}),
+				proposeEdits: async (input) => (output = resolveDocumentEdits(document, input)),
+				searchWeb: async () => {
+					throw Error("Unexpected search");
+				},
+				readPage: async () => {
+					throw Error("Unexpected page");
+				},
+			},
+		});
+		const agent = new ToolLoopAgent({
+			tools,
+			stopWhen: isStepCount(4),
+			prepareStep: ({ messages }) => ({ messages: pruneAgentModelContext(messages) }),
+			model: new MockLanguageModelV4({
+				doGenerate: async (options) => {
+					captures.push(JSON.stringify(options.prompt));
+					const current = step++;
+					return {
+						content:
+							current === 0
+								? [{ type: "tool-call", toolCallId: "read", toolName: "read_resume", input: "{}" }]
+								: current === 1
+									? [
+											{
+												type: "tool-call",
+												toolCallId: "call",
+												toolName: "propose_edits",
+												input: JSON.stringify(request),
+											},
+										]
+									: [{ type: "text", text: "Review changes." }],
+						finishReason: { unified: "stop", raw: "stop" },
+						usage: {
+							inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+							outputTokens: { total: 1, text: 1, reasoning: 0 },
+						},
+						warnings: [],
+					};
+				},
+			}),
+		});
+		await agent.generate({ prompt: "Change my headline." });
+		if (!output) throw Error("Missing proposal output");
+		expect(captures).toHaveLength(3);
+		expect(captures[1]).toContain("VISIBLE_NAME");
+		expect((await getPool().query("SELECT data FROM resume WHERE id='alice-resume'")).rows[0].data).toEqual(seeded);
+
+		const edit = output.edits[0];
+		if (!edit?.snapshot) throw new Error("Missing structural snapshot");
+		await proposalThread("structural", "alice", "resume", "alice-resume");
+		const message = proposing("pending", "resume", edit.after);
+		const part = message.parts[0];
+		if (!part) throw new Error("Missing proposal part");
+		part.output = output as never;
+		Object.assign(part, { input: request });
+		await getPool().query("UPDATE agent_messages SET ui_message=$1 WHERE id='structural'", [message]);
+		// Reopen the actual JSONB history; the full snapshot must survive storage but never reach the provider.
+		const restored = (await getPool().query("SELECT ui_message FROM agent_messages WHERE id='structural'")).rows[0]
+			.ui_message;
+		await agent.generate({ messages: await convertToModelMessages([restored]) });
+		await agent.generate({
+			messages: await convertToModelMessages([
+				restored,
+				{ id: "answer", role: "user", parts: [{ type: "text", text: "VISIBLE_CONTINUATION" }] },
+			]),
+		});
+		expect(captures.at(-1)).toContain("VISIBLE_CONTINUATION");
+		for (const prompt of captures)
+			for (const marker of [
+				"HIDDEN_SUMMARY",
+				"HIDDEN_SECTION",
+				"HIDDEN_ITEM",
+				"HIDDEN_CUSTOM",
+				"PRIVATE_NOTES",
+				"PRIVATE_PICTURE",
+			])
+				expect(prompt).not.toContain(marker);
+		for (const marker of ["HIDDEN_SUMMARY", "HIDDEN_ITEM"]) expect(JSON.stringify(restored)).toContain(marker);
+		expect((await getPool().query("SELECT count(*)::int AS n FROM cover_letter")).rows[0].n).toBe(0);
+
+		const data = structuredClone(original);
+		expect(applyResumeProposals(data, [{ ...edit, source: "assistant" }]).applied).toHaveLength(1);
+		const client = createRouterClient(crudRouter, { context: { user: { id: "alice" } } as never });
+		let updatedAt = document.updatedAt;
+		for (const [applied, content] of [
+			[true, data],
+			[false, original],
+			[true, data],
+		] as const) {
+			const saved = await client.update({
+				id: "alice-resume",
+				data: content,
+				expectedUpdatedAt: updatedAt,
+				proposalApplications: { [edit.id]: applied },
+			});
+			updatedAt = saved.updatedAt;
+			expect(saved.data.basics.headline).toBe(applied ? "Design lead" : "");
+			expect(await outcomes()).toEqual([
+				{ id: "structural", accepted: applied ? 1 : 0, status: applied ? "accepted" : "pending" },
+			]);
+			const stored = (await getPool().query("SELECT ui_message FROM agent_messages WHERE id='structural'")).rows[0]
+				.ui_message;
+			expect(stored.parts[0].output.edits[0].snapshot).toEqual(edit.snapshot);
+			expect((await getPool().query("SELECT count(*)::int AS n FROM cover_letter")).rows[0].n).toBe(0);
+		}
+	});
+
+	it("synchronizes only the owned resume's threads inside the caller transaction", async () => {
+		const { saveProposalApplications } = await import("../agent/proposal-applications");
+		// Decoys: another resume, and a letter that shares the resume's id.
+		await getPool().query(
+			"INSERT INTO resume (id,user_id,name,slug,data) VALUES ('other-resume','alice','Other','other',$1)",
+			[defaultResumeData],
+		);
+		await getPool().query(
+			"INSERT INTO cover_letter (id,user_id,name,style) VALUES ('alice-resume','alice','Same id','{}')",
+		);
+		await proposalThread("own", "alice", "resume", "alice-resume");
+		await proposalThread("bob", "bob", "resume", "alice-resume");
+		await proposalThread("different", "alice", "resume", "other-resume");
+		await proposalThread("letter", "alice", "letter", "alice-resume");
+		const data = structuredClone(defaultResumeData);
+		data.summary.content = "<p>Original</p><p>Added</p>";
+		await getPool().query("UPDATE resume SET data=$1 WHERE id='alice-resume'", [data]);
+		const conflict = () => new Error("not placed");
+		await fixture.db?.transaction(async (tx) => {
+			await saveProposalApplications(tx, {
+				userId: "alice",
+				document: { kind: "resume", id: "alice-resume" },
+				applications: { edit: true },
+				conflict,
+			});
+		});
+		expect(await outcomes()).toEqual([
+			{ id: "bob", accepted: 0, status: "pending" },
+			{ id: "different", accepted: 0, status: "pending" },
+			{ id: "letter", accepted: 0, status: "pending" },
+			{ id: "own", accepted: 1, status: "accepted" },
+		]);
+		await expect(
+			fixture.db?.transaction(async (tx) => {
+				await saveProposalApplications(tx, {
+					userId: "alice",
+					document: { kind: "resume", id: "alice-resume" },
+					applications: { edit: false },
+					conflict,
+				});
+				throw new Error("rollback");
+			}),
+		).rejects.toThrow("rollback");
+		expect((await outcomes()).find((row) => row.id === "own")).toMatchObject({ accepted: 1, status: "accepted" });
 	});
 
 	it("persists one shared document and atomically rejects stale writers and deletes", async () => {
@@ -126,7 +587,10 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 			() => service.update({ userId: "alice", id: replacement.id, expectedRevision: 1, applicationId: "alice-app" }),
 			() => service.update({ userId: "alice", id: original.id, expectedRevision: 1, applicationId: null }),
 		]) {
-			await expect(change()).rejects.toMatchObject({ code: "BAD_REQUEST" });
+			await expect(change()).rejects.toMatchObject({
+				code: "BAD_REQUEST",
+				data: { reason: "SUBMITTED_DOCUMENT_LOCKED" },
+			});
 			const application = (
 				await getPool().query(
 					"SELECT cover_letter_id, sent_cover_letter_version_id FROM application WHERE id='alice-app'",
@@ -163,7 +627,6 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 	});
 
 	it("accepts procedure defaults, rejects invalid input, and permits only one concurrent writer", async () => {
-		const { coverLettersRouter } = await import("./router");
 		const client = createRouterClient(coverLettersRouter, { context: { user: { id: "alice" } } as never });
 		const created = await client.create({ name: "Through procedure" });
 		expect(created).toMatchObject({ recipient: "", content: "", revision: 1 });
@@ -175,10 +638,13 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 		]);
 		expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
 		expect(results.find((result) => result.status === "rejected")).toMatchObject({ reason: { code: "CONFLICT" } });
+		const persisted = (await getPool().query("SELECT revision, content FROM cover_letter WHERE id=$1", [created.id]))
+			.rows[0];
+		expect(persisted.revision).toBe(2);
+		expect(["First editor", "Second editor"]).toContain(persisted.content);
 	});
 
 	it("preserves custom and omitted letter framing through saves, copies, JSON and history", async () => {
-		const { coverLettersRouter } = await import("./router");
 		const client = createRouterClient(coverLettersRouter, { context: { user: { id: "alice" } } as never });
 		const created = await client.create({ name: "Custom framing", greeting: "Hallo Dana,", signOff: "Vielen Dank!" });
 		const custom = { greeting: "Hallo Dana,", signOff: "Vielen Dank!" };
@@ -245,6 +711,21 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 				data: input,
 			});
 
+		const oversized = structuredClone(data);
+		oversized.picture.url = `https://example.test/${"x".repeat(100_000)}`;
+		const section = oversized.customSections[0];
+		if (!section) throw new Error("Missing section");
+		section.items = Array.from({ length: 60 }, (_, index) => ({
+			id: `item-${index}`,
+			hidden: false,
+			recipient: "",
+			content: "<p>Letter</p>",
+		}));
+		const original = JSON.stringify(oversized);
+		await expect(adopt(oversized)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(JSON.stringify(oversized)).toBe(original);
+		expect((await service.list({ userId: "alice", limit: 20, offset: 0 })).items).toHaveLength(0);
+
 		const again = structuredClone(data);
 		await adopt(data);
 		expect(data.customSections).toEqual([]);
@@ -276,7 +757,7 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 
 	it("serializes relinking before the letter lock so an application submission can finish", async () => {
 		const letter = await service.create({ userId: "alice", name: "For application", applicationId: "alice-app" });
-		await getPool().query("INSERT INTO application (id, user_id) VALUES ('alice-next','alice')");
+		await getPool().query("INSERT INTO application (id, user_id, company, role) VALUES ('alice-next','alice','','')");
 		const editor = await getPool().connect();
 		let completion: Promise<{ error: unknown }> | undefined;
 		try {
@@ -372,7 +853,7 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 		});
 
 		// Moving the letter to another application takes it along.
-		await getPool().query("INSERT INTO application (id, user_id) VALUES ('alice-app-2','alice')");
+		await getPool().query("INSERT INTO application (id, user_id, company, role) VALUES ('alice-app-2','alice','','')");
 		await service.update({ userId: "alice", id: created.id, expectedRevision: 1, applicationId: "alice-app-2" });
 		const moved = await getPool().query(
 			"SELECT id, cover_letter_id FROM application WHERE user_id='alice' ORDER BY id",
@@ -381,6 +862,81 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 			{ id: "alice-app", cover_letter_id: null },
 			{ id: "alice-app-2", cover_letter_id: created.id },
 		]);
+	});
+
+	it("starts a new job's letter from an owned earlier letter without carrying its company or history", async () => {
+		await getPool().query(
+			`UPDATE application SET company='Northwind Labs', contacts='[{"name":"Dana Reyes"}]' WHERE id='alice-app'`,
+		);
+		await getPool().query(
+			`INSERT INTO application (id, user_id, company, role, contacts) VALUES ('alice-app-2','alice','Fieldnote','','[{"name":"Morgan Lee"}]')`,
+		);
+		const source = await service.create({
+			userId: "alice",
+			name: "Northwind letter",
+			content: "<p>I led delivery for Northwind's platform team.</p>",
+			applicationId: "alice-app",
+		});
+		const { listLetterVersions } = await import("./versions");
+		const sourceVersions = await listLetterVersions({ userId: "alice", coverLetterId: source.id });
+
+		const reused = await service.create({
+			userId: "alice",
+			name: "Fieldnote letter",
+			applicationId: "alice-app-2",
+			sourceLetterId: source.id,
+		});
+
+		expect(reused).toMatchObject({
+			content: source.content,
+			recipientCompany: "Fieldnote",
+			recipientName: "Morgan Lee",
+			layout: "structured",
+		});
+		expect(await service.getById({ userId: "alice", id: source.id })).toMatchObject({
+			content: source.content,
+			recipientCompany: "Northwind Labs",
+		});
+		expect(await listLetterVersions({ userId: "alice", coverLetterId: source.id })).toEqual(sourceVersions);
+		expect(await listLetterVersions({ userId: "alice", coverLetterId: reused.id })).toHaveLength(1);
+
+		// Another account's letter, and a trashed one, are not usable sources.
+		await expect(service.create({ userId: "bob", name: "Borrowed", sourceLetterId: source.id })).rejects.toMatchObject({
+			code: "NOT_FOUND",
+		});
+		await service.delete({ userId: "alice", id: source.id, expectedRevision: source.revision });
+		await expect(
+			service.create({ userId: "alice", name: "From Trash", sourceLetterId: source.id }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+	});
+
+	it("starts a letter in the posting's language and keeps its language independent of the design link", async () => {
+		await getPool().query(
+			`UPDATE application SET company='Lumen Health', posting_source='{"method":"builtin","format":"text","truncated":false,"completeness":"unknown","language":"de-DE"}' WHERE id='alice-app'`,
+		);
+		const created = await service.create({
+			userId: "alice",
+			name: "Auf Deutsch",
+			resumeId: "alice-resume",
+			applicationId: "alice-app",
+		});
+		expect(created.style.metadata.page.locale).toBe("de-DE");
+		expect(created.designLinked).toBe(true);
+
+		// Changing the letter's language is not changing its design: the link and the resume's own locale stay.
+		const updated = await service.update({
+			userId: "alice",
+			id: created.id,
+			expectedRevision: 1,
+			locale: "fr-FR",
+		});
+		expect(updated.style.metadata.page.locale).toBe("fr-FR");
+		expect(updated.designLinked).toBe(true);
+		expect((await service.getById({ userId: "alice", id: created.id })).style.metadata.page.locale).toBe("fr-FR");
+		const resume = await getPool().query(
+			"SELECT data->'metadata'->'page'->>'locale' AS locale FROM resume WHERE id='alice-resume'",
+		);
+		expect(resume.rows[0].locale).not.toBe("fr-FR");
 	});
 
 	it("reads linked details and design live, keeps them as they read when unlinked, and outlives the resume", async () => {
@@ -397,7 +953,8 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 		await getPool().query("UPDATE resume SET data=$1 WHERE id='alice-resume'", [changed]);
 		expect((await service.getById({ userId: "alice", id: created.id })).style).toMatchObject({
 			basics: { name: "New sender" },
-			metadata: { template: "gengar", page: { locale: "de-DE" } },
+			// The resume's design arrives; the letter's own language stays its own.
+			metadata: { template: "gengar", page: { locale: "en-US" } },
 		});
 
 		const unlinked = await service.update({
@@ -423,11 +980,11 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 		const own = await service.update({ userId: "alice", id: created.id, expectedRevision: 2, template: "ditto" });
 		expect(own).toMatchObject({
 			designLinked: false,
-			style: { metadata: { template: "ditto", page: { locale: "de-DE" } } },
+			style: { metadata: { template: "ditto", page: { locale: "en-US" } } },
 		});
 		changed.metadata.page.locale = "en-US";
 		await getPool().query("UPDATE resume SET data=$1 WHERE id='alice-resume'", [changed]);
-		expect((await service.getById({ userId: "alice", id: created.id })).style.metadata.page.locale).toBe("de-DE");
+		expect((await service.getById({ userId: "alice", id: created.id })).style.metadata.page.locale).toBe("en-US");
 
 		await expect(
 			service.update({ userId: "alice", id: created.id, expectedRevision: 3, resumeId: null, senderLinked: true }),
@@ -447,6 +1004,171 @@ describe.skipIf(!process.env.COVER_LETTER_TEST_DATABASE_URL)("cover-letter owned
 		expect(
 			(await service.update({ userId: "alice", id: created.id, expectedRevision: 4, name: "Still editable" })).name,
 		).toBe("Still editable");
+	});
+
+	it.each([false, true])("refreshes design while respecting sender linking (%s)", async (senderLinked) => {
+		const client = createRouterClient(coverLettersRouter, { context: { user: { id: "alice" } } as never });
+		const source = structuredClone(defaultResumeData);
+		source.basics.name = "Original sender";
+		source.picture.url = "https://example.test/original.png";
+		await getPool().query("UPDATE resume SET data=$1 WHERE id='alice-resume'", [source]);
+		const created = await client.create({
+			name: "Refresh design",
+			resumeId: "alice-resume",
+			template: "pikachu",
+			content: "<p>Keep this letter</p>",
+		});
+		const letter = senderLinked
+			? created
+			: await client.update({
+					id: created.id,
+					expectedRevision: created.revision,
+					senderLinked: false,
+					sender: {
+						name: "Independent sender",
+						email: "own@example.test",
+						phone: "+49 30 5550100",
+						location: "Berlin",
+					},
+				});
+		source.basics.name = "Current resume sender";
+		source.basics.email = "resume@example.test";
+		source.picture.url = "https://example.test/current.png";
+		source.metadata.page.marginX = 22;
+		await getPool().query("UPDATE resume SET data=$1 WHERE id='alice-resume'", [source]);
+
+		const refreshed = await client.refreshStyle({
+			id: letter.id,
+			expectedRevision: letter.revision,
+			resumeId: "alice-resume",
+		});
+		const basics = senderLinked ? source.basics : letter.style.basics;
+		const picture = senderLinked ? source.picture : letter.style.picture;
+		expect(refreshed).toMatchObject({
+			content: "<p>Keep this letter</p>",
+			senderLinked,
+			style: { basics, picture, metadata: { template: "pikachu", page: { marginX: 22 } } },
+		});
+		expect((await client.getById({ id: letter.id })).style).toMatchObject({ basics, picture });
+		expect((await client.export({ id: letter.id })).style).toMatchObject({ basics, picture });
+		await getPool().query("DELETE FROM resume WHERE id='alice-resume'");
+		expect((await client.getById({ id: letter.id })).style).toMatchObject({ basics, picture });
+	});
+
+	it("edits standalone sender details and isolates copies, links and account ownership", async () => {
+		const client = createRouterClient(coverLettersRouter, { context: { user: { id: "alice" } } as never });
+		const created = await client.create({ name: "Standalone" });
+		const sender = { name: "Jordan Reyes", email: "jordan@example.test", phone: "+49 30 5550100", location: "Berlin" };
+		const saved = await client.update({ id: created.id, expectedRevision: 1, sender });
+		expect(saved.style.basics).toEqual({ ...created.style.basics, ...sender });
+		expect(saved.style.metadata).toEqual(created.style.metadata);
+		expect((await client.getById({ id: created.id })).style.basics).toMatchObject(sender);
+		const document = await client.export({ id: created.id });
+		expect(document.style.basics).toMatchObject(sender);
+		expect((await client.import({ document })).style.basics).toMatchObject(sender);
+		expect((await client.duplicate({ id: created.id })).style.basics).toMatchObject(sender);
+		await expect(
+			client.update({ id: created.id, expectedRevision: 2, sender: { name: 123 } } as never),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		await expect(service.update({ userId: "bob", id: created.id, expectedRevision: 2, sender })).rejects.toMatchObject({
+			code: "NOT_FOUND",
+		});
+		await expect(client.update({ id: created.id, expectedRevision: 1, sender })).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+
+		const linked = await client.update({
+			id: created.id,
+			expectedRevision: 2,
+			resumeId: "alice-resume",
+			senderLinked: true,
+		});
+		expect(linked.style.basics).toEqual(defaultResumeData.basics);
+		await expect(client.update({ id: created.id, expectedRevision: 3, sender })).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+		});
+		await expect(client.update({ id: created.id, expectedRevision: 3, resumeId: "bob-resume" })).rejects.toMatchObject({
+			code: "NOT_FOUND",
+		});
+		const own = await client.update({
+			id: created.id,
+			expectedRevision: 3,
+			senderLinked: false,
+			sender: { email: sender.email },
+		});
+		expect(own.style.basics).toEqual({ ...defaultResumeData.basics, email: sender.email });
+		expect((await getPool().query("SELECT data FROM resume WHERE id='alice-resume'")).rows[0].data).toEqual(
+			defaultResumeData,
+		);
+		const copied = await client.duplicate({ id: created.id });
+		expect(copied.style.basics).toEqual(own.style.basics);
+		const detached = await client.update({ id: created.id, expectedRevision: 4, resumeId: null });
+		expect(detached.style.basics).toEqual(own.style.basics);
+		const relinked = await client.update({
+			id: created.id,
+			expectedRevision: 5,
+			resumeId: "alice-resume",
+			senderLinked: true,
+		});
+		expect(relinked.style.basics).toEqual(defaultResumeData.basics);
+		const snapshot = await client.update({ id: created.id, expectedRevision: 6, resumeId: null });
+		expect(snapshot.style.basics).toEqual(relinked.style.basics);
+		await getPool().query("UPDATE cover_letter SET is_locked=true WHERE id=$1", [created.id]);
+		await expect(client.update({ id: created.id, expectedRevision: 7, sender })).rejects.toMatchObject({
+			code: "DOCUMENT_LOCKED",
+		});
+	});
+
+	it("lets an unlinked letter edit or hide every sender detail its header prints, without touching the resume", async () => {
+		const { coverLettersRouter } = await import("./router");
+		const client = createRouterClient(coverLettersRouter, { context: { user: { id: "alice" } } as never });
+		const source = structuredClone(defaultResumeData);
+		source.basics.name = "David Kowalski";
+		source.basics.headline = "Game Developer";
+		source.basics.website = { url: "https://davidkowalski.games", label: "" };
+		source.basics.customFields = [
+			{ id: "github", icon: "github-logo", text: "github.com/dk", link: "https://github.com/dk" },
+		];
+		source.picture.url = "https://example.test/photo.png";
+		await getPool().query("UPDATE resume SET data=$1 WHERE id='alice-resume'", [source]);
+		const created = await client.create({ name: "Sender", resumeId: "alice-resume" });
+
+		await expect(
+			client.update({ id: created.id, expectedRevision: 1, sender: { headline: "Producer" } }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+		const unlinked = await client.update({ id: created.id, expectedRevision: 1, senderLinked: false });
+		expect(unlinked.style).toMatchObject({
+			basics: source.basics,
+			picture: { url: source.picture.url, hidden: false },
+		});
+		const own = await client.update({
+			id: created.id,
+			expectedRevision: 2,
+			sender: { headline: "", website: { url: "", label: "" }, customFields: [], picture: { hidden: true } },
+		});
+		expect(own.style.basics).toEqual({
+			...source.basics,
+			headline: "",
+			website: { url: "", label: "" },
+			customFields: [],
+		});
+		expect(own.style.picture).toEqual({ ...source.picture, hidden: true });
+		const page = createCoverLetterResumeData(await client.getById({ id: created.id }));
+		expect(page.basics).toMatchObject({ headline: "", customFields: [] });
+		expect(page.picture.hidden).toBe(true);
+		expect((await client.export({ id: created.id })).style.picture.hidden).toBe(true);
+		expect((await getPool().query("SELECT data FROM resume WHERE id='alice-resume'")).rows[0].data).toEqual(source);
+		// Only the photo's visibility is the letter's to change; its address stays the copy from the resume.
+		const shown = await client.update({
+			id: created.id,
+			expectedRevision: 3,
+			sender: { picture: { hidden: false, url: "https://elsewhere.test/photo.png" } },
+		} as never);
+		expect(shown.style.picture).toEqual(source.picture);
+
+		const relinked = await client.update({ id: created.id, expectedRevision: 4, senderLinked: true });
+		expect(relinked.style).toMatchObject({ basics: source.basics, picture: source.picture });
 	});
 
 	it("keeps History: one version per session, named and sent versions, and restores with a way back", async () => {

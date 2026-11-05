@@ -1,8 +1,9 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { t } from "@lingui/core/macro";
+import { createFileRoute } from "@tanstack/react-router";
+import { ProfileSettings } from "@/features/settings/profile";
+import { getPageTitle } from "@/libs/seo";
 
-// Settings became three pages in 6.0; the old address redirects (through 6.0.x).
 export const Route = createFileRoute("/dashboard/settings/profile")({
-	beforeLoad: () => {
-		throw redirect({ to: "/dashboard/settings/account", replace: true });
-	},
+	head: () => ({ meta: [{ title: getPageTitle(t`Profile`) }] }),
+	component: ProfileSettings,
 });

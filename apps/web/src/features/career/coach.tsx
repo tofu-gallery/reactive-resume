@@ -9,6 +9,7 @@ import { ORPCError } from "@orpc/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
+import { coachStarters, type CoachStarter } from "@reactive-resume/schema/career-starters";
 import { buttonVariants } from "@reactive-resume/ui/components/button";
 import {
 	ContextMenu,
@@ -20,7 +21,6 @@ import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
-	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@reactive-resume/ui/components/dropdown-menu";
 import { Icon } from "@reactive-resume/ui/components/icon";
@@ -29,28 +29,37 @@ import { Sheet, SheetContent, SheetTitle } from "@reactive-resume/ui/components/
 import { Spinner } from "@reactive-resume/ui/components/spinner";
 import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { formatList } from "@reactive-resume/utils/locale";
+import { buildConversationTitle } from "@reactive-resume/utils/string";
 import { cn } from "@reactive-resume/utils/style";
 import {
 	CoachThread,
 	connectionName,
 	copyToClipboard,
 	deleteConversation,
+	MemoryNote,
 	titleFor,
 	useCoachKnowledge,
 	useConversationDate,
+	WebResearchChip,
+	useWebSearch,
+	type ChatHistory,
 } from "./coach-thread";
 import { CareerLoadError } from "./load-state";
+import { PracticeHandoff } from "./prepare-now";
 import { ContextChip, Eyebrow, PrivacyLine } from "./shared";
-import { transcriptOf, useConversationConnection } from "@/features/assistant/chat";
-import { ProviderSetup } from "@/features/assistant/provider-setup";
+import { collectInterviews, upcomingInterviews } from "@/features/applications/interviews";
+import { applicationsListQueryOptions } from "@/features/applications/queries";
+import { transcriptOf } from "@/features/assistant/chat";
+import { ChatWelcome, ModelMenu } from "@/features/assistant/chat-chrome";
+import { ConnectionNotice } from "@/features/assistant/connection-notice";
+import { ProviderSetup, SetUpAi } from "@/features/assistant/provider-setup";
+import { WebAccessAttention } from "@/features/settings/ai/web-access";
 import { AiProviderLoadState } from "@/features/settings/integrations/ai-provider-load-state";
 import { useHasUsableAiProvider } from "@/features/settings/integrations/hooks/use-has-usable-ai-provider";
 import { toastError } from "@/libs/error-message";
 import { client, orpc } from "@/libs/orpc/client";
 
 type ThreadSummary = RouterOutput["agent"]["threads"]["list"][number];
-type UsableProvider = ReturnType<typeof useHasUsableAiProvider>["usableProviders"][number];
-
 // ---- Context chips: per conversation, in this browser; new conversations start from the defaults. ----
 
 type Chips = { application: boolean; memory: boolean; web: boolean; offers: boolean };
@@ -95,9 +104,6 @@ function writeOfferIds(id: string, offers: string[]) {
 	}
 }
 
-/** The server's title for a conversation, from its first message, so the list doesn't change after a refetch. */
-const titleOf = (text: string) => (text.length > 47 ? `${text.slice(0, 44)}...` : text);
-
 type CoachPageProps = { conversationId: string | undefined; offerIds: string[] };
 
 /** C7–C11: conversations about the whole search, with what each message shares chosen in the composer. */
@@ -111,6 +117,13 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 	const threads = useQuery(orpc.agent.threads.list.queryOptions());
 	const knowledge = useCoachKnowledge(null);
 	const [railOpen, setRailOpen] = useState(false);
+	const [renaming, setRenaming] = useState<string | null>(null);
+	const railOpener = useRef<HTMLElement | null>(null);
+	const titleButton = useRef<HTMLButtonElement | null>(null);
+	const focusTarget = () => (railOpener.current?.isConnected ? railOpener.current : titleButton.current);
+	useEffect(() => {
+		if (wide && renaming === null && document.activeElement === document.body) focusTarget()?.focus();
+	}, [wide, renaming]);
 	const [modelMenuOpen, setModelMenuOpen] = useState(false);
 	const [providerId, setProviderId] = useState<string | null>(null);
 	const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
@@ -149,11 +162,16 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 	const conversations = (threads.data ?? []).filter((thread) => thread.scope === "career" && !hidden.has(thread.id));
 	const summary = threads.data?.find((thread) => thread.id === threadId);
 	const usable = providers.usableProviders;
-	// A conversation runs on its own connection; one switched off or removed moves to the default.
-	const provider = usable.find((item) => item.id === (summary ? summary.aiProviderId : providerId)) ?? usable[0];
-	useConversationConnection(summary, provider);
+
+	// A conversation runs on its own connection. One switched off or removed is never swapped silently: the user picks
+	// another before the next message goes anywhere. A new conversation starts on the default (listed first).
+	const saved = summary ? usable.find((item) => item.id === summary.aiProviderId) : undefined;
+	const stranded = summary !== undefined && saved === undefined && !providers.isLoading;
+	const provider = summary ? saved : (usable.find((item) => item.id === providerId) ?? usable[0]);
 	const label = provider?.label ?? summary?.providerLabel ?? t`Your AI`;
 	const connection = connectionName(label);
+	const web = useWebSearch(provider);
+	const webAccess = web.status;
 
 	const context: MessageContext = {
 		// A career conversation has no document or posting to leave out.
@@ -161,7 +179,8 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 		posting: true,
 		application: chips.application,
 		memory: chips.memory,
-		web: chips.web,
+		// The message still requires Web research on and per-operation destination approval.
+		web: chips.web && web.canSearch,
 		...(offerIds.length > 0 && chips.offers ? { offerIds } : {}),
 	};
 
@@ -178,7 +197,10 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 		queryClient.setQueryData(listKey, (old) => {
 			const thread = old?.find((item) => item.id === id) ?? (created.current?.id === id ? created.current : undefined);
 			if (!old || !thread) return old;
-			return [{ ...thread, title: titleOf(text), lastMessageAt: new Date() }, ...old.filter((item) => item.id !== id)];
+			return [
+				{ ...thread, title: buildConversationTitle(text, thread.title, 47), lastMessageAt: new Date() },
+				...old.filter((item) => item.id !== id),
+			];
 		});
 		// No longer a draft: the URL names it from here on.
 		created.current = null;
@@ -243,33 +265,40 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 				}),
 		);
 
-	// The privacy line names exactly what goes. The chips choose what this message adds; earlier messages always go.
-	const parts = [
-		t`your message`,
-		t`earlier messages in this chat`,
-		...(chips.application ? [t`application summaries`] : []),
-		...(context.offerIds ? [plural(offerIds.length, { one: "# saved offer", other: "# saved offers" })] : []),
-		...(chips.memory
-			? [
-					t`your preferences`,
-					...(knowledge.active.length > 0
-						? [plural(knowledge.active.length, { one: "# fact", other: "# facts" })]
-						: []),
-					...(knowledge.stories.length > 0 ? [t`your stories`] : []),
-				]
-			: []),
-	];
-	const shared = formatList(i18n.locale, parts);
-	const privacy = (
-		<PrivacyLine>
-			{chips.memory && knowledge.isError
-				? t`Knowledge couldn't load. Try again or switch Knowledge off before sending.`
-				: chips.memory && knowledge.isPending
-					? t`Loading Knowledge before you send…`
-					: t`When you press send, ${shared} go to ${connection}.`}
-			{chips.web && ` ${t`Search terms go to your web search service.`}`}
-		</PrivacyLine>
-	);
+	// The privacy line names exactly what goes and what the coach may keep. The chips choose what this message adds;
+	// earlier messages go too, except those written before Knowledge last changed.
+	const privacy = ({ earlier, withheld, attached }: ChatHistory) => {
+		const parts = [
+			t`your message`,
+			...(attached > 0 ? [plural(attached, { one: "# attached file", other: "# attached files" })] : []),
+			...(earlier > 0 ? [t`earlier messages in this chat`] : []),
+			...(chips.application ? [t`application summaries`] : []),
+			...(context.offerIds ? [plural(offerIds.length, { one: "# saved offer", other: "# saved offers" })] : []),
+			...(chips.memory
+				? [
+						t`your preferences`,
+						...(knowledge.active.length > 0
+							? [plural(knowledge.active.length, { one: "# fact", other: "# facts" })]
+							: []),
+						...(knowledge.stories.length > 0 ? [t`your stories`] : []),
+					]
+				: []),
+		];
+		const shared = formatList(i18n.locale, parts);
+		return (
+			<PrivacyLine>
+				{stranded
+					? t`Nothing is sent until you choose a connection for this conversation.`
+					: chips.memory && knowledge.isError
+						? t`Knowledge couldn't load. Try again or switch Knowledge off before sending.`
+						: chips.memory && knowledge.isPending
+							? t`Loading Knowledge before you send…`
+							: t`When you press send, ${shared} go to your ${connection}.`}
+				{withheld > 0 && ` ${t`Messages from before Knowledge changed aren't sent.`}`}
+				{context.web && ` ${t`Search terms go to your web search service.`}`} <MemoryNote knowledge={chips.memory} />
+			</PrivacyLine>
+		);
+	};
 
 	const contextChips = (
 		<>
@@ -284,14 +313,17 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 				pressed={chips.memory}
 				onPressedChange={(memory) => setChips({ ...chips, memory })}
 				label={plural(knowledge.active.length, { one: "Knowledge · # fact", other: "Knowledge · # facts" })}
-				tooltip={t`Facts, stories and preferences that are switched on in Knowledge`}
+				tooltip={
+					chips.memory
+						? t`Facts, stories and preferences that are switched on in Knowledge`
+						: t`Knowledge is off for this message: the coach doesn't read it or remember anything you say`
+				}
 			/>
-			<ContextChip
+			<WebResearchChip
+				status={webAccess}
+				fallbackLabel={web.fallbackLabel}
 				pressed={chips.web}
 				onPressedChange={(web) => setChips({ ...chips, web })}
-				label={t`Web research`}
-				tooltip={t`Lets the coach search public pages through your web search service`}
-				offIcon="globe-hemisphere-west"
 			/>
 			{offerIds.length > 0 && (
 				<ContextChip
@@ -305,51 +337,78 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 	);
 
 	const header = (messages: readonly UIMessage[]) => (
-		<header className="flex h-12 shrink-0 items-center gap-2 border-b border-line ps-4 pe-2">
-			{!wide && (
+		<>
+			<header className="flex h-12 shrink-0 items-center gap-2 border-b border-line ps-4 pe-2">
+				{!wide && (
+					<IconButton
+						icon="clock-counter-clockwise"
+						label={t`Conversations`}
+						size="icon-sm"
+						className="-ms-2 text-ink-2"
+						onClick={(event) => {
+							railOpener.current = event.currentTarget;
+							setRailOpen(true);
+						}}
+					/>
+				)}
+				<Icon name="sparkle" size={20} className="shrink-0 text-accent-text" />
+				<h2 className="me-auto min-w-0 truncate text-sm font-semibold">
+					{summary ? (
+						<button
+							ref={titleButton}
+							type="button"
+							aria-label={`${t`Rename`}: ${titleFor(summary)}`}
+							onClick={(event) => {
+								railOpener.current = event.currentTarget;
+								setRenaming(summary.id);
+								setRailOpen(true);
+							}}
+							className="touch-target block max-w-full truncate rounded-md text-start outline-none hover:text-accent-text focus-visible:ring-2 focus-visible:ring-accent"
+						>
+							{titleFor(summary)}
+						</button>
+					) : (
+						titleFor(summary)
+					)}
+				</h2>
+				{(usable.length > 0 || summary) && (
+					<ModelMenu
+						open={modelMenuOpen}
+						onOpenChange={setModelMenuOpen}
+						onConnect={() => void navigate({ to: "/dashboard/settings/ai" })}
+						providers={usable}
+						current={provider}
+						label={label}
+						onChoose={(id) => void chooseProvider(id)}
+					/>
+				)}
 				<IconButton
-					icon="clock-counter-clockwise"
-					label={t`Conversations`}
+					icon="copy"
+					label={t`Copy conversation`}
 					size="icon-sm"
-					className="-ms-2 text-ink-2"
-					onClick={() => setRailOpen(true)}
+					className="text-ink-2"
+					disabled={messages.length === 0}
+					onClick={() =>
+						void copyToClipboard(
+							transcriptOf(messages, { user: t`You`, assistant: t`Coach`, sources: t`Sources` }),
+							t`Conversation copied`,
+						)
+					}
 				/>
-			)}
-			<Icon name="sparkle" size={20} className="shrink-0 text-accent-text" />
-			<h2 className="me-auto min-w-0 truncate text-sm font-semibold">{titleFor(summary)}</h2>
-			{(usable.length > 0 || summary) && (
-				<ModelChip
-					open={modelMenuOpen}
-					onOpenChange={setModelMenuOpen}
-					providers={usable}
-					current={provider}
-					label={label}
-					onChoose={(id) => void chooseProvider(id)}
-				/>
-			)}
-			<IconButton
-				icon="copy"
-				label={t`Copy conversation`}
-				size="icon-sm"
-				className="text-ink-2"
-				disabled={messages.length === 0}
-				onClick={() =>
-					void copyToClipboard(
-						transcriptOf(messages, { user: t`You`, assistant: t`Coach`, sources: t`Sources` }),
-						t`Conversation copied`,
-					)
-				}
-			/>
-		</header>
+			</header>
+			<PracticeHandoff />
+		</>
 	);
 
 	const notSetUp = threads.error instanceof ORPCError && threads.error.code === "PRECONDITION_FAILED";
-	const noProvider = !providers.isUnavailable && !providers.hasUsableProvider;
+	const noProvider = !providers.isUnavailable && !providers.hasUsableProvider && !threadId;
 
 	const rail = (
 		<ConversationRail
 			threads={conversations}
 			currentId={threadId}
+			renaming={renaming}
+			onRenamingChange={setRenaming}
 			onNavigate={() => setRailOpen(false)}
 			onRename={(thread, title) => void rename(thread, title)}
 			onDelete={remove}
@@ -357,14 +416,19 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 	);
 
 	return (
-		// The card fills what's left of the page height and scrolls inside.
-		<div className="relative min-h-[560px] flex-1">
+		// The card fills what's left of the page height and scrolls inside; on phones, all of it.
+		<div className="relative min-h-[560px] flex-1 max-sm:min-h-0">
 			<div className="absolute inset-0 grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)]">
 				{wide ? (
 					rail
 				) : (
 					<Sheet open={railOpen} onOpenChange={setRailOpen}>
-						<SheetContent side="left" closeLabel={t`Close`} className="p-4 pt-5 data-[side=left]:sm:max-w-[320px]">
+						<SheetContent
+							side="left"
+							finalFocus={focusTarget}
+							closeLabel={t`Close`}
+							className="p-4 pt-5 data-[side=left]:sm:max-w-[320px]"
+						>
 							<SheetTitle>
 								<Trans>Conversations</Trans>
 							</SheetTitle>
@@ -380,6 +444,7 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 					{notSetUp ? (
 						<>
 							{header([])}
+							<WebAccessAttention />
 							<p className="m-6 rounded-xl bg-sunken p-4 text-sm text-ink-2">
 								<Trans>
 									The coach isn't set up on this server. Whoever runs it needs to set ENCRYPTION_SECRET. Knowledge,
@@ -387,7 +452,7 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 								</Trans>
 							</p>
 						</>
-					) : providers.error ? (
+					) : providers.error && !threadId ? (
 						<AiProviderLoadState
 							state={{
 								...providers,
@@ -398,7 +463,7 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 								},
 							}}
 						/>
-					) : providers.isLoading || threads.isPending ? (
+					) : (providers.isLoading && !threadId) || threads.isPending ? (
 						<div className="grid flex-1 place-items-center">
 							<Spinner />
 						</div>
@@ -419,29 +484,52 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 							</div>
 						</>
 					) : (
-						<CoachThread
-							key={session.key}
-							draftKey={`career-coach:${threadId ?? "new"}`}
-							threadId={threadId}
-							createThread={createThread}
-							onThreadCreated={onThreadCreated}
-							applicationId={null}
-							context={context}
-							connection={connection}
-							onChangeConnection={() => setModelMenuOpen(true)}
-							header={header}
-							empty={(send) => (
-								<EmptyState
-									disabled={noProvider || (chips.memory && (knowledge.isPending || knowledge.isError))}
-									onPick={send}
-								/>
+						<>
+							<WebAccessAttention />
+							{!provider && (
+								<div role="status" className="grid justify-items-start gap-2 bg-warn-soft p-3 text-sm text-warn-text">
+									<Trans>
+										This conversation's AI connection is unavailable. Its history stays here. Fix the saved connection
+										or choose a model before sending again.
+									</Trans>
+									<SetUpAi />
+								</div>
 							)}
-							chips={contextChips}
-							privacy={privacy}
-							placeholder={t`Ask about your next career step…`}
-							disabled={noProvider || (chips.memory && (knowledge.isPending || knowledge.isError))}
-							variant="page"
-						/>
+							<CoachThread
+								key={session.key}
+								draftKey={`career-coach:${threadId ?? "new"}`}
+								threadId={threadId}
+								createThread={createThread}
+								onThreadCreated={onThreadCreated}
+								applicationId={null}
+								context={context}
+								connection={connection}
+								onChangeConnection={() => setModelMenuOpen(true)}
+								header={header}
+								empty={(send) => (
+									<EmptyState
+										disabled={!provider || (chips.memory && (knowledge.isPending || knowledge.isError))}
+										offers={context.offerIds?.length ?? 0}
+										onPick={send}
+									/>
+								)}
+								chips={contextChips}
+								notice={
+									stranded ? (
+										<ConnectionNotice
+											label={summary?.providerLabel ?? null}
+											fallback={usable[0]}
+											onUse={(id) => void chooseProvider(id)}
+											onChoose={() => setModelMenuOpen(true)}
+										/>
+									) : null
+								}
+								privacy={privacy}
+								placeholder={t`Ask about your next career step…`}
+								disabled={!provider || (chips.memory && (knowledge.isPending || knowledge.isError))}
+								variant="page"
+							/>
+						</>
 					)}
 				</section>
 			</div>
@@ -449,90 +537,78 @@ export function CoachPage({ conversationId, offerIds: routeOfferIds }: CoachPage
 	);
 }
 
-type EmptyStateProps = { disabled: boolean; onPick: (text: string) => void };
+/** `offers`: saved offers sent with this conversation (Offers → Plan what to ask), which get their own starters. */
+type EmptyStateProps = { disabled: boolean; offers: number; onPick: (text: string) => void };
 
-function EmptyState({ disabled, onPick }: EmptyStateProps) {
-	const starters: Array<{ icon: IconName; text: string }> = [
-		{ icon: "list-magnifying-glass", text: t`Which opportunities best match my priorities?` },
-		{
-			icon: "list-numbers",
-			text: t`Help me turn an accomplishment into a Situation, Task, Action, Result and Reflection story.`,
-		},
-		{ icon: "user-sound", text: t`What interview answers should I practice?` },
-	];
-	return (
-		<div className="grid gap-6 pt-[clamp(0px,6vh,48px)]">
-			<div className="grid gap-3">
-				<h3 className="font-display text-[30px] leading-9 font-medium">
-					<Trans>What are you working on?</Trans>
-				</h3>
-				<p className="text-[15px] leading-[23px] text-ink-2">
-					<Trans>
-						Ask about your search, or bring an accomplishment you want to explain better. Answers use what's switched on
-						below and say what they relied on.
-					</Trans>
-				</p>
-			</div>
-			<div className="grid gap-2.5 sm:grid-cols-3">
-				{starters.map((starter) => (
-					<button
-						key={starter.icon}
-						type="button"
-						disabled={disabled}
-						onClick={() => onPick(starter.text)}
-						className="flex min-h-[112px] flex-col items-start gap-3 rounded-xl border border-line bg-raised p-3.5 text-start text-sm leading-5 shadow-e1 transition-[box-shadow,scale] duration-quick ease-enter hover:shadow-e2 enabled:active:scale-[0.98] disabled:opacity-60"
-					>
-						<Icon name={starter.icon} size={22} className="text-accent-text" />
-						{starter.text}
-					</button>
-				))}
-			</div>
-		</div>
-	);
-}
+/** Opened from Offers → Plan what to ask: starters about the offers being decided. */
+const offerStarters = (count: number): { icon: IconName; text: string }[] =>
+	count > 1
+		? [
+				{ icon: "question", text: t`What should I ask before deciding?` },
+				{ icon: "scales", text: t`Which offer fits my requirements better?` },
+				{ icon: "list-checks", text: t`What's missing from these offers that I should get in writing?` },
+			]
+		: [
+				{ icon: "question", text: t`What should I ask before deciding on this offer?` },
+				{ icon: "scales", text: t`Does this offer meet what I want?` },
+				{ icon: "list-checks", text: t`What's missing from this offer that I should get in writing?` },
+			];
 
-type ModelChipProps = {
-	open: boolean;
-	onOpenChange: (open: boolean) => void;
-	providers: readonly UsableProvider[];
-	current: UsableProvider | undefined;
-	label: string;
-	onChoose: (id: string) => void;
+const starterText = (starter: CoachStarter): { icon: IconName; text: string } => {
+	switch (starter.kind) {
+		case "interview":
+			return { icon: "microphone", text: t`Help me prepare for my ${starter.company} interview.` };
+		case "offers":
+			return { icon: "scales", text: t`Help me weigh the offer I have against what I want.` };
+		case "opportunities":
+			return { icon: "list-magnifying-glass", text: t`Which opportunities best match my priorities?` };
+		case "story":
+			return {
+				icon: "list-numbers",
+				text: t`Help me turn an accomplishment into a Situation, Task, Action, Result and Reflection story.`,
+			};
+		case "practice":
+			return { icon: "user-sound", text: t`What interview answers should I practice?` };
+		default:
+			return { icon: "compass", text: t`What kinds of roles fit what I've done so far?` };
+	}
 };
 
-/** "Demo AI · gpt-4.1-mini": the connection this conversation uses; the menu switches it. */
-function ModelChip({ open, onOpenChange, providers, current, label, onChoose }: ModelChipProps) {
-	const navigate = useNavigate();
-	const text = current ? `${current.label} · ${current.model}` : label;
+/** Starters that fit the account: an upcoming interview, an offer or found roles come first when there are some. */
+function useStarters() {
+	const applications = useQuery(applicationsListQueryOptions());
+	const opportunities = useQuery(orpc.career.opportunities.queryOptions({ input: {} }));
+	const open = (applications.data ?? []).filter((application) => application.status !== "closed");
+	const next = upcomingInterviews(collectInterviews(open))[0];
+	return coachStarters({
+		nextInterviewCompany: next?.application.company,
+		offers: open.filter((application) => application.status === "offer").length,
+		opportunities: (opportunities.data ?? []).filter((row) => !row.trackedApplicationId).length,
+	}).map(starterText);
+}
+
+function EmptyState({ disabled, offers, onPick }: EmptyStateProps) {
+	const accountStarters = useStarters();
+	const starters = offers > 0 ? offerStarters(offers) : accountStarters;
 	return (
-		<DropdownMenu open={open} onOpenChange={onOpenChange}>
-			<DropdownMenuTrigger
-				render={
-					<button
-						type="button"
-						aria-label={t`Connection: ${text}`}
-						className="flex h-7 max-w-[50%] min-w-0 items-center rounded-sm bg-sunken px-2 font-mono text-xs text-ink-2 transition-colors duration-quick hover:text-ink aria-expanded:text-ink"
-					/>
+		<div className="pt-[clamp(0px,6vh,48px)]">
+			<ChatWelcome
+				description={
+					<>
+						<Trans>
+							Ask about your search, or bring an accomplishment you want to explain better. Answers use what's switched
+							on below, and each shows what was sent with it.
+						</Trans>
+					</>
 				}
-			>
-				<span className="truncate">{text}</span>
-			</DropdownMenuTrigger>
-			<DropdownMenuContent align="end" className="w-64">
-				{providers.map((item) => (
-					<DropdownMenuItem key={item.id} onClick={() => onChoose(item.id)}>
-						<span className="grid min-w-0 flex-1">
-							<span className="truncate">{item.label}</span>
-							<span className="truncate font-mono text-xs text-ink-3">{item.model}</span>
-						</span>
-						{item.id === current?.id && <Icon name="check" size={16} />}
-					</DropdownMenuItem>
-				))}
-				{providers.length > 0 && <DropdownMenuSeparator />}
-				<DropdownMenuItem onClick={() => void navigate({ to: "/dashboard/settings/ai" })}>
-					<Trans>Connect another…</Trans>
-				</DropdownMenuItem>
-			</DropdownMenuContent>
-		</DropdownMenu>
+				starters={starters.map((starter) => ({
+					icon: starter.icon,
+					label: starter.text,
+					disabled,
+					onPick: () => onPick(starter.text),
+				}))}
+			/>
+		</div>
 	);
 }
 
@@ -541,14 +617,23 @@ function ModelChip({ open, onOpenChange, providers, current, label, onChoose }: 
 type ConversationRailProps = {
 	threads: ThreadSummary[];
 	currentId: string | null;
+	renaming: string | null;
+	onRenamingChange: (id: string | null) => void;
 	onNavigate: () => void;
 	onRename: (thread: ThreadSummary, title: string) => void;
 	onDelete: (thread: ThreadSummary) => void;
 };
 
-function ConversationRail({ threads, currentId, onNavigate, onRename, onDelete }: ConversationRailProps) {
+function ConversationRail({
+	threads,
+	currentId,
+	renaming,
+	onRenamingChange: setRenaming,
+	onNavigate,
+	onRename,
+	onDelete,
+}: ConversationRailProps) {
 	const when = useConversationDate();
-	const [renaming, setRenaming] = useState<string | null>(null);
 
 	return (
 		<nav aria-label={t`Conversations`} className="flex min-h-0 flex-1 flex-col gap-4">
@@ -567,7 +652,8 @@ function ConversationRail({ threads, currentId, onNavigate, onRename, onDelete }
 					<Trans>Recent</Trans>
 				</Eyebrow>
 				<ul className="-mx-1 grid min-h-0 flex-1 content-start gap-0.5 overflow-y-auto px-1">
-					{currentId === null && (
+					{/* With no history yet, a "New conversation · Now" row would only repeat the button above. */}
+					{currentId === null && threads.length > 0 && (
 						<li aria-current="page" className="grid gap-0.5 rounded-lg bg-sunken px-2.5 py-2">
 							<span className="text-[13px] leading-[18px] font-medium">
 								<Trans>New conversation</Trans>

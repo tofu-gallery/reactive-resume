@@ -2,22 +2,19 @@ import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useSelector } from "@tanstack/react-form";
 import { useQueryClient } from "@tanstack/react-query";
-import { Link, useRouteContext, useSearch } from "@tanstack/react-router";
-import { useState } from "react";
+import { Link, useNavigate, useRouteContext, useRouter, useSearch } from "@tanstack/react-router";
 import z from "zod";
-import { Alert, AlertDescription, AlertTitle } from "@reactive-resume/ui/components/alert";
 import { Button } from "@reactive-resume/ui/components/button";
-import { FormControl, FormItem, FormLabel, FormMessage } from "@reactive-resume/ui/components/form";
+import { FormControl, FormDescription, FormItem, FormLabel, FormMessage } from "@reactive-resume/ui/components/form";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
 import { toast } from "@reactive-resume/ui/components/toast";
-import { cn } from "@reactive-resume/utils/style";
-import { EmailSettingsNote } from "../components/email-settings-note";
+import { ConnectingClient } from "../components/connecting-client";
+import { GuestTransferNote } from "../components/guest-banner";
 import { SocialAuth } from "../components/social-auth";
 import { getAuthRedirectOptions, getOAuthSignInOptions, isOAuthRedirect } from "../redirect";
 import { PasswordInput } from "@/components/input/password-input";
 import { authClient } from "@/libs/auth/client";
-import { ENTER_CLASS } from "@/libs/motion";
 import { sessionQueryKey } from "@/libs/root-context";
 import { useAppForm } from "@/libs/tanstack-form";
 
@@ -27,15 +24,23 @@ const formSchema = z.object({
 		.trim()
 		.min(1, { error: () => t`Enter your name.` })
 		.max(64, { error: () => t`Use 64 characters or fewer.` }),
+	// Optional: left empty, the server makes one from the email address.
 	username: z
 		.string()
-		.min(3, { error: () => t`Use at least 3 characters.` })
-		.max(64, { error: () => t`Use 64 characters or fewer.` })
 		.trim()
 		.toLowerCase()
-		.regex(/^[a-z0-9._-]+$/, {
-			error: () => t`Use only lowercase letters, numbers, dots, hyphens and underscores.`,
-		}),
+		.pipe(
+			z.union([
+				z.literal(""),
+				z
+					.string()
+					.min(3, { error: () => t`Use at least 3 characters.` })
+					.max(64, { error: () => t`Use 64 characters or fewer.` })
+					.regex(/^[a-z0-9._-]+$/, {
+						error: () => t`Use only Latin letters a–z, numbers, dots, hyphens and underscores.`,
+					}),
+			]),
+		),
 	email: z.email({ error: () => t`Enter a valid email address.` }).toLowerCase(),
 	password: z
 		.string()
@@ -45,18 +50,23 @@ const formSchema = z.object({
 
 type Props = {
 	disableEmailAuth: boolean;
+	/** Signing up from a guest session moves the guest's work into the new account. */
+	isGuest?: boolean;
 };
 
-export function RegisterPage({ disableEmailAuth }: Props) {
+export function RegisterPage({ disableEmailAuth, isGuest = false }: Props) {
 	const { callbackURL, reauthenticate } = useSearch({ from: "/auth" });
 	const queryClient = useQueryClient();
-	const [submitted, setSubmitted] = useState(false);
+	const router = useRouter();
+	const navigate = useNavigate();
+	// A server without email sends no verification link, so there's nothing to mention.
+	const smtpEnabled = useRouteContext({ strict: false }).flags?.smtpEnabled ?? false;
 
 	const form = useAppForm({
 		defaultValues: { name: "", username: "", email: "", password: "" },
 		validators: { onSubmit: formSchema },
 		onSubmit: async ({ value }) => {
-			const toastId = toast.add({ type: "loading", description: t`Signing up...` });
+			const toastId = toast.add({ type: "loading", description: t`Signing up…` });
 
 			const oauthOptions = getOAuthSignInOptions(callbackURL);
 			const createPrompt = new URLSearchParams(oauthOptions.oauth_query).get("prompt")?.split(" ").includes("create");
@@ -64,6 +74,7 @@ export function RegisterPage({ disableEmailAuth }: Props) {
 				name: value.name.trim(),
 				email: value.email,
 				password: value.password,
+				// Empty asks the server to make one from the email address.
 				username: value.username,
 				displayUsername: value.username,
 				callbackURL: callbackURL ?? "/dashboard",
@@ -94,21 +105,45 @@ export function RegisterPage({ disableEmailAuth }: Props) {
 				if (isOAuthRedirect(continuation.data)) return;
 			}
 			await queryClient.invalidateQueries({ queryKey: sessionQueryKey });
-			setSubmitted(true);
-			toast.close(toastId);
+			await router.invalidate();
+			// Straight to the dashboard (or the page that sent them here); verifying the email can wait.
+			// Tofu (2026-11-05): without SMTP settings no verification link was sent, and the toast says so, in the words of
+			// the step Tofu showed after signing up (2026-10-25) before upstream went straight on, instead of closing unsaid.
+			if (smtpEnabled)
+				toast.add({
+					id: toastId,
+					type: "success",
+					title: t`Check your email`,
+					description: t`We sent a link to verify your account. It's optional, and you can resend it from Settings.`,
+					timeout: 10_000,
+				});
+			else
+				toast.add({
+					id: toastId,
+					type: "success",
+					title: t`Your account is ready`,
+					description: t`This copy of Reactive Resume can't send email yet, so no verification link was sent. You can use your account without it.`,
+					timeout: 10_000,
+				});
+			void navigate(getAuthRedirectOptions(callbackURL));
 		},
 	});
 
 	const isSubmitting = useSelector(form.store, (state) => state.isSubmitting);
 
-	if (submitted) return <PostSignupScreen />;
-
 	return (
 		<>
 			<div className="space-y-1 text-center">
-				<h1 className="text-2xl font-semibold tracking-tight">
-					<Trans>Create a new account</Trans>
+				<h1 className="text-[30px] leading-9">
+					<Trans comment="Title on the registration page">Start your resume</Trans>
 				</h1>
+				<ConnectingClient callbackURL={callbackURL} register />
+
+				<p dir="auto" className="text-ink-2">
+					<Trans comment="Reassurance under the registration title, repeating the homepage's promise">
+						Free, no ads, no paywall.
+					</Trans>
+				</p>
 
 				<div className="text-ink-3">
 					<Trans>
@@ -128,8 +163,11 @@ export function RegisterPage({ disableEmailAuth }: Props) {
 				</div>
 			</div>
 
+			{isGuest && <GuestTransferNote />}
+
 			{!disableEmailAuth && (
 				<form
+					noValidate
 					className="space-y-6"
 					onSubmit={(event) => {
 						event.preventDefault();
@@ -177,11 +215,9 @@ export function RegisterPage({ disableEmailAuth }: Props) {
 											minLength={3}
 											maxLength={64}
 											autoComplete="section-register username"
-											placeholder={t({
-												comment: "Example username placeholder on registration form",
-												message: "john.doe",
-											})}
-											className="lowercase"
+											// Usernames are Latin letters a–z: a transliterated example would invite other scripts.
+											placeholder="john.doe"
+											dir="ltr"
 											name={field.name}
 											value={field.state.value}
 											onBlur={field.handleBlur}
@@ -189,6 +225,11 @@ export function RegisterPage({ disableEmailAuth }: Props) {
 										/>
 									}
 								/>
+								<FormDescription>
+									<Trans comment="Hint under the optional username field on registration form">
+										Optional. Leave it empty and we'll make one from your email. You can change it in Settings.
+									</Trans>
+								</FormDescription>
 								<FormMessage errors={field.state.meta.errors} />
 							</FormItem>
 						)}
@@ -238,6 +279,11 @@ export function RegisterPage({ disableEmailAuth }: Props) {
 										/>
 									}
 								/>
+								<FormDescription>
+									<Trans comment="Password rule shown under the password field on registration form">
+										At least 8 characters.
+									</Trans>
+								</FormDescription>
 								<FormMessage errors={field.state.meta.errors} />
 							</FormItem>
 						)}
@@ -249,64 +295,7 @@ export function RegisterPage({ disableEmailAuth }: Props) {
 				</form>
 			)}
 
-			<SocialAuth />
+			<SocialAuth signUp />
 		</>
-	);
-}
-
-function PostSignupScreen() {
-	const { callbackURL } = useSearch({ from: "/auth" });
-	const redirectOptions = getAuthRedirectOptions(callbackURL);
-	// Tofu (2026-10-25): without SMTP settings no verification email was sent, so the step says that instead.
-	const smtpEnabled = useRouteContext({ strict: false }).flags?.smtpEnabled ?? false;
-	return (
-		// Replaces the form in place: fades up into the auth column, with the layout's 24px gap.
-		<div className={cn(ENTER_CLASS, "grid gap-y-6")}>
-			<div className="space-y-1 text-center">
-				<h1 className="text-2xl font-semibold tracking-tight">
-					{smtpEnabled ? <Trans>Check your email</Trans> : <Trans>Your account is ready</Trans>}
-				</h1>
-				<p className="text-ink-3">
-					{smtpEnabled ? (
-						<Trans>Check your email for a link to verify your account.</Trans>
-					) : (
-						<Trans>
-							This copy of Reactive Resume can't send email yet, so no verification link was sent. You can use your
-							account without it.
-						</Trans>
-					)}
-				</p>
-			</div>
-
-			{smtpEnabled ? (
-				<Alert>
-					<AlertTitle>
-						<Trans>This step is optional, but recommended.</Trans>
-					</AlertTitle>
-					<AlertDescription>
-						<Trans>Verifying your email confirms that you own this address.</Trans>
-					</AlertDescription>
-				</Alert>
-			) : (
-				<Alert>
-					<AlertTitle>
-						<Trans>Email needs its owner's settings</Trans>
-					</AlertTitle>
-					<AlertDescription>
-						<EmailSettingsNote />
-					</AlertDescription>
-				</Alert>
-			)}
-
-			<Button
-				nativeButton={false}
-				render={
-					<Link to={redirectOptions.href} reloadDocument={redirectOptions.reloadDocument} replace>
-						<Trans comment="Button label to continue to dashboard after successful registration">Continue</Trans>{" "}
-						<Icon name="arrow-right" size={16} />
-					</Link>
-				}
-			/>
-		</div>
 	);
 }

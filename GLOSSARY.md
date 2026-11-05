@@ -79,11 +79,14 @@ transliterated; never translated as "snail".
 
 ### Resume section names
 
-These are the built-in section presets, defined in `apps/web/src/libs/resume/section.tsx` and
-`apps/web/src/dialogs/resume/sections/custom.tsx`. Translate them the way a resume in the target
+These are the built-in section presets, defined in `apps/web/src/libs/resume/section.tsx`. Translate them the way a resume in the target
 language would label them:
 
 **Basics** — name, contact details, and headline. Not "fundamentals" or "basic settings".
+
+**Headline** — the one-line professional title under the name, such as "Frontend developer". A job title, not a
+street address and not a newspaper or document title; one catalog's word for it read as "address" and people typed
+their street into it.
 
 **Summary** — the short personal statement at the top of a resume. Not a summary of the app, and
 not an AI-generated abstract.
@@ -107,6 +110,12 @@ directors, a committee, a plank, or a noticeboard.
 
 **Stage** — where an application sits in the pipeline (applied, interviewing, offer, rejected).
 Not a theatre stage or a phase of construction.
+
+**Show closed applications** — reveal job applications in their final, Closed stage. An imperative action, never a closed performance or show.
+
+**Search or run a command…** — open the command palette to find items or execute an app command. "Run" means execute software, never physical movement.
+
+**No resume selected / No cover letter selected** — empty document selectors in a job form or submission confirmation. **No documents attached** describes an application row without linked resume/letter documents. These describe documents, never people; do not translate them as "nobody".
 
 **Source** — where the user found the job listing (a job board, a referral, a company site).
 Singular, and specific to one application. Not a source code file and not a data source.
@@ -256,12 +265,34 @@ verb "to document".
 **Trash** — where deleted documents wait 30 days before they're removed for good. A place (noun),
 like a recycle bin. Not the verb "to trash".
 
-**Write · Design · Check** — the three modes of the editor, shown side by side as a switch. Each is
-the name of a mode, so translate them as short, parallel labels. **Write** is editing the content,
-**Design** is choosing how the resume looks (a noun here), and **Check** is reviewing whether
-software can read it (a noun here, like "review"), not a bank cheque or a checkmark.
+**Write · Design · Check · Share** — the four modes of the editor, shown side by side as a switch.
+Each is the name of a mode, so translate them as short, parallel labels. **Write** is editing the
+content, **Design** is choosing how the resume looks (a noun here), **Check** is reviewing whether
+software can read it (a noun here, like "review"), not a bank cheque or a checkmark, and **Share**
+is publishing the resume as a web page and controlling who sees what (a noun here, the mode's name).
 
-**Share & export** — the sheet with the public link, downloads and version history.
+**Download & history** — the sheet with downloads and version history. It replaces **Share &
+export**; the public link moved to the **Share** mode.
+
+**Web page** — the published, browser version of a resume that opens at its **Public URL**, drawn in
+the resume's own **Template**. Not a "website" (it is one page), not a "profile" (that word means
+the **Profiles** section), and not the PDF.
+
+**Primary resume** — the one resume an account's short link and custom domain open. Not the "main"
+or "default" resume.
+
+**Short link** — the short address (`/<username>`, such as `rx.cv/dkowalski`) that opens the **Primary
+resume**. It works on every domain the app answers on. Not a link-shortening service.
+
+**Custom domain** — the owner's own web address, such as `john.dev`, that opens their **Primary
+resume**. "Domain" as in web address, not a field of knowledge.
+
+**Show in search engines** — whether search engines such as Google may list a resume's web page.
+Off unless the owner turns it on.
+
+**Contact details** — the email, phone, location and custom fields in the resume's header, and the
+contact information inside **References**. The owner can hide them from everyone viewing the web
+page or downloading its PDF.
 
 **Assistant** — the AI panel beside the page. It replaces both the "AI agent" page and the "AI
 assistant" sheet, so there is now only one AI term.
@@ -304,18 +335,17 @@ Button labels and `aria-label` strings are usually **imperative verbs**: they sa
 control does. Read as a noun or an adjective, they turn into nonsense. This is the most common
 error in the catalogs after the ambiguous nouns above.
 
-**Open** — the verb. `Open AI agent` means _open the AI agent panel_; it does not describe an
-agent that is "open", and it is **not a reference to OpenAI, the company**. Around forty-five of
-the fifty-three catalogs got this wrong, split between "an open AI agent" and a transliteration
-of _OpenAI_. The same applies to `Open in builder`.
+**Open** — the verb. `Open AI assistant` means _open the AI assistant panel_; it does not describe
+an assistant that is "open", and it is **not a reference to OpenAI, the company**. Many catalogs got
+this wrong, split between "an open AI …" and a transliteration of _OpenAI_. The same applies to
+`Open in builder`.
 
 **Close** — likewise the verb, as in `Close AI assistant`. Not "an assistant for closing things",
 and not the adjective "close/nearby".
 
-The app names two different surfaces here, and both strings are real: **AI agent** is the
-full workspace at `/agent`, opened from the builder dock (`Open AI agent`), while **AI assistant**
-is the panel that slides out inside the builder (`Open AI assistant`, `Close AI assistant`).
-Translate them as two distinct names, the way the English does.
+The **AI assistant** is the panel that slides out inside the builder (`Open AI assistant`,
+`Close AI assistant`); in Career the same kind of conversation is the **coach**. `/agent` is only a
+redirect from older links, not a surface of its own, so there is no "AI agent" string to translate.
 
 **Clear** — the verb, to empty a field or remove filters. Not the adjective "transparent",
 "obvious", or "clear-cut".
@@ -326,6 +356,10 @@ Translate them as two distinct names, the way the English does.
 **Archive / Unarchive**, **Mark**, **Tailor**, **Duplicate**, **Import**, **Export**, **Share**,
 **Star** — all verbs when they appear as a control label. Check the `#:` source reference if you
 are unsure whether a given string is a button or a heading.
+
+In languages whose interfaces label buttons with an imperative or a verbal noun, use that form, never the
+third-person present tense. Arabic `Add`, `Edit` or `Share` reads as "he adds", "he edits", "he shares" when
+translated as يضيف، يحرر، يشارك; use إضافة، تعديل، مشاركة instead.
 
 ## Message syntax
 

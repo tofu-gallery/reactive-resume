@@ -6,9 +6,13 @@ import { db } from "@reactive-resume/db/client";
 import * as tables from "@reactive-resume/db/schema";
 import { sendCareerNotification } from "@reactive-resume/email/transport";
 import { env } from "@reactive-resume/env/server";
+import { followUpInstant } from "@reactive-resume/schema/applications/follow-up";
 import { generateId } from "@reactive-resume/utils/string";
 import { STALE_AGENT_RUN_TTL_MS } from "../agent/runs";
 import { aiProvidersService } from "../ai-providers/service";
+import { availableApplicationContext } from "../applications/access";
+import { activeApplications } from "../applications/access";
+import { syncFollowUp } from "../applications/follow-up";
 import { readOpenPosting, searchJobPostings } from "../applications/posting";
 import { lockUser } from "../documents/ownership";
 import { documentsService } from "../documents/service";
@@ -18,7 +22,14 @@ import { generateCareer } from "./generate";
 import { matchPosting } from "./matching";
 import { noticeText } from "./notices";
 import { isCareerSchedulingEnabled } from "./runner";
-import { canonicalOpportunityUrl, nextCareerRun, parseListingTitle, plainSnippet, prepareRunAt } from "./scheduling";
+import { assertScheduleCapacity } from "./schedule-limit";
+import {
+	canonicalOpportunityUrl,
+	nextFutureCareerRun,
+	parseListingTitle,
+	plainSnippet,
+	prepareRunAt,
+} from "./scheduling";
 import { careerService, requireCareerApplication } from "./service";
 
 const CAREER_URL = "/dashboard/career";
@@ -32,19 +43,60 @@ function assertRunner() {
 		});
 }
 
-// Enough for a discovery search per field plus briefings and follow-ups for a busy search.
-const MAX_SCHEDULES_PER_USER = 100;
 const READ_NOTIFICATION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 // Due jobs inspected per claim; owners that are busy or locked are skipped, not waited on.
 const CLAIM_CANDIDATES = 20;
 
+const RUN_STATUSES = ["queued", "running", "completed", "failed", "canceled"] as const;
+const runStatus = (status: string): (typeof RUN_STATUSES)[number] =>
+	(RUN_STATUSES as readonly string[]).includes(status) ? (status as (typeof RUN_STATUSES)[number]) : "queued";
+
 export const careerJobs = {
-	list: (userId: string) =>
-		db
+	list: async (userId: string) => {
+		const rows = await db
 			.select()
 			.from(tables.careerSchedule)
-			.where(eq(tables.careerSchedule.userId, userId))
-			.orderBy(desc(tables.careerSchedule.createdAt)),
+			.where(
+				and(
+					eq(tables.careerSchedule.userId, userId),
+					availableApplicationContext(userId, tables.careerSchedule.applicationId),
+				),
+			)
+			.orderBy(desc(tables.careerSchedule.updatedAt), desc(tables.careerSchedule.id));
+		const applications = new Set<string>();
+		const listed = rows.filter((row) => {
+			if (row.kind !== "follow-up" || !row.applicationId) return true;
+			if (applications.has(row.applicationId)) return false;
+			applications.add(row.applicationId);
+			return true;
+		});
+		if (listed.length === 0) return [];
+		// Each schedule's latest run, so a one-off that failed reads as failed rather than done.
+		const runs = await db
+			.selectDistinctOn([tables.careerJob.scheduleId], {
+				scheduleId: tables.careerJob.scheduleId,
+				status: tables.careerJob.status,
+				error: tables.careerJob.error,
+			})
+			.from(tables.careerJob)
+			.where(
+				and(
+					eq(tables.careerJob.userId, userId),
+					inArray(
+						tables.careerJob.scheduleId,
+						listed.map((row) => row.id),
+					),
+				),
+			)
+			// The run queued last, not the one due last: a schedule moved earlier queues a run due before an older one.
+			.orderBy(tables.careerJob.scheduleId, desc(tables.careerJob.createdAt), desc(tables.careerJob.id));
+		const latest = new Map(runs.map((run) => [run.scheduleId, run]));
+		return listed.map((row) => {
+			const run = latest.get(row.id);
+			return { ...row, lastRun: run ? { status: runStatus(run.status), error: run.error } : null };
+		});
+	},
+
 	save: async (userId: string, input: z.infer<typeof careerScheduleInputSchema> & { id?: string | undefined }) => {
 		if (input.enabled) assertRunner();
 		const application = await requireCareerApplication({ userId, ...input });
@@ -54,8 +106,18 @@ export const careerJobs = {
 		);
 		if (input.kind === "prepare" && interview?.type === "interview")
 			input.nextRunAt = prepareRunAt(new Date(interview.at), input.lead ?? "24h", input.timezone);
-		if (input.kind === "discovery" && !input.query)
+		if (input.kind === "discovery" && input.query.length > 500)
+			throw new ORPCError("BAD_REQUEST", { message: "Search queries can contain up to 500 characters." });
+		if (input.kind === "discovery" && !input.query.trim())
 			throw new ORPCError("BAD_REQUEST", { message: "Enter a job search query." });
+		if (
+			input.kind === "discovery" &&
+			input.enabled &&
+			!webAccessService.canSearch(Boolean(await webAccessService.resolve(userId)))
+		)
+			throw new ORPCError("PRECONDITION_FAILED", {
+				message: "Set up web search in Settings before enabling discovery. AI is not required.",
+			});
 		if (input.kind !== "discovery" && !input.applicationId)
 			throw new ORPCError("BAD_REQUEST", { message: "Choose an application." });
 		if (input.kind === "prepare" && !input.interviewId)
@@ -63,7 +125,7 @@ export const careerJobs = {
 		if (input.kind === "prepare" && input.enabled) {
 			if (!input.aiProviderId)
 				throw new ORPCError("BAD_REQUEST", { message: "Choose a tested AI provider for scheduled preparation." });
-			await aiProvidersService.getRunnableById({ userId, id: input.aiProviderId });
+			// Rechecked under the user lock before persistence below.
 		} else if (input.aiProviderId) {
 			// Any other schedule may name a connection too; it still has to be one of the account's own.
 			const [provider] = await db
@@ -87,11 +149,83 @@ export const careerJobs = {
 		const { id, ...values } = input;
 		let keepQueuedAt: Date | null = null;
 		return db.transaction(async (tx) => {
+			await lockUser(tx, userId);
+			if (input.applicationId) {
+				const [ownedApplication] = await tx
+					.select()
+					.from(tables.application)
+					.where(and(eq(tables.application.id, input.applicationId), activeApplications(userId)))
+					.for("update");
+				if (!ownedApplication) throw new ORPCError("NOT_FOUND");
+				if (input.kind === "follow-up") {
+					// Match the sheet's original clock; the projection below still uses the current account clock.
+					const keepLogicalDay =
+						ownedApplication.followUpDateOnly &&
+						followUpInstant(ownedApplication, input.timezone)?.getTime() === input.nextRunAt.getTime();
+					if (id) {
+						const [owned] = await tx
+							.select()
+							.from(tables.careerSchedule)
+							.where(
+								and(
+									eq(tables.careerSchedule.id, id),
+									and(
+										eq(tables.careerSchedule.userId, userId),
+										availableApplicationContext(userId, tables.careerSchedule.applicationId),
+									),
+								),
+							)
+							.for("update");
+						if (!owned || owned.kind !== "follow-up" || owned.applicationId !== input.applicationId)
+							throw new ORPCError("NOT_FOUND");
+						if (
+							input.enabled &&
+							owned.lastQueuedAt &&
+							input.nextRunAt <= owned.lastQueuedAt &&
+							(!owned.enabled || (!keepLogicalDay && input.nextRunAt.getTime() !== owned.nextRunAt.getTime()))
+						)
+							throw new ORPCError("BAD_REQUEST", {
+								message: "Choose a new run time when rescheduling completed or canceled work.",
+							});
+					}
+					const [updated] = await tx
+						.update(tables.application)
+						.set({
+							followUpAt: keepLogicalDay ? ownedApplication.followUpAt : input.nextRunAt,
+							followUpNote: input.query || null,
+							followUpDateOnly: keepLogicalDay,
+						})
+						.where(eq(tables.application.id, input.applicationId))
+						.returning();
+					if (!updated) throw new ORPCError("NOT_FOUND");
+					const row = await syncFollowUp(tx, updated, {
+						timezone: input.timezone,
+						enabled: input.enabled,
+						email: input.email,
+						...(input.locale ? { locale: input.locale } : {}),
+					});
+					if (!row) throw new ORPCError("NOT_FOUND");
+					return row;
+				}
+			}
+			let aiProviderVersion: string | null = null;
+			if (input.kind === "prepare" && input.enabled && input.aiProviderId)
+				aiProviderVersion = (await aiProvidersService.getRunnableById({ userId, id: input.aiProviderId }, tx))
+					.recipientVersion;
+
 			if (id) {
 				const [owned] = await tx
 					.select()
 					.from(tables.careerSchedule)
-					.where(and(eq(tables.careerSchedule.id, id), eq(tables.careerSchedule.userId, userId)))
+					.where(
+						and(
+							eq(tables.careerSchedule.id, id),
+							and(
+								eq(tables.careerSchedule.userId, userId),
+								availableApplicationContext(userId, tables.careerSchedule.applicationId),
+							),
+						),
+					)
 					.for("update");
 				if (!owned) throw new ORPCError("NOT_FOUND");
 				const ran = owned.lastQueuedAt && input.nextRunAt <= owned.lastQueuedAt ? owned.lastQueuedAt : null;
@@ -108,41 +242,90 @@ export const careerJobs = {
 					.where(and(eq(tables.careerJob.scheduleId, id), sql`${tables.careerJob.status} in ('queued', 'running')`));
 			}
 			if (!id) {
-				// Serialize this user's creates so the cap holds under concurrent requests.
-				await lockUser(tx, userId);
-				const [count] = await tx
-					.select({ total: sql<number>`count(*)::int` })
-					.from(tables.careerSchedule)
-					.where(eq(tables.careerSchedule.userId, userId));
-				if ((count?.total ?? 0) >= MAX_SCHEDULES_PER_USER)
-					throw new ORPCError("BAD_REQUEST", {
-						message: `You can keep up to ${MAX_SCHEDULES_PER_USER} schedules. Delete one you no longer need first.`,
-					});
+				// The user lock also keeps the cap valid under concurrent creates.
+				await assertScheduleCapacity(tx, userId);
 			}
+			// The run time is checked where it commits, not only where the editor computed it: a clock that crossed the
+			// lead meanwhile must not turn a "refresh before the interview" into an immediate paid run.
+			if (input.enabled && input.kind === "prepare" && input.nextRunAt.getTime() <= Date.now())
+				throw new ORPCError("BAD_REQUEST", {
+					message: "That briefing time has already passed. Choose a later lead, or turn refresh off.",
+				});
 			const [row] = id
 				? await tx
 						.update(tables.careerSchedule)
-						.set({ ...values, lastQueuedAt: keepQueuedAt })
-						.where(and(eq(tables.careerSchedule.id, id), eq(tables.careerSchedule.userId, userId)))
+						.set({ ...values, aiProviderVersion, lastQueuedAt: keepQueuedAt })
+						.where(
+							and(
+								eq(tables.careerSchedule.id, id),
+								and(
+									eq(tables.careerSchedule.userId, userId),
+									availableApplicationContext(userId, tables.careerSchedule.applicationId),
+								),
+							),
+						)
 						.returning()
 				: await tx
 						.insert(tables.careerSchedule)
-						.values({ userId, ...values })
+						.values({ userId, ...values, aiProviderVersion })
 						.returning();
 			if (!row) throw new ORPCError("NOT_FOUND");
 			return row;
 		});
 	},
 	delete: async (userId: string, id: string) => {
-		await db
-			.delete(tables.careerSchedule)
-			.where(and(eq(tables.careerSchedule.id, id), eq(tables.careerSchedule.userId, userId)));
+		await db.transaction(async (tx) => {
+			await lockUser(tx, userId);
+			const [found] = await tx
+				.select()
+				.from(tables.careerSchedule)
+				.where(
+					and(
+						eq(tables.careerSchedule.id, id),
+						and(
+							eq(tables.careerSchedule.userId, userId),
+							availableApplicationContext(userId, tables.careerSchedule.applicationId),
+						),
+					),
+				);
+			if (!found) return;
+			if (found.kind === "follow-up" && found.applicationId) {
+				const [application] = await tx
+					.select()
+					.from(tables.application)
+					.where(and(eq(tables.application.id, found.applicationId), activeApplications(userId)))
+					.for("update");
+				if (!application) return;
+				const [updated] = await tx
+					.update(tables.application)
+					.set({ followUpAt: null, followUpNote: null, followUpDateOnly: false })
+					.where(eq(tables.application.id, application.id))
+					.returning();
+				if (updated) await syncFollowUp(tx, updated);
+			} else
+				await tx
+					.delete(tables.careerSchedule)
+					.where(
+						and(
+							eq(tables.careerSchedule.id, id),
+							and(
+								eq(tables.careerSchedule.userId, userId),
+								availableApplicationContext(userId, tables.careerSchedule.applicationId),
+							),
+						),
+					);
+		});
 	},
 	notifications: async (userId: string) => {
 		const rows = await db
 			.select()
 			.from(tables.careerNotification)
-			.where(eq(tables.careerNotification.userId, userId))
+			.where(
+				and(
+					eq(tables.careerNotification.userId, userId),
+					availableApplicationContext(userId, tables.careerNotification.applicationId),
+				),
+			)
 			.orderBy(desc(tables.careerNotification.createdAt));
 		return rows.map((row) => ({ ...row, ...noticeText(row.notice) }));
 	},
@@ -150,7 +333,15 @@ export const careerJobs = {
 		await db
 			.update(tables.careerNotification)
 			.set({ readAt: new Date() })
-			.where(and(eq(tables.careerNotification.id, id), eq(tables.careerNotification.userId, userId)));
+			.where(
+				and(
+					eq(tables.careerNotification.id, id),
+					and(
+						eq(tables.careerNotification.userId, userId),
+						availableApplicationContext(userId, tables.careerNotification.applicationId),
+					),
+				),
+			);
 	},
 	/** Each role with the preferences its posting matches and what it leaves out; the posting text stays here. */
 	opportunities: async (userId: string) => {
@@ -165,10 +356,15 @@ export const careerJobs = {
 		return rows.map(({ description, ...row }) => ({ ...row, ...matchPosting({ ...row, description }, profile) }));
 	},
 	dismissOpportunity: async (userId: string, id: string) => {
-		await db
-			.update(tables.careerOpportunity)
-			.set({ dismissedAt: new Date() })
-			.where(and(eq(tables.careerOpportunity.id, id), eq(tables.careerOpportunity.userId, userId)));
+		await db.transaction(async (tx) => {
+			await lockUser(tx, userId);
+			const [row] = await tx
+				.update(tables.careerOpportunity)
+				.set({ dismissedAt: new Date() })
+				.where(and(eq(tables.careerOpportunity.id, id), eq(tables.careerOpportunity.userId, userId)))
+				.returning({ id: tables.careerOpportunity.id });
+			if (!row) throw new ORPCError("NOT_FOUND");
+		});
 	},
 };
 
@@ -222,6 +418,7 @@ async function discover(userId: string, query: string) {
 }
 
 async function enqueue() {
+	const now = new Date();
 	await db.transaction(async (tx) => {
 		const due = await tx
 			.select()
@@ -229,7 +426,8 @@ async function enqueue() {
 			.where(
 				and(
 					eq(tables.careerSchedule.enabled, true),
-					lte(tables.careerSchedule.nextRunAt, new Date()),
+					sql`(${tables.careerSchedule.applicationId} is null or exists (select 1 from application a where a.id = ${tables.careerSchedule.applicationId} and a.user_id = ${tables.careerSchedule.userId} and a.status <> 'closed' and a.trashed_at is null))`,
+					lte(tables.careerSchedule.nextRunAt, now),
 					or(
 						isNull(tables.careerSchedule.lastQueuedAt),
 						sql`${tables.careerSchedule.nextRunAt} > ${tables.careerSchedule.lastQueuedAt}`,
@@ -240,14 +438,14 @@ async function enqueue() {
 			.limit(20)
 			.for("update", { skipLocked: true });
 		for (const schedule of due) {
-			// A schedule switched back on for a time that already ran gets a fresh job; finished ones stay as history.
+			// A completed follow-up occurrence is immutable; metadata edits never create another delivery.
 			await tx
 				.delete(tables.careerJob)
 				.where(
 					and(
 						eq(tables.careerJob.scheduleId, schedule.id),
 						eq(tables.careerJob.dueAt, schedule.nextRunAt),
-						sql`${tables.careerJob.status} in ('completed', 'canceled', 'failed')`,
+						sql`(${tables.careerJob.status} in ('canceled', 'failed') or (${schedule.kind} <> 'follow-up' and ${tables.careerJob.status} = 'completed'))`,
 					),
 				);
 			await tx
@@ -255,10 +453,9 @@ async function enqueue() {
 				.values({ userId: schedule.userId, scheduleId: schedule.id, dueAt: schedule.nextRunAt })
 				.onConflictDoNothing();
 			// Coalesce missed ticks into one job, rather than charging for an outage's backlog, keeping the wall time.
-			let nextRunAt = schedule.nextRunAt;
-			if (schedule.intervalDays)
-				for (let i = 0; i < 400 && nextRunAt <= new Date(); i++)
-					nextRunAt = nextCareerRun(nextRunAt, schedule.intervalDays, schedule.timezone);
+			const nextRunAt = schedule.intervalDays
+				? nextFutureCareerRun(schedule.nextRunAt, schedule.intervalDays, schedule.timezone, now)
+				: schedule.nextRunAt;
 			await tx
 				.update(tables.careerSchedule)
 				.set({ lastQueuedAt: schedule.nextRunAt, nextRunAt })
@@ -347,7 +544,10 @@ async function execute(job: typeof tables.careerJob.$inferSelect) {
 		.where(
 			and(
 				eq(tables.careerSchedule.id, job.scheduleId),
-				eq(tables.careerSchedule.userId, job.userId),
+				and(
+					eq(tables.careerSchedule.userId, job.userId),
+					availableApplicationContext(job.userId, tables.careerSchedule.applicationId),
+				),
 				eq(tables.careerSchedule.enabled, true),
 			),
 		);
@@ -358,11 +558,66 @@ async function execute(job: typeof tables.careerJob.$inferSelect) {
 			.where(and(eq(tables.careerJob.id, job.id), eq(tables.careerJob.status, "running")));
 		return;
 	}
+	if (schedule.kind === "prepare" && (!schedule.aiProviderId || !schedule.aiProviderVersion)) {
+		await db.transaction(async (tx) => {
+			await lockUser(tx, job.userId);
+			const [paused] = await tx
+				.update(tables.careerSchedule)
+				.set({ enabled: false, aiProviderVersion: null })
+				.where(
+					and(
+						eq(tables.careerSchedule.id, schedule.id),
+						and(
+							eq(tables.careerSchedule.userId, job.userId),
+							availableApplicationContext(job.userId, tables.careerSchedule.applicationId),
+						),
+						or(isNull(tables.careerSchedule.aiProviderId), isNull(tables.careerSchedule.aiProviderVersion)),
+					),
+				)
+				.returning({ id: tables.careerSchedule.id });
+			if (!paused) return;
+			const [canceled] = await tx
+				.update(tables.careerJob)
+				.set({ status: "canceled", lease: null, leaseUntil: null })
+				.where(
+					and(
+						eq(tables.careerJob.id, job.id),
+						eq(tables.careerJob.lease, job.lease ?? ""),
+						eq(tables.careerJob.status, "running"),
+					),
+				)
+				.returning({ id: tables.careerJob.id });
+			if (canceled)
+				await tx
+					.insert(tables.careerNotification)
+					.values({
+						userId: job.userId,
+						key: `failed:${job.id}`,
+						notice: { type: "schedule-failed", reason: "failed" },
+						url: `${CAREER_URL}?schedule=${encodeURIComponent(schedule.id)}`,
+					})
+					.onConflictDoNothing();
+		});
+		return;
+	}
 	const application = await requireCareerApplication({
 		userId: job.userId,
 		applicationId: schedule.applicationId,
 		interviewId: schedule.interviewId,
 	});
+	if (application?.status === "closed") {
+		await db
+			.update(tables.careerJob)
+			.set({ status: "canceled", lease: null, leaseUntil: null })
+			.where(
+				and(
+					eq(tables.careerJob.id, job.id),
+					eq(tables.careerJob.lease, job.lease ?? ""),
+					eq(tables.careerJob.status, "running"),
+				),
+			);
+		return;
+	}
 	const results = schedule.kind === "discovery" ? await discover(job.userId, schedule.query) : [];
 	if (schedule.kind === "prepare") {
 		if (!application || !schedule.interviewId) throw new Error("Preparation application unavailable.");
@@ -376,21 +631,66 @@ async function execute(job: typeof tables.careerJob.$inferSelect) {
 				applicationId: application.id,
 				locale: schedule.locale,
 				task: { task: "briefing", interviewId: schedule.interviewId },
-				...(schedule.aiProviderId ? { providerId: schedule.aiProviderId } : {}),
+				providerId: schedule.aiProviderId,
+				providerVersion: schedule.aiProviderVersion,
 				jobId: job.id,
 				jobLease: job.lease,
 				signal: AbortSignal.timeout(120_000),
 			});
 	}
 	await db.transaction(async (tx) => {
+		await lockUser(tx, job.userId);
 		// Interview edits/deletion lock the application before touching its jobs.
 		if (schedule.applicationId) {
 			const [owned] = await tx
-				.select({ id: tables.application.id })
+				.select({ id: tables.application.id, status: tables.application.status })
 				.from(tables.application)
-				.where(and(eq(tables.application.id, schedule.applicationId), eq(tables.application.userId, job.userId)))
+				.where(and(eq(tables.application.id, schedule.applicationId), activeApplications(job.userId)))
 				.for("update");
-			if (!owned) return;
+			if (!owned || owned.status === "closed") {
+				await tx
+					.update(tables.careerJob)
+					.set({ status: "canceled", lease: null, leaseUntil: null })
+					.where(
+						and(
+							eq(tables.careerJob.id, job.id),
+							eq(tables.careerJob.lease, job.lease ?? ""),
+							eq(tables.careerJob.status, "running"),
+						),
+					);
+				return;
+			}
+		}
+		let followUpNote = schedule.query;
+		if (schedule.kind === "follow-up") {
+			// Same user → application → schedule → job order as edits; publication sees the winning note revision.
+			const [live] = await tx
+				.select()
+				.from(tables.careerSchedule)
+				.where(
+					and(
+						eq(tables.careerSchedule.id, schedule.id),
+						and(
+							eq(tables.careerSchedule.userId, job.userId),
+							availableApplicationContext(job.userId, tables.careerSchedule.applicationId),
+						),
+					),
+				)
+				.for("update");
+			if (!live?.enabled || live.kind !== "follow-up") {
+				await tx
+					.update(tables.careerJob)
+					.set({ status: "canceled", lease: null, leaseUntil: null })
+					.where(
+						and(
+							eq(tables.careerJob.id, job.id),
+							eq(tables.careerJob.lease, job.lease ?? ""),
+							eq(tables.careerJob.status, "running"),
+						),
+					);
+				return;
+			}
+			followUpNote = live.query;
 		}
 		const [current] = await tx
 			.select()
@@ -429,6 +729,7 @@ async function execute(job: typeof tables.careerJob.$inferSelect) {
 				location: (posting?.page?.location ?? "").slice(0, 200),
 				snippet: plainSnippet(hit.description || posting?.text || ""),
 				description: posting?.text ?? "",
+				discoverySource: posting ? { query: schedule.query, checkedAt: new Date().toISOString() } : null,
 				// Not a posting: kept out of New roles, and never read again.
 				...(posting ? {} : { dismissedAt: new Date() }),
 			};
@@ -443,6 +744,7 @@ async function execute(job: typeof tables.careerJob.$inferSelect) {
 						location: values.location,
 						snippet: values.snippet,
 						description: values.description,
+						discoverySource: values.discoverySource,
 						lastSeenAt: new Date(),
 						...(posting ? {} : { dismissedAt: new Date() }),
 					},
@@ -458,7 +760,10 @@ async function execute(job: typeof tables.careerJob.$inferSelect) {
 				.set({ readAt: new Date() })
 				.where(
 					and(
-						eq(tables.careerNotification.userId, job.userId),
+						and(
+							eq(tables.careerNotification.userId, job.userId),
+							availableApplicationContext(job.userId, tables.careerNotification.applicationId),
+						),
 						sql`${tables.careerNotification.notice}->>'type' = 'opportunities'`,
 						isNull(tables.careerNotification.readAt),
 					),
@@ -477,6 +782,7 @@ async function execute(job: typeof tables.careerJob.$inferSelect) {
 									type: schedule.kind === "prepare" ? "briefing" : "followup",
 									company: application?.company ?? "",
 									role: application?.role ?? "",
+									...(schedule.kind === "follow-up" && followUpNote ? { note: followUpNote } : {}),
 								},
 					url: workspaceUrl(schedule.applicationId, schedule.kind === "prepare" ? "prepare" : undefined),
 				})
@@ -501,6 +807,7 @@ async function sendPendingEmail() {
 					and(
 						eq(tables.careerJob.status, "completed"),
 						eq(tables.careerSchedule.email, true),
+						sql`(${tables.careerNotification.applicationId} is null or exists (select 1 from application a where a.id = ${tables.careerNotification.applicationId} and a.user_id = ${tables.careerNotification.userId} and a.status <> 'closed' and a.trashed_at is null))`,
 						eq(tables.careerSchedule.enabled, true),
 						isNull(tables.careerNotification.emailedAt),
 						or(
@@ -521,41 +828,56 @@ async function sendPendingEmail() {
 			return row.notification;
 		});
 		if (!notification) break;
-		const [owner] = await db
-			.select({
-				email: tables.user.email,
-				verified: tables.user.emailVerified,
-				banned: tables.user.banned,
-				banExpires: tables.user.banExpires,
-			})
-			.from(tables.user)
-			.where(eq(tables.user.id, notification.userId));
-		const banned = owner?.banned && (!owner.banExpires || owner.banExpires > new Date());
-		if (notification && owner?.verified && !banned) {
-			try {
-				const sent = await sendCareerNotification({
-					to: owner.email,
-					subject: noticeText(notification.notice).title,
-					text: "You have a career update in Reactive Resume.",
-					url: new URL(notification.url ?? CAREER_URL, env.APP_URL).toString(),
-					key: notification.key,
-				});
-				if (!sent) throw new Error("SMTP unavailable");
-				await db
-					.update(tables.careerNotification)
-					.set({ emailedAt: new Date() })
-					.where(eq(tables.careerNotification.id, notification.id));
-			} catch {
-				await db
-					.insert(tables.careerNotification)
-					.values({
-						userId: notification.userId,
-						key: `email-failed:${notification.key}`,
-						notice: { type: "email-failed" },
-						url: CAREER_URL,
-					})
-					.onConflictDoNothing();
+		const owner = await db.transaction(async (tx) => {
+			const [owner] = await tx
+				.select({
+					email: tables.user.email,
+					verified: tables.user.emailVerified,
+					banned: tables.user.banned,
+					banExpires: tables.user.banExpires,
+				})
+				.from(tables.user)
+				.where(eq(tables.user.id, notification.userId))
+				.for("no key update");
+			if (!owner) return null;
+			if (notification.applicationId) {
+				const [application] = await tx
+					.select({ status: tables.application.status })
+					.from(tables.application)
+					.where(and(eq(tables.application.id, notification.applicationId), activeApplications(notification.userId)))
+					.for("update");
+				if (!application || application.status === "closed") return null;
 			}
+
+			const banned = owner.banned && (!owner.banExpires || owner.banExpires > new Date());
+			return owner.verified && !banned ? owner : null;
+		});
+		if (!owner) continue;
+		// The short claim/check transactions are committed before external I/O. Closing an application must
+		// never wait for SMTP; a delivery already handed to the mail transport cannot be recalled.
+		try {
+			const sent = await sendCareerNotification({
+				to: owner.email,
+				subject: noticeText(notification.notice).title,
+				text: "You have a career update in Reactive Resume.",
+				url: new URL(notification.url ?? CAREER_URL, env.APP_URL).toString(),
+				key: notification.key,
+			});
+			if (!sent) throw new Error("SMTP unavailable");
+			await db
+				.update(tables.careerNotification)
+				.set({ emailedAt: new Date() })
+				.where(eq(tables.careerNotification.id, notification.id));
+		} catch {
+			await db
+				.insert(tables.careerNotification)
+				.values({
+					userId: notification.userId,
+					key: `email-failed:${notification.key}`,
+					notice: { type: "email-failed" },
+					url: CAREER_URL,
+				})
+				.onConflictDoNothing();
 		}
 	}
 }

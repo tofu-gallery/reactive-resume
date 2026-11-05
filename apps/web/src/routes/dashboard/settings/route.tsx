@@ -1,37 +1,52 @@
 import type { IconName } from "@reactive-resume/ui/components/icon";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
-import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, retainSearchParams, useRouterState } from "@tanstack/react-router";
 import { Fragment } from "react";
+import z from "zod";
+import { Button } from "@reactive-resume/ui/components/button";
 import { Icon } from "@reactive-resume/ui/components/icon";
+import { PageHeader } from "@/components/layout/page-header";
+import { getProjectLinks } from "@/features/settings/project-links";
 import { popTransition } from "@/features/settings/root";
+import { authClient } from "@/libs/auth/client";
+import { getPageTitle } from "@/libs/seo";
 
 type Page = {
-	to: "/dashboard/settings/account" | "/dashboard/settings/preferences" | "/dashboard/settings/ai";
+	to:
+		| "/dashboard/settings/profile"
+		| "/dashboard/settings/account"
+		| "/dashboard/settings/preferences"
+		| "/dashboard/settings/ai";
 	icon: IconName;
 	label: () => string;
 };
 
-// Six pages became three, each with one job (README §5.9).
 const SETTINGS_PAGES: Page[] = [
 	{ to: "/dashboard/settings/account", icon: "user-circle", label: () => t`Account` },
+	{ to: "/dashboard/settings/profile", icon: "clipboard-text", label: () => t`Profile` },
 	{ to: "/dashboard/settings/preferences", icon: "sliders-horizontal", label: () => t`Preferences` },
 	{ to: "/dashboard/settings/ai", icon: "sparkle", label: () => t`AI & developer` },
 ];
 
 // The project's own links: where to read up, see the code, help translate, report a problem or donate.
-const getProjectLinks = () => [
-	{ href: "https://docs.rxresu.me", label: t`Docs` },
-	{ href: "https://github.com/reactive-resume/reactive-resume", label: t`Source` },
-	{ href: "https://crowdin.com/project/reactive-resume", label: t`Translate` },
-	{ href: "https://github.com/reactive-resume/reactive-resume/issues", label: t`Report a bug` },
-	{ href: "https://opencollective.com/reactive-resume/donate", label: t`Donate` },
-];
 
-export const Route = createFileRoute("/dashboard/settings")({ component: RouteComponent });
+export const Route = createFileRoute("/dashboard/settings")({
+	head: () => ({ meta: [{ title: getPageTitle(t`Settings`) }] }),
+	validateSearch: z.object({ forAccount: z.string().min(1).max(200).optional() }),
+	search: { middlewares: [retainSearchParams(["forAccount"])] },
+	component: RouteComponent,
+});
 
 function RouteComponent() {
-	const pathname = useRouterState({ select: (state) => state.location.pathname });
+	const location = useRouterState({ select: (state) => state.location });
+	const pathname = location.pathname;
+	const { forAccount } = Route.useSearch();
+	const { session } = Route.useRouteContext();
+	const { data: browserSession, error } = authClient.useSession();
+
+	const matchesAccount =
+		!forAccount || (!error && forAccount === session.user.id && forAccount === browserSession?.user.id);
 	const isRoot = pathname.replace(/\/$/, "") === "/dashboard/settings";
 
 	return (
@@ -79,7 +94,19 @@ function RouteComponent() {
 					</Link>
 				)}
 				<div className="grid max-w-[680px] gap-8">
-					<Outlet />
+					{matchesAccount ? (
+						<Outlet />
+					) : (
+						<>
+							<PageHeader title={<Trans>Account</Trans>} />
+							<p role="alert">
+								<Trans>Sign in with the account that opened these settings.</Trans>
+							</p>
+							<Button render={<Link to="/auth/login" search={{ reauthenticate: true, callbackURL: location.href }} />}>
+								<Trans>Sign in again</Trans>
+							</Button>
+						</>
+					)}
 				</div>
 			</div>
 		</div>

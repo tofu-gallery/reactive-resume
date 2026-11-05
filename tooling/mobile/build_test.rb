@@ -74,6 +74,8 @@ Dir.mktmpdir do |directory|
     options = contract.gradle_options
     raise "Wrong Gradle task" unless options[:task] == (abi ? "assemble" : "bundle")
     raise "Wrong ABI filter" unless options[:properties]["reactNativeArchitectures"] == abi
+    raise "R8 disabled" unless options[:properties]["android.enableMinifyInReleaseBuilds"] == "true"
+    raise "Resource shrinking disabled" unless options[:properties]["android.enableShrinkResourcesInReleaseBuilds"] == "true"
     raise "Signing command exposed" unless options[:print_command] == false
     raise "Keystore leaked" if File.exist?(contract.keystore_path)
     name = abi ? "reactive-resume-#{abi}.apk" : "ReactiveResume.aab"

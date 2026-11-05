@@ -1,8 +1,8 @@
 {
 	"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
 	"name": "reactive-resume",
-	"version": "1.0.0",
-	"description": "Build, tailor and track resumes, cover letters and job applications in Reactive Resume, and prepare for interviews and offers.",
+	"version": "1.1.0",
+	"description": "32 skills for resume writing, specific professions, cover letters, LinkedIn, portfolios and the job search, with optional Reactive Resume account tools.",
 	"author": { "name": "Amruth Pillai", "url": "https://amruthpillai.com" },
 	"homepage": "https://rxresu.me",
 	"repository": "https://github.com/reactive-resume/reactive-resume",
@@ -13,7 +13,7 @@
 			"interface": {
 				"displayName": "Reactive Resume",
 				"shortDescription": "Build and tailor your resume",
-				"longDescription": "Read and edit the resumes, cover letters and job applications in your Reactive Resume account. Tailor a resume to a job posting on a copy, rewrite bullets around real results, track applications and follow-ups, prepare stories for interviews, run mock interviews, and plan an offer negotiation. The skills never invent facts or numbers: they ask you, and they show changes before writing them to your account. Reactive Resume is free and open source.",
+				"longDescription": "Write and review resumes with 32 skills, including fourteen role guides, first-job and career-change resumes, academic CVs, cover letters, LinkedIn profiles and portfolio case studies. Work from pasted text or connect Reactive Resume to read and edit resumes, cover letters and applications. Tailor a copy for a posting, track the search, prepare for interviews and negotiate offers. Skills preserve facts and estimates and require review and authorization for connected changes. Reactive Resume is free and open source.",
 				"developerName": "Reactive Resume",
 				"category": "Productivity",
 				"capabilities": ["Read", "Write"],
@@ -73,7 +73,9 @@
 					]
 				}
 			},
-			"publication": { "release_notes": "Initial release: eight job-search skills and the Reactive Resume MCP server." }
+			"publication": {
+				"release_notes": "Adds 24 resume and career-writing skills, including fourteen profession-specific guides, for a collection of 32 skills with the Reactive Resume MCP server."
+			}
 		}
 	}
 }

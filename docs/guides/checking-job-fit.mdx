@@ -7,21 +7,35 @@ You are moving from customer support into product work. The posting asks for cus
 
 **Fit** helps you separate what your evidence supports from what you still need to explain or ask.
 
+After explicitly saving Fit evidence to Knowledge, **Propose a resume bullet** offers one proposed bullet for the linked owned resume. It reuses the existing assistant review, making a job copy when needed. Only the selected statement, resume and posting are shared; other Knowledge, private notes and web access stay out. Review before accepting. A forgotten or disabled fact is unavailable, and changed Knowledge withdraws dependent assistant suggestions. The existing **Job match** handoff stays available.
+
 ## Run a fit check
 
 1. Save the posting in [Applications](/guides/adding-an-application).
 2. Add relevant experience in [Career → Knowledge](/guides/building-career-knowledge), and keep the facts you want used switched on.
 3. Open the application's details, select **Open workspace**, then **Fit**.
-4. Read the line explaining what will be sent to your AI connection, then choose **Check fit**.
+4. If no usable facts, stories or linked resume exist, explicitly pick a resume and choose **Use this resume as evidence**, or **Add facts**. No model request runs with empty evidence.
+5. Read the line explaining what will be sent to your AI connection, then choose **Check fit**.
+
+A draft story without supporting active facts does not count as usable evidence. Facts from another application and sources you excluded stay out.
+
+To start Knowledge from an existing resume, use **Pull facts from my resume** in **Knowledge → Facts**. [Review, edit and save only supported statements](/guides/building-career-knowledge#start-from-a-resume) before returning to Fit. This import makes no AI request; **Check fit** is a separate, consented action.
+
+<Frame caption="Choose evidence explicitly before asking for a Fit check.">
+  <img
+    src="/images/guides/career/rx98-fit-evidence.png"
+    alt="Fictional application showing Fit needs evidence, Add facts, an explicit resume picker, and a disabled Check fit button."
+  />
+</Frame>
 
 The result checks requirements from the posting against your facts. It also compares available job details with preferences such as minimum salary, location and office days.
 
 ## Read the evidence, not a score
 
-<Frame caption="Fit separates supported experience, related evidence and an unanswered requirement. It also distinguishes stated requirements from inferred ones.">
+<Frame caption="Review support and gaps against the posting">
   <img
     src="/images/guides/career/fit.png"
-    alt="Fit table with Supported, Partly supported and No evidence yet rows, Posting and Inferred origins, evidence text and Add evidence or Clarify actions"
+    alt="Saved fictional Northwind Games fit review showing supported gameplay experience and a missing console-certification requirement"
   />
 </Frame>
 
@@ -43,9 +57,24 @@ Choose **Add evidence** or **Clarify** on a gap. Write the experience you can su
 
 When the underlying context changes, a fresh check may be needed. Choose **Check again** when offered. Review the new assessment rather than assuming every gap has disappeared.
 
+## Compare the resume with this posting
+
+On a partly supported or missing requirement, select **Tailor resume for this job**. It opens the application's linked resume in **Check → Job match**, using this application's posting. If no resume is linked, choose a resume in the existing copy step and select **Create and open**. The new copy is linked to the job and opens on Job match, even when an AI connection is available.
+
+Fit compares Knowledge with the posting; Job match compares the resume's wording with it. Opening Job match makes no AI request and does not add evidence or edit the resume. The selected posting and tab survive reload on web. On native, the same action opens the Check screen's Job match tab.
+
+If the linked resume was made for another application, Job match labels this posting **For this visit only**. Opening it does not replace the resume's saved application link. Review any edits before using that resume for another job.
+
+<Frame caption="A Fit gap offers the next step on the resume.">
+  <img
+    src="/images/guides/career/fit-gap-resume.png"
+    alt="Fictional Cedar Fit result with an enterprise-onboarding gap and Tailor resume for this job beside Add evidence."
+  />
+</Frame>
+
 ## Turn unknowns into questions
 
-Use the suggested question under **Worth asking…**. **Add to questions** puts it with the questions for this application in Prepare.
+Use the suggested question under **Worth asking…**. **Add to questions** puts it with the questions for this application in Interview prep.
 
 Useful questions include:
 
@@ -60,3 +89,5 @@ An unstated salary or office policy stays unknown. Ask the employer rather than 
 Write an honest bridge between your experience and the role: “I have done customer interviews and worked with product teams on setup improvements. I have not yet owned enterprise onboarding.”
 
 You can now [draft the application answer](/guides/writing-application-answers) or ask the workspace coach how to explain that overlap. You decide whether the role is worth applying for.
+
+To fix evidence saved with the wrong type or application scope, open **Knowledge → Facts → Correct**. Review the wording, type and **Scope**, then save the correction. Changed evidence and stories awaiting review stay out of new coaching until reviewed; older saved Fit results do not rewrite themselves. See [Correct an old fact](/guides/building-career-knowledge#correct-an-old-fact).

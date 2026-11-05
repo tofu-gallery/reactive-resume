@@ -8,12 +8,14 @@ import { useQuery } from "@tanstack/react-query";
 import { useNetworkState } from "expo-network";
 import { useMemo, useRef, useState } from "react";
 import { View } from "react-native";
+import { getDefaultFileName } from "@reactive-resume/utils/file";
 import { letterPageData, useLetterWords } from "./compose";
 import { LetterPages } from "./page";
 import { useResumes } from "./queries";
 import { restoreLetterVersion, saveLetter } from "./save";
 import { client, orpc } from "@/api/client";
 import { useLetterStore } from "@/draft";
+import { AiResultUsage } from "@/features/ai/usage";
 import { useDocumentOperations } from "@/features/documents/queries";
 import { exportDirectory, exportFile, shareExport } from "@/features/share/files";
 import { letterWords } from "@/features/share/letter";
@@ -45,8 +47,8 @@ async function flushLetter(id: string) {
 
 type LetterShareSheetProps = { id: string; open: boolean; onClose: () => void; version?: string | undefined };
 /**
- * Share & export for letters (builder.html L7): Download and History. Letters have no public link. Opened from
- * Share in the letter chrome; the letter layout owns the draft, so this only subscribes. `version` opens History on
+ * Download & history for letters (builder.html L7): Download and History. Letters have no public link. Opened from
+ * Download in the letter chrome; the letter layout owns the draft, so this only subscribes. `version` opens History on
  * that version, read-only.
  */
 export function LetterShareSheet({ id, open, onClose, version }: LetterShareSheetProps) {
@@ -58,10 +60,10 @@ export function LetterShareSheet({ id, open, onClose, version }: LetterShareShee
 	const offline = network.isConnected === false || network.isInternetReachable === false;
 
 	return (
-		<Sheet open={open} onClose={onClose} title={t`Share & export`} detents={[0.9]}>
+		<Sheet open={open} onClose={onClose} title={t`Download & history`} detents={[0.9]}>
 			<View style={{ gap: space.s4 }}>
 				<Segmented
-					label={t`Share sections`}
+					label={t`Download & history`}
 					value={tab}
 					options={[
 						{ value: "download", label: t`Download` },
@@ -133,7 +135,7 @@ function LetterDownload({ letter, offline }: { letter: LetterDocument; offline: 
 			id: "md",
 			label: t`Markdown`,
 			extension: ".md",
-			description: t`Plain text with headings. Paste into application forms and notes.`,
+			description: t`Plain text. Paste into application forms and emails.`,
 		},
 		{
 			id: "json",
@@ -172,7 +174,7 @@ function LetterDownload({ letter, offline }: { letter: LetterDocument; offline: 
 				const resumeFile = await exportFile({
 					directory,
 					id: resume.id,
-					name: safeFileName(t`${resume.data.basics.name || resume.name}-Resume`).replaceAll(" ", "-"),
+					name: safeFileName(getDefaultFileName(resume)),
 					format: "pdf",
 					data: resume.data,
 				});
@@ -260,9 +262,9 @@ function versionTitle(version: Version) {
 		case "auto":
 			return t`Editing session`;
 		case "before-restore":
-			return t`Before restore`;
+			return version.name ? t`Before restoring “${version.name}”` : t`Before restore`;
 		case "restored":
-			return t`Restored a version`;
+			return version.name ? t`Restored “${version.name}”` : t`Restored a version`;
 		case "sent":
 			return version.name ? t`Sent to ${version.name}` : t`Sent`;
 		default:
@@ -319,7 +321,11 @@ function LetterHistory({ letter, offline, version: openVersion }: LetterHistoryP
 			if (!current) return;
 			setSelected(null);
 			void list.refetch();
-			showToast({ message: t`Version restored. Your previous state is saved as “Before restore”.` });
+			showToast({
+				message: selected.name
+					? t`Restored “${selected.name}”. Your previous state is saved as “Before restoring “${selected.name}””.`
+					: t`Version restored. Your previous state is saved as “Before restore”.`,
+			});
 		}
 	};
 	const mutateVersion = async (remove: boolean) => {
@@ -486,8 +492,11 @@ function VersionPage({ letter, versionId }: { letter: LetterDocument; versionId:
 			/>
 		);
 	return (
-		<View style={{ height: size.hit * 10 }}>
-			<LetterPages data={data} zoomBar={false} />
+		<View>
+			<AiResultUsage usage={version.data?.aiUsage} />
+			<View style={{ height: size.hit * 10 }}>
+				<LetterPages data={data} zoomBar={false} />
+			</View>
 		</View>
 	);
 }

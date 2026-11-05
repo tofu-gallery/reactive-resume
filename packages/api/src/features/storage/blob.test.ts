@@ -26,6 +26,45 @@ beforeEach(() => {
 });
 
 describe("BlobStorageService", () => {
+	it("cancels an oversized private Blob instead of buffering it", async () => {
+		const cancel = vi.fn();
+		mocks.get.mockResolvedValue({
+			statusCode: 200,
+			blob: { size: 4 },
+			stream: new ReadableStream<Uint8Array>({ cancel }, { highWaterMark: 0 }),
+		});
+		await expect(storage.read("uploads/owner/pictures/photo.png", { maxBytes: 3 })).rejects.toThrow("byte limit");
+		expect(cancel).toHaveBeenCalledOnce();
+	});
+	it("bounds actual Blob bytes when advertised size is understated", async () => {
+		const cancel = vi.fn();
+		mocks.get.mockResolvedValue({
+			statusCode: 200,
+			blob: { size: 0 },
+			stream: new ReadableStream<Uint8Array>(
+				{
+					start(controller) {
+						controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+					},
+					cancel,
+				},
+				{ highWaterMark: 0 },
+			),
+		});
+		await expect(storage.read("uploads/owner/pictures/photo.png", { maxBytes: 3 })).rejects.toThrow("byte limit");
+		expect(cancel).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		"uploads/user/%2e%2e/other/file",
+		"uploads/user/%252e%252e/file",
+		"uploads/user/file?x",
+		"uploads/user/file#x",
+		"uploads/user/\nfile",
+	])("rejects URL interpretation of storage key %s before requesting bytes", async (key) => {
+		await expect(storage.read(key)).rejects.toThrow("Invalid storage key");
+		expect(mocks.get).not.toHaveBeenCalled();
+	});
 	it("uses namespaced paths and leaves OIDC credential discovery to the SDK", () => {
 		expect(blobPath("uploads/user/file.jpg")).toBe("preview-123/uploads/user/file.jpg");
 		expect(blobOptions()).toEqual({});

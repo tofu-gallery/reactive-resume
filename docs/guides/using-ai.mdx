@@ -12,7 +12,9 @@ without entering your own key. The steps below apply when personal providers are
 ## Before you start
 
 - Get an API key from your provider's dashboard. You pay the provider directly for what you use. A local Ollama server can connect without a key.
-- Know which model you want to use, such as `gpt-4.1` or `claude-3-5-sonnet-latest`. Reactive Resume suggests a default for each provider, but your account may not have access to every model.
+- Know which model you want to use, such as `gpt-6-luna` or `claude-haiku-5-5`. Reactive Resume suggests a default for each provider, but your account may not have access to every model.
+
+Personal **AI providers** settings show a billing reminder before and after you connect a provider. Your provider may charge your account for requests made with your API key, according to its plan. Server-managed connections show **Managed by your server** instead.
 
 ## Add a provider
 
@@ -21,53 +23,111 @@ without entering your own key. The steps below apply when personal providers are
     Select your name at the bottom of the sidebar, choose **Settings**, then choose **AI & developer**. You can also go to `https://rxresu.me/dashboard/settings/ai` directly. Self-hosted instances use their own address.
   </Step>
   <Step title="Start adding a provider">
-    Under **AI providers**, select **Add provider** (the dashed button below your saved providers).
+    Under **AI providers**, select **Add AI provider** (the dashed button below your saved providers).
   </Step>
   <Step title="Choose the provider and fill in the fields">
-    Pick your provider from the **Provider** list. Reactive Resume fills in that provider's usual **Model** and **Base URL** for you. Paste your key into **API key**, and change the model if you want a different one.
+    Pick your provider from the **Provider** list. Reactive Resume suggests its usual **Model**. Use **Get an API key** to open that provider's key settings, then paste your key into **API key**. Switching providers clears the typed key. Change the model if you want a different one.
 
-    <Frame caption="The Add provider dialog">
-      <img src="/images/guides/using-ai/add-provider-dialog.webp" alt="Add provider dialog with Provider set to OpenAI, a hidden API key, Model gpt-4.1, Name Personal OpenAI and the default OpenAI base URL" />
+    For a named provider, expand **Advanced** only when you want a custom **Name** or **Base URL**. An existing custom address is shown when you edit the connection. For **OpenAI-compatible**, **Base URL (required)** stays visible. Enter an `http://` or `https://` address; an invalid or missing address gets an inline explanation and cannot be saved. The server separately checks which addresses it allows.
+
+    <Frame caption="Connect a provider from AI and developer settings">
+      <img src="/images/guides/using-ai/add-provider-dialog.webp" alt="Add provider dialog with Provider, API key and key-settings link, Model, collapsed Advanced settings and Save and test" />
     </Frame>
 
   </Step>
   <Step title="Save and test">
-    Select **Save and test**. Reactive Resume saves the provider, then sends it a tiny request to check that the key, model and address work. If the test passes, the dialog closes and the provider is ready to use.
+    Select **Save and test**. Reactive Resume saves the provider, then sends it a tiny request to check that the key, address and every model you configured work. If the test passes, the dialog closes and the provider is ready to use.
   </Step>
 </Steps>
 
-If the test fails, the dialog shows the provider's own error message, such as an invalid key or an unknown model. The provider is still saved, so you can fix it later with **Edit** instead of starting again.
+If the test fails, the dialog explains the cause and recovery in your language. Retrying **Save and test** updates the same saved connection. You can also close it and use **Edit** later.
+
+After your first successful connection in settings, **AI is ready** offers five next steps on web and mobile:
+
+- **Improve selected line**: choose a resume, then select the text you want to improve in Write.
+- **Review writing**: choose a resume and open its Writing check.
+- **Check fit**: choose an application and open Fit.
+- **New cover letter**: open letter creation, with an optional resume.
+- **Ask the coach**: open the Career coach.
+
+If you have no resumes or applications yet, the pickers offer to create a resume or save a job. Opening a next step does not generate text or send your documents to AI. Each AI action still asks for approval before sending. You can dismiss these suggestions; adding another working connection does not show them again. Setup opened from an editing or coaching task keeps you in that task.
+
+<Frame caption="Choose what to do after connecting your first AI provider">
+  <img
+    src="/images/guides/using-ai/first-connection-next-steps.png"
+    alt="AI is ready offers Improve selected line, Review writing, Check fit, New cover letter and Ask the coach, with a dismiss button"
+  />
+</Frame>
 
 ### The fields
 
-| Field        | What to enter                                                                                                                                            |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Provider** | The company or service that runs the model.                                                                                                              |
-| **API key**  | The key from your provider's dashboard. Required except for Ollama, where you can leave it empty for a local server that doesn't require authentication. |
-| **Model**    | The model name exactly as your provider writes it. Required.                                                                                             |
-| **Name**     | A label you'll recognize, such as "Work OpenAI". If you leave it empty, the provider's name is used.                                                     |
-| **Base URL** | The address requests go to. Leave the default unless you use a gateway, a proxy or an OpenAI-compatible service. Changing it needs the API key again.    |
+| Field             | What to enter                                                                                                                                                 |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Provider**      | The company or service that runs the model.                                                                                                                   |
+| **API key**       | The key from your provider's dashboard. Required except for Ollama, where you can leave it empty for a local server that doesn't require authentication.      |
+| **Model**         | The model name exactly as your provider writes it. Required.                                                                                                  |
+| **Fast model**    | Optional. The model for resume import, Improve and reading job postings. Leave it empty to use **Model**.                                                     |
+| **Capable model** | Optional. The model for the assistant and letter drafts. Leave it empty to use **Model**.                                                                     |
+| **Name**          | A label you'll recognize, such as "Work OpenAI". Under **Advanced** for named providers. If you leave it empty, the provider's name is used.                  |
+| **Base URL**      | The address requests go to. Under **Advanced** for named providers; required and visible for OpenAI-compatible services. Changing it needs the API key again. |
+
+### Choosing a model
+
+Use **Choose model**, the arrow beside **Model**, to see the built-in choices even when a model is already selected. **Recommended** offers suggestions for everyday work and a **More capable** alternative. **All models** holds the additional built-in choices. On the web, typing filters the list; on mobile, the picker has a search field.
+
+OpenAI starts with `gpt-6-luna`, a fast, lower-cost model for everyday work. Defaults are starting suggestions for new connections. Saved models stay as you set them until you change them.
+
+<Frame caption="Choose a built-in model or enter your own model ID">
+  <img
+    src="/images/guides/using-ai/model-choices.webp"
+    alt="OpenAI model picker with Recommended and All models groups"
+  />
+</Frame>
+
+The built-in list is curated for text and tool use. Your endpoint and plan decide which models are available. You can enter any model ID your endpoint supports, including a private or custom model. Some providers have no built-in suggestions; their model field remains editable. Check tool-calling support with your provider when choosing a custom model for the assistant.
+
+### Task models (optional)
+
+For lower cost without changing your everyday model, expand **Task models (optional)** under **Model** on web or mobile and choose:
+
+- A **Fast model** for resume import, Improve and reading job postings.
+- A **Capable model** for the assistant and letter drafts.
+
+Leave either field empty to use the model above. A connection with one model therefore keeps working exactly as before, with the same key, provider and approval. Task models use that same connection; Reactive Resume never switches to another provider.
+
+**Save and test** checks every model you configured. If one is unavailable, the connection stays off until you correct or clear it, so an unsupported model is never used silently. Changing a task model also needs a fresh test, and pauses scheduled AI work until you re-enable each schedule. Each approval dialog names the model that will receive that action.
+
+<Frame caption="Optional fast and capable models on one tested connection">
+  <img
+    src="/images/guides/using-ai/task-models.webp"
+    alt="Add provider dialog with Task models (optional) expanded, showing empty Fast model and Capable model fields above collapsed Advanced settings"
+  />
+</Frame>
 
 ### Supported providers
 
-| Provider          | Default model                                       | Default base URL                                   |
-| ----------------- | --------------------------------------------------- | -------------------------------------------------- |
-| OpenAI            | `gpt-4.1`                                           | `https://api.openai.com/v1`                        |
-| Anthropic Claude  | `claude-3-5-sonnet-latest`                          | `https://api.anthropic.com/v1`                     |
-| Google Gemini     | `gemini-2.0-flash`                                  | `https://generativelanguage.googleapis.com/v1beta` |
-| Vercel AI Gateway | `openai/gpt-4.1`                                    | `https://ai-gateway.vercel.sh/v3/ai`               |
-| OpenRouter        | `openai/gpt-4.1`                                    | `https://openrouter.ai/api/v1`                     |
-| Mistral AI        | `mistral-large-latest`                              | `https://api.mistral.ai/v1`                        |
-| Cohere            | `command-a-03-2025`                                 | `https://api.cohere.com/v2`                        |
-| xAI Grok          | `grok-4`                                            | `https://api.x.ai/v1`                              |
-| Groq              | `llama-3.3-70b-versatile`                           | `https://api.groq.com/openai/v1`                   |
-| DeepSeek          | `deepseek-chat`                                     | `https://api.deepseek.com/v1`                      |
-| Together.ai       | `meta-llama/Meta-Llama-3.3-70B-Instruct-Turbo`      | `https://api.together.xyz/v1`                      |
-| Fireworks         | `accounts/fireworks/models/llama-v3p3-70b-instruct` | `https://api.fireworks.ai/inference/v1`            |
-| Cerebras          | `llama3.3-70b`                                      | `https://api.cerebras.ai/v1`                       |
-| Perplexity        | `sonar-pro`                                         | `https://api.perplexity.ai`                        |
-| Ollama            | `llama3.1`                                          | `https://ollama.com/api`                           |
-| OpenAI-compatible | none, enter your own                                | none, enter your own                               |
+Suggestions favor fast, cost-efficient models for everyday AI tasks. They apply when adding a provider; saved models stay as selected. You can enter another model available to your account.
+
+| Provider          | Default model                                        | Default base URL                                   |
+| ----------------- | ---------------------------------------------------- | -------------------------------------------------- |
+| OpenAI            | `gpt-6-luna`                                         | `https://api.openai.com/v1`                        |
+| Anthropic Claude  | `claude-haiku-5-5`                                   | `https://api.anthropic.com/v1`                     |
+| Google Gemini     | `gemini-3.5-flash-lite`                              | `https://generativelanguage.googleapis.com/v1beta` |
+| Vercel AI Gateway | `openai/gpt-6-luna`                                  | `https://ai-gateway.vercel.sh/v3/ai`               |
+| OpenRouter        | `anthropic/claude-haiku-5.5`                         | `https://openrouter.ai/api/v1`                     |
+| Mistral AI        | `mistral-small-latest`                               | `https://api.mistral.ai/v1`                        |
+| Cohere            | `command-r7b-12-2024`                                | `https://api.cohere.com/v2`                        |
+| xAI Grok          | `grok-4.3`                                           | `https://api.x.ai/v1`                              |
+| Groq              | `openai/gpt-oss-20b`                                 | `https://api.groq.com/openai/v1`                   |
+| DeepSeek          | `deepseek-flash`                                     | `https://api.deepseek.com/v1`                      |
+| Together.ai       | `Qwen/Qwen3.8-Flash`                                 | `https://api.together.xyz/v1`                      |
+| Fireworks         | `accounts/fireworks/models/deepseek-v4p1-flash-1017` | `https://api.fireworks.ai/inference/v1`            |
+| Cerebras          | `qwen-3.8-27b`                                       | `https://api.cerebras.ai/v1`                       |
+| Perplexity        | `sonar`                                              | `https://api.perplexity.ai`                        |
+| Ollama            | `gpt-oss:20b-cloud`                                  | `https://ollama.com/api`                           |
+| OpenAI-compatible | none, enter your own                                 | none, enter your own                               |
+
+Ollama defaults to a cloud model for its hosted base URL. For a local Ollama server, enter the name of a model installed on that server and change the base URL.
 
 Choose **OpenAI-compatible** for any other service that speaks the OpenAI API, such as a company gateway or LiteLLM. It needs both a model and a base URL.
 
@@ -75,58 +135,107 @@ The base URL must start with `https://` and point to a public address. On the ho
 
 ## Test a provider again
 
-Each saved provider appears as a row under **AI providers**, showing its name, model and the last four characters of the key. The row shows **Off** next to the name when the provider isn't in use.
+Each saved provider appears as a row under **AI providers**, showing its name, model and the last four characters of the key. When you set task models, the row also shows which model fast and capable tasks use. The row shows **Off** next to the name when the provider isn't in use.
 
-<Frame caption="A provider after a successful test">
+<Frame caption="A connected provider after a successful test">
   <img
-    src="/images/guides/using-ai/provider-row-connected.webp"
-    alt="AI providers section with one provider named Work gateway, model gpt-5-mini, and a Test button reading Connected · 40 ms, followed by the Add provider button"
+    src="/images/guides/using-ai/provider-row-connected.png"
+    alt="Personal AI providers section with a tested fictional connection and a reminder that the provider may charge for requests made with your API key"
   />
 </Frame>
 
-Select **Test** on a row to check it again. The button changes to **Connected** with the round-trip time (for example, **Connected · 420 ms**), or to **Failed** with the provider's error message underneath. A passed test turns the provider on; a failed test turns it off, so the app never uses a provider that isn't answering.
+Select **Test** on a row to check it again. The result appears separately: **Connected** with the round-trip time (for example, **Connected · 420 ms**), or an error explaining what to check. The button returns to **Test**, so you can run it again. A failed test makes the connection unavailable. A passed test makes it ready unless you deliberately switched it off; **Test** preserves that choice. Turn it on in **Edit** when you want to use it again.
+
+Each row's **⋯** menu has **Delete provider**, so you can remove a connection without opening it.
 
 ## Edit, turn off or delete a provider
 
 Select **Edit** on a provider's row.
 
-<Frame caption="Editing a saved provider">
+<Frame caption="Edit a saved provider without exposing its key">
   <img
     src="/images/guides/using-ai/edit-provider-dialog.webp"
-    alt="Edit dialog for a provider named Work gateway, with an empty API key field reading Leave empty to keep the saved key, the model, name and base URL fields, the Use this provider switch turned on, Delete provider and Save and test"
+    alt="Edit provider dialog for Fictional custom OpenAI with expanded Advanced fields, a custom local Base URL and the saved key left blank"
   />
 </Frame>
 
-- **Change the key, model, name or base URL**, then select **Save and test**. Leave **API key** empty to keep the saved key. Changing the key, model or base URL turns the provider off until the new test passes.
+- **Change the key, model, task models, name or base URL**, then select **Save and test**. Leave **API key** empty to keep the saved key. Changing the key, model, task models or base URL turns the provider off until the new test passes.
 - **Turn it on or off** with **Use this provider**. Only a provider that passed its test can be turned on. A provider that is off stays saved but isn't offered anywhere in the app.
-- **Delete it** with **Delete provider**, then confirm. The provider and its stored key are removed.
+- **Delete it** from the row's **⋯** menu or the **Delete provider** button under **Edit**, then confirm with the red **Delete provider** button. Choose **Keep provider** to keep it. The provider and its stored key are removed only after confirmation.
+
+<Frame caption="Confirm before deleting a saved provider">
+  <img
+    src="/images/guides/using-ai/provider-delete-confirmation.png"
+    alt="Delete provider confirmation for Fictional working connection, with Keep provider and a red Delete provider button"
+  />
+</Frame>
 
 <Warning>
-  Deleting a provider can't be undone. Conversations that used it continue on your default provider. Documents and edits
-  you already accepted aren't affected.
+  Deleting a provider can't be undone. Conversations keep their history and pending edits, but sending pauses until you
+  explicitly choose another destination. Documents and edits you already accepted aren't affected.
 </Warning>
+
+## See your AI usage
+
+Open **Settings → AI & developer → AI usage this week**. On native mobile, open **Settings → AI providers**. The report shows recorded request attempts for your account, grouped by connection, action and requested model. Select **Refresh usage** to read the latest totals. Weeks run from Monday through Sunday in your saved account timezone; the report shows its dates and timezone.
+
+One request attempt means one call to the provider transport after the server's authorization and context checks. A retry counts again. If an assistant calls a model, runs a tool, then calls the model again, that is two attempts. Stream chunks and tools that make no AI request add none. A provider-native search fallback makes an AI request and counts as an additional attempt. Copying, saving or reopening a result, deterministic checks, browser speech and actions refused before dispatch add none. Provider connection tests and scheduled AI work count too. Ordinary web-service search and page reading are outside this AI report. Explicit Save-job AI search retries appear as **Web research**; chat fallbacks stay under that conversation’s action. Older app versions group standalone AI search retries under **Assistant**.
+
+<Frame caption="Two recorded attempts through a fictional connection: its test and a message review">
+  <img
+    src="/images/guides/using-ai/weekly-ai-usage.png"
+    alt="AI usage this week with two attempts for Fictional Cedar AI, one Provider test and one Reply using offer-fixture, and the account's UTC week dates"
+  />
+</Frame>
+
+Failed and cancelled transport attempts remain in history. These totals are not provider billing, token counts, costs or proof that the provider received a request. The server records an attempt before network I/O, so a server interruption can leave a recorded attempt unsent. Earlier requests are not reconstructed when recording first becomes available.
+
+Saved workspace **Library** results and **Check → Writing** reviews show their recorded attempt count, connection label, provider type and requested model. Accepted letter body drafts also show their sources in the letter editor and History. Earlier draft selection, revisions and recovery preserve the corresponding references. Reused AI answer sources keep their recorded lineage; saving or reusing them does not make another provider request. Older results say **AI request history unavailable for this result.** instead of guessing a count.
+
+Reviewed AI PDF and Word imports retain their sources in resume **History** on web and mobile, including owned copies and saved versions. Sources stay out of portable resume JSON and employer downloads. Older-server import results may have no recorded source; reading them again is not automatic. See [Importing a resume](/guides/importing-resumes#review-what-came-in).
+
+**Improve** shows the reviewed suggestion's recorded attempts, original connection and model. **Replace** keeps those sources with the edited resume or letter; **Keep mine** leaves the document unchanged. Undo and Redo carry the sources with the accepted wording, including a suggestion with identical wording. Earlier import or draft sources remain. Saving, recovery, Undo and Redo never generate again; the weekly report still counts the original attempt if you discard or undo its result. Older-server suggestions remain usable with unknown request history.
+
+Accepting an assistant edit or a **Writing** rewrite also keeps the saved result's recorded sources with the document. Pending, rejected and out-of-date edits add no sources. Undo restores the earlier content and sources; accepting again reuses the recorded result. If several accepted edits share one reply, undoing only one keeps that reply's source for the others. These actions make no new provider request, and earlier records without sources remain unknown.
+
+<Frame caption="History retains the accepted Writing review's original source after its fictional connection is deleted.">
+  <img
+    src="/images/guides/using-ai/accepted-writing-sources.png"
+    alt="Resume History showing one AI request attempt from Fictional Review AI, OpenAI-compatible provider, review-main model, and the current and earlier saved versions."
+  />
+</Frame>
+
+Renaming, changing or deleting a connection does not rewrite its historical labels or models. Usage remains readable without an active AI provider. Account export includes usage history, and deleting the account removes it. An older server without reporting shows an update/retry notice.
 
 ## Which provider is used
 
 You can save several providers, for example one per account or one per model.
 
 - One provider is your **default**, marked **Default** in **Settings → AI & developer**. To change it, choose **Make default** on another provider that's on and tested. Every AI feature where you don't pick a provider uses the default, and the line under each AI action names it.
-- If you haven't chosen a default, or it's turned off, features use the enabled provider you used most recently, and if you haven't used one yet, the oldest enabled provider you added.
-- Conversations keep the provider they started with. When that provider is turned off or deleted, they continue on the default. A scheduled interview briefing does the same.
+- The first working connection becomes the explicit default. Using another connection in one conversation does not change it. If the default is unavailable, other actions offer the oldest working connection and ask you to approve that destination before sending.
+- Conversations keep the provider they started with. When it stops working, history and pending proposals remain readable. Choose another model and approve sending earlier messages there before continuing. Scheduled preparation uses only its selected connection. Deleting or switching off that connection, or changing its key, model or address, pauses associated schedules and cancels queued work. Choose a tested connection and approve it when you enable the schedule again; it never switches to the default automatically. A request already sent cannot be recalled.
+- Upgrading to recipient-bound scheduling pauses existing interview-preparation schedules once. Review and enable them again to approve their connection. If an administrator changes a server-managed connection's details, scheduled work refuses that changed destination until you approve it again.
+- In **Use this provider**, the switch shows the saved result of each change. If turning it on or off fails, the switch stays as saved and the dialog says why.
 - Voice practice uses the default when its provider offers speech models, otherwise another provider that does, otherwise your browser.
 - The **assistant** lets you switch models from the model menu in its header at any time. See [Using the assistant](/guides/using-the-assistant).
 - **Check → Writing** lets you pick the provider for each review.
 
 ## Connect from the assistant instead
 
-If no provider is connected yet, opening the assistant in the editor shows **Connect an AI provider** with OpenAI, Anthropic and **Other · OpenAI-compatible**. Enter your key and model there and select **Connect**. It saves and tests the provider the same way as settings. For the other providers, use **AI & developer**.
+If no provider is connected yet, opening the assistant in the editor shows **Connect an AI provider** with OpenAI, Anthropic and **Other · OpenAI-compatible**. Enter your key and model there and select **Connect**. It saves and tests the provider the same way as settings. Every gated task also has **Set up AI**, which opens the same setup without leaving your work. Existing saved connections show repair controls instead of first-run copy. For the other providers, use **AI & developer**.
 
-<Frame caption="Connecting a provider from the assistant panel">
+If connection lookup fails, retry it before setting up another provider. Your saved connections have not changed. Interview preparation schedules show a retry action while connections are unavailable; setup returns after a successful lookup.
+
+![Interview preparation keeps its form and offers Try again when AI connections cannot be loaded](/images/guides/career/rx98-schedule-lookup-error.png)
+
+<Frame caption="The assistant needs a provider; manual editing remains available">
   <img
     src="/images/guides/using-ai/assistant-connect-provider.webp"
-    alt="Assistant panel showing Connect an AI provider, with OpenAI, Anthropic and Other · OpenAI-compatible options and a link to Settings for more providers"
+    alt="Assistant connection choices beside the editor, with no AI provider connected"
   />
 </Frame>
+
+Provider and model suggestions ship with the app. Opening settings does not request logos or a catalog from models.dev. You can still enter a custom model ID.
 
 ## How your key is stored
 
@@ -136,14 +245,14 @@ Self-hosted instances encrypt keys with the `ENCRYPTION_SECRET` environment vari
 
 ## What is sent to your provider
 
-Requests go from the Reactive Resume server to the provider you chose, using your key. Requests run when you use an AI action or when an AI schedule you enabled becomes due. Each action explains its inputs and connection:
+Requests go from the Reactive Resume server to the provider you chose, using your key. Each interactive action asks you to approve its provider, model and data before sending. Canceling keeps the task available. Changes to the destination while approval is open require another approval. Scheduled requests run only after you enable the schedule. Each action explains its inputs and connection:
 
 | Feature                      | What is sent                                                                                                                                                                                                                                  |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Assistant                    | Your message, the open resume or letter (unless you remove it from the message), the job posting and your notes on the linked application (unless you remove the posting), attachments you add, and the earlier messages in the conversation. |
 | **Improve selected line**    | The line you're improving and the rest of that field.                                                                                                                                                                                         |
 | **Check → Writing**          | The text of your resume.                                                                                                                                                                                                                      |
-| Importing a PDF or Word file | The file you import.                                                                                                                                                                                                                          |
+| Importing a PDF or Word file | PDF: the complete file only after choosing AI reading; local reading sends nothing. Word: extracted document text after approval.                                                                                                             |
 | Drafting a letter            | The linked resume and the application's job posting.                                                                                                                                                                                          |
 | Adding an application        | Job posting text you paste or import from a URL.                                                                                                                                                                                              |
 
@@ -153,11 +262,22 @@ Career adds these uses:
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Workspace drafting and review     | The application's posting and details, relevant interview, notes, selected sent or current documents, usable facts and stories, preferences, and the answer or message being reviewed. |
 | Career coach                      | Your message, earlier messages and attachments in the conversation, plus the application and Knowledge context you leave switched on. Web research is a separate opt-in.               |
-| Scheduled interview briefing      | The interview and application context used by Prepare, through the schedule's chosen AI connection.                                                                                    |
+| Scheduled interview briefing      | The interview and application context used by Interview prep, through the schedule's chosen AI connection.                                                                             |
 | Voice transcription               | Your recording or chosen audio file, to the speech connection named beside the action.                                                                                                 |
 | Reading a practice question aloud | The question text, to the selected speech connection; browser speech can be used instead.                                                                                              |
 
 Workspace text actions use your default connection. **Voice settings** can use another speech-capable connection or browser speech. Speech usage can be billed separately from text coaching. Automatic role discovery uses your web search connection; it does not need an AI model. See [Career controls and data](/guides/career-workspace-reference#coach-context-and-ai-actions).
+
+A direct OpenAI, Anthropic or Google Gemini connection can retry search after the web service rejects its key or exhausts its quota, if you approve that possibility in the operation’s sharing dialog. The fallback receives the approved query and search country, without adding document or Knowledge context. It may add AI requests and charges. Custom endpoints and compatible gateways are not assumed to support it; individual models may still refuse. Scheduled discovery keeps using its web service.
+
+If web research fails in Coach or the document assistant, the message names a rejected key, exhausted quota or temporary request limit. **Set up web access** opens personal connection repair without losing your unsent message. A server-managed service directs you to the server administrator instead. If enhanced page reading fails and the built-in reader succeeds, the message says which reader was used; a working server search remains separate from your personal page reader.
+
+<Frame caption="Repairing a rejected web-search key in Coach; fictional conversation">
+  <img
+    src="/images/guides/career/coach-web-recovery.png"
+    alt="Coach names a rejected web-search key, offers Set up web access, and keeps the next unsent message in the composer."
+  />
+</Frame>
 
 Your provider handles that data under its own terms and privacy policy. Reactive Resume keeps assistant conversations and their attachments in your account until you delete the conversation.
 
@@ -177,3 +297,32 @@ Your provider handles that data under its own terms and privacy policy. Reactive
     Turn an existing PDF or Word resume into an editable one.
   </Card>
 </CardGroup>
+
+<Frame caption="A passed test preserves a deliberate Off choice.">
+  <img
+    src="/images/guides/using-ai/rx98-provider-off.png"
+    alt="Fictional compatible provider connected successfully while Off and Default remain visible, with instructions to turn it on in Edit."
+  />
+</Frame>
+
+<Frame caption="Connection controls at phone width, in light and dark appearance.">
+  <img
+    src="/images/guides/using-ai/rx98-provider-off-390-light.png"
+    alt="Phone-width AI connection controls with an Off provider after a successful test."
+  />
+  <img
+    src="/images/guides/using-ai/rx98-provider-off-390-dark.png"
+    alt="The same connection controls in dark appearance."
+  />
+</Frame>
+
+<Frame caption="A rejected key keeps Test available and explains what to check.">
+  <img
+    src="/images/guides/using-ai/provider-error-phone.png"
+    alt="Phone-width provider list with the default connection first and a rejected fictional key below it, with Test still available."
+  />
+</Frame>
+
+Before each generation, the server checks the selected documents and shared Knowledge again, then checks that the captured AI connection is still available. A provider turned off or deleted, or Knowledge excluded, before that authorization prevents the request. Authorization releases database locks before contacting the provider. A change committed after authorization may race an already authorized request; it cannot recall data already sent. Changing the default does not redirect an approved request to another connection.
+
+On upgrade, accounts without an explicit default use their oldest working provider. This can change the destination used by legacy API and MCP clients that previously followed the most recently used provider. Choose an explicit default in AI settings to keep a specific destination.

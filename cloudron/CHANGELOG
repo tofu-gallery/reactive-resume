@@ -1,3 +1,13 @@
+[6.0.8]
+* Add entry header layouts, row order and accent controls across resume templates.
+* Add custom application stages with names, colors, ordering and preserved application history.
+* Add shareable resume pages and custom-domain controls, including available .cv suggestions.
+* Speed up application lists and public pages; fix alias loading, share links and sign-in layouts.
+* Harden sign-in, assistant approvals, document access, imports and exports.
+* Require STARTTLS or direct TLS for SMTP. Reconfigure plaintext-only mail servers before upgrading.
+* Apply startup migrations for resume sharing, application stages and username reservations. Back up the database before upgrading.
+* Complete web and mobile translations.
+
 [6.0.6]
 * Refresh the visual design with the original colors, new typefaces and clearer interface copy.
 * Speed up browsing with cached thumbnails and on-demand PDF viewer loading.

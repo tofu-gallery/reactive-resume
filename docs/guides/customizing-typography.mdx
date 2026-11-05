@@ -18,10 +18,10 @@ The **Type** group in Design controls how your text looks: the fonts, the text s
   </Step>
 </Steps>
 
-<Frame caption="The Type group with the Balanced pairing, 10 pt text and Normal density">
+<Frame caption="Font pairings, text size and density">
   <img
     src="/images/guides/customizing-typography/type-group.webp"
-    alt="The Type group showing five font pairings (Classic, Traditional, Balanced, Professional, Clean) with Balanced selected, a Custom row, the Text size slider at 10 pt with the hint 10 to 11 recommended, and Density set to Normal"
+    alt="Type controls with Classic, Traditional, Balanced, Professional and Clean font pairings, a Custom row, Text size and Density"
   />
 </Frame>
 
@@ -77,23 +77,32 @@ If you set an exact body line height or **Vertical spacing** in Advanced that do
   <Step title="Choose a heading font">Do the same under **Heading**.</Step>
 </Steps>
 
-<Frame caption="Searching the body font list in Advanced → Typography">
+<Frame caption="Search fonts by name">
   <img
     src="/images/guides/customizing-typography/font-family-search.webp"
-    alt="The Typography editor with the body Font family picker open, the search box containing Merri, and the results Merriweather and Merriweather Sans each drawn in its own font"
+    alt="Advanced Typography with the font family search filtered to Merriweather results"
   />
 </Frame>
 
-The list contains Google Fonts plus the PDF standard fonts Helvetica, Courier and Times-Roman. Fonts for Chinese, Japanese, Korean, Arabic, Hebrew and Thai text are included, and missing characters fall back to a matching Noto font so they still print.
+The list contains Google Fonts plus the PDF standard fonts Helvetica, Courier and Times-Roman. Fonts for Chinese, Japanese, Korean, Arabic, Hebrew, Thai, Indic scripts (such as Devanagari, Bengali, Tamil and Telugu), Amharic and Khmer text are included, and missing characters fall back to a matching Noto font so they still print.
+
+If none of the available fonts can draw a character, the PDF shows a question mark and leaves room for it so the following text stays readable. The export warning names the missing character. Your saved text stays unchanged, so you can choose another font or edit the character and export again.
+
+<Frame caption="An unavailable symbol prints as a question mark without overlapping the following text">
+  <img
+    src="/images/guides/customizing-typography/font-replacement.png"
+    alt="Fictional Avery Morgan resume with three question marks in place of unavailable symbols and readable text after them"
+  />
+</Frame>
 
 ### Exact typography settings
 
 **Advanced → Typography** has the same fields for **Body** and **Heading**, plus one **Hyphenation** switch for both:
 
-<Frame caption="The body fields in Advanced → Typography">
+<Frame caption="Exact typography controls for body and headings">
   <img
     src="/images/guides/customizing-typography/advanced-typography.webp"
-    alt="The Typography editor's Body fields: Font family set to Source Sans 3, Font weights set to 400, 700, and Font size set to 10 pt"
+    alt="Advanced Typography with Body and Heading font families, weights, sizes, line heights and Hyphenation"
   />
 </Frame>
 

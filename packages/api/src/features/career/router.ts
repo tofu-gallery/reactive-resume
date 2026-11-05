@@ -1,37 +1,77 @@
 import z from "zod";
+import { aiOperationIdsSchema } from "@reactive-resume/schema/ai-usage";
 import {
 	careerFactInputSchema,
+	careerFactCorrectionSchema,
+	resumeFactProposalSchema,
+	resumeFactsReviewSchema,
+	careerOfferInputSchema,
 	careerProfileDataSchema,
+	careerProfileUpdateSchema,
 	careerScheduleInputSchema,
 	careerScopeSchema,
 	careerStoryInputSchema,
 	careerWorkspaceSchema,
 	generateTaskSchema,
+	memoryModeSchema,
+	roleSuggestionsInputSchema,
+	roleSuggestionsOutputSchema,
+	offerTermsSchema,
 } from "@reactive-resume/schema/career";
 import { protectedProcedure } from "../../context";
+import { savedStagesSchema } from "../../dto/application";
 import {
 	careerFactSchema,
 	careerNotificationSchema,
 	careerOpportunitySchema,
+	careerScheduleListItemSchema,
 	careerScheduleSchema,
 	careerStorySchema,
 	savedItemSchema,
 } from "../../dto/career";
 import { aiRequestRateLimit } from "../../middleware/rate-limit";
 import { searchScope } from "../web-access/regions";
+import { answerRouter } from "./answer-router";
 import { generateCareer } from "./generate";
 import { careerJobs } from "./jobs";
-import { careerService } from "./service";
+import { suggestTargetRoles } from "./role-suggestions";
+import { careerService, hasFitEvidence } from "./service";
 import { careerVoiceRouter } from "./voice";
 
 const id = z.object({ id: z.string().min(1) });
 const applicationInput = z.object({ applicationId: z.string().min(1) });
 const savedItemOutput = savedItemSchema.extend({
-	application: z.object({ company: z.string(), role: z.string() }).nullable(),
+	application: z
+		.object({
+			company: z.string(),
+			role: z.string(),
+			status: z.string().nullable().optional(),
+			closedReason: z.string().nullable().optional(),
+		})
+		.nullable(),
 	outdated: z.boolean(),
+	submission: z
+		.boolean()
+		.optional()
+		.describe("Answers recorded at submission, separate from generated or current drafts."),
 });
 
 export const careerRouter = {
+	suggestTargetRoles: protectedProcedure
+		.use(aiRequestRateLimit)
+		.route({
+			method: "POST",
+			path: "/career/target-roles/suggest",
+			tags: ["Career"],
+			operationId: "suggestCareerTargetRoles",
+			summary: "Suggest editable target roles",
+			description:
+				"Sends only the explicitly selected owned resume and opted-in active shared Knowledge to the selected tested AI provider. Requires recipientVersion from the disclosed aiProviders.list configuration; changed settings return CONFLICT before sending. Returns unsaved suggestions with source quotes for user review. Does not search, schedule, save evidence or apply.",
+		})
+		.input(roleSuggestionsInputSchema)
+		.output(roleSuggestionsOutputSchema)
+		.handler(({ context, input, signal }) => suggestTargetRoles(context.user.id, input, signal)),
+	answers: answerRouter,
 	voice: careerVoiceRouter,
 	schedules: protectedProcedure
 		.route({
@@ -42,7 +82,7 @@ export const careerRouter = {
 			summary: "List career schedules",
 		})
 		.input(z.object({}))
-		.output(z.array(careerScheduleSchema))
+		.output(z.array(careerScheduleListItemSchema))
 		.handler(({ context }) => careerJobs.list(context.user.id)),
 	saveSchedule: protectedProcedure
 		.route({
@@ -144,8 +184,22 @@ export const careerRouter = {
 			tags: ["Career"],
 			operationId: "saveCareerProfile",
 			summary: "Save career preferences",
+			description:
+				"Legacy full save: omitted memoryMode and searchRegions retain stored values; other omitted fields use their defaults.",
 		})
-		.input(careerProfileDataSchema)
+		.input(careerProfileDataSchema.extend({ memoryMode: memoryModeSchema.optional() }))
+		.output(careerProfileDataSchema)
+		.handler(({ context, input }) => careerService.saveProfile(context.user.id, input)),
+	updateProfile: protectedProcedure
+		.route({
+			method: "PATCH",
+			path: "/career/profile",
+			tags: ["Career"],
+			operationId: "updateCareerProfile",
+			summary: "Update career preferences",
+			description: "Saves the supplied fields. Omitted fields keep their stored values.",
+		})
+		.input(careerProfileUpdateSchema)
 		.output(careerProfileDataSchema)
 		.handler(({ context, input }) => careerService.saveProfile(context.user.id, input)),
 	facts: protectedProcedure
@@ -164,6 +218,50 @@ export const careerRouter = {
 		)
 		.output(z.array(careerFactSchema))
 		.handler(({ context, input }) => careerService.facts({ userId: context.user.id, ...input })),
+	forgottenFacts: protectedProcedure
+		.route({
+			method: "GET",
+			path: "/career/facts/forgotten",
+			tags: ["Career"],
+			operationId: "listForgottenCareerFactCounts",
+			summary: "List redacted forgotten fact counts and timestamps",
+		})
+		.input(z.object({}))
+		.output(z.array(z.object({ count: z.number().int().positive(), at: z.date() })))
+		.handler(({ context }) => careerService.forgottenFacts(context.user.id)),
+	proposeResumeFacts: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/career/facts/resume/preview",
+			tags: ["Career"],
+			operationId: "proposeResumeFacts",
+			summary: "Review facts from an owned resume",
+			description: "Returns visible resume excerpts without saving facts or contacting an AI provider.",
+		})
+		.input(z.object({ resumeId: z.string().min(1) }))
+		.output(
+			z.object({
+				id: z.string(),
+				name: z.string(),
+				updatedAt: z.coerce.date(),
+				proposals: z.array(resumeFactProposalSchema).max(50),
+				omitted: z.number().int().nonnegative(),
+			}),
+		)
+		.handler(({ context, input }) => careerService.proposeResumeFacts(context.user.id, input.resumeId)),
+	saveResumeFacts: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/career/facts/resume/import",
+			tags: ["Career"],
+			operationId: "saveResumeFacts",
+			summary: "Save reviewed resume facts",
+			description:
+				"Atomically saves only selected facts as shared Knowledge, retaining their exact resume quotations. Rejects a changed or trashed source. Existing, corrected and switched-off Knowledge is preserved.",
+		})
+		.input(resumeFactsReviewSchema)
+		.output(z.object({ saved: z.number().int().nonnegative(), skipped: z.number().int().nonnegative() }))
+		.handler(({ context, input }) => careerService.saveResumeFacts(context.user.id, input)),
 	saveFact: protectedProcedure
 		.route({
 			method: "POST",
@@ -190,6 +288,21 @@ export const careerRouter = {
 				share: z.boolean().optional(),
 			}),
 		)
+		.output(z.void())
+		.handler(async ({ context, input }) => {
+			await careerService.updateFact(context.user.id, input);
+		}),
+	correctFact: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/career/facts/{id}/corrections",
+			tags: ["Career"],
+			operationId: "correctCareerFact",
+			summary: "Atomically correct a fact's text, type or scope",
+			description:
+				"Requires the reviewed text, category and scope. Rejects changed or forgotten facts and unavailable application scopes without saving any correction.",
+		})
+		.input(careerFactCorrectionSchema)
 		.output(z.void())
 		.handler(async ({ context, input }) => {
 			await careerService.updateFact(context.user.id, input);
@@ -245,15 +358,62 @@ export const careerRouter = {
 			tags: ["Career"],
 			operationId: "listCareerSavedItems",
 			summary: "List saved career work",
+			description:
+				"Lists all saved work by default, or one application. Use scope=shared without an applicationId for standalone practice attempts.",
 		})
 		.input(
-			z.object({
-				applicationId: z.string().min(1).optional(),
-				kind: z.enum(["fit", "briefing", "practice", "debrief", "answers", "reply", "offer"]).optional(),
-			}),
+			z
+				.object({
+					applicationId: z.string().min(1).optional(),
+					scope: z.enum(["all", "shared"]).optional(),
+					kind: z.enum(["fit", "briefing", "practice", "debrief", "answers", "reply", "offer"]).optional(),
+				})
+				.refine((input) => input.scope !== "shared" || !input.applicationId, {
+					message: "Shared work has no application.",
+					path: ["applicationId"],
+				}),
 		)
 		.output(z.array(savedItemOutput))
-		.handler(({ context, input }) => careerService.savedItems({ userId: context.user.id, ...input })),
+		.handler(({ context, input }) =>
+			careerService.savedItems({
+				userId: context.user.id,
+				...input,
+				...(input.scope === "shared" ? { applicationId: null } : {}),
+			}),
+		),
+	createOffer: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/career/offers",
+			tags: ["Career"],
+			operationId: "createCareerOffer",
+			summary: "Save manually entered offer terms",
+		})
+		.input(careerOfferInputSchema)
+		.output(savedItemSchema.nullable())
+		.handler(({ context, input }) => careerService.createOffer(context.user.id, input)),
+	updateOffer: protectedProcedure
+		.route({
+			method: "PATCH",
+			path: "/career/offers/{id}",
+			tags: ["Career"],
+			operationId: "updateCareerOffer",
+			summary: "Correct saved offer terms",
+			description:
+				"Corrects saved terms, or saves a new version when newVersion is true. `expected` is the copy being corrected; concurrent changes conflict. Supply the same newId and payload when retrying a new version after a lost response; a deleted version cannot be recreated by retrying.",
+		})
+		.input(
+			id.extend({
+				terms: offerTermsSchema,
+				expected: offerTermsSchema,
+				newVersion: z.boolean().optional(),
+				newId: z.uuid().optional(),
+			}),
+		)
+		.output(savedItemSchema)
+		.handler(({ context, input }) =>
+			careerService.updateOffer(context.user.id, input.id, input.terms, input.expected, input.newVersion, input.newId),
+		),
 	deleteSavedItem: protectedProcedure
 		.route({
 			method: "DELETE",
@@ -274,13 +434,33 @@ export const careerRouter = {
 			operationId: "generateCareerWork",
 			summary: "Generate AI work for an application",
 			description:
-				"Asks the default AI connection for one structured piece of work for an application (fit check, briefing, practice feedback, debrief review, employer message, answer draft). Everything but answer drafts is saved.",
+				"Asks the default AI connection for one structured piece of work for an application (fit check, briefing, practice feedback, debrief review, employer message, answer draft). Everything but answer drafts is saved. Practice with a shared story may use a null applicationId; other tasks require an application.",
 		})
-		.input(applicationInput.extend({ locale: z.string().max(20).default("en-US"), task: generateTaskSchema }))
+		.input(
+			applicationInput
+				.extend({
+					applicationId: z.string().min(1).nullable(),
+					locale: z.string().max(20).default("en-US"),
+					task: generateTaskSchema,
+				})
+				.refine(
+					(input) =>
+						input.applicationId !== null ||
+						(input.task.task === "practice" && Boolean(input.task.storyId) && !input.task.interviewId),
+					{ message: "Choose an application, or a shared story to practice.", path: ["applicationId"] },
+				),
+		)
 		.output(
 			z.object({
 				item: savedItemSchema.nullable(),
-				answer: z.object({ text: z.string(), factIds: z.array(z.string()) }).nullable(),
+				answer: z
+					.object({
+						text: z.string(),
+						factIds: z.array(z.string()),
+						note: z.string().nullable().default(null),
+						aiOperationIds: aiOperationIdsSchema.optional(),
+					})
+					.nullable(),
 			}),
 		)
 		.handler(({ context, input, signal }) =>
@@ -294,9 +474,59 @@ export const careerRouter = {
 			operationId: "applyCareerReply",
 			summary: "Apply suggested changes from a message",
 		})
-		.input(id.extend({ changes: z.array(z.number().int().min(0)).max(4) }))
-		.output(z.void())
-		.handler(({ context, input }) => careerService.applyReply(context.user.id, input.id, input.changes)),
+		.input(
+			id.extend({
+				changes: z.array(z.number().int().min(0)).max(4),
+				/** Present when the user confirmed "Mark as applied" inline, so the receipt and stage move commit together. */
+				submission: z
+					.object({
+						answers: careerWorkspaceSchema.shape.answers,
+						expectedAnswers: careerWorkspaceSchema.shape.answers,
+						expectedDocuments: z.object({
+							resumeId: z.string().nullable(),
+							coverLetterId: z.string().nullable(),
+						}),
+					})
+					.optional(),
+			}),
+		)
+		.output(
+			z.object({
+				stages: savedStagesSchema.describe(
+					"The stage this call saved, with its stage-write ID. Empty on repeats or when no stage changed.",
+				),
+			}),
+		)
+		.handler(({ context, input }) =>
+			careerService.applyReply(context.user.id, input.id, input.changes, input.submission),
+		),
+	fitEvidence: protectedProcedure
+		.route({
+			method: "GET",
+			path: "/career/fit-evidence/{applicationId}",
+			tags: ["Career"],
+			operationId: "getCareerFitEvidence",
+			summary: "Check whether Fit has usable evidence",
+		})
+		.input(applicationInput)
+		.output(z.object({ usable: z.boolean() }))
+		.handler(async ({ context, input }) => ({
+			usable: hasFitEvidence(await careerService.context({ userId: context.user.id, ...input })),
+		})),
+
+	undoReply: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/career/saved/{id}/undo",
+			tags: ["Career"],
+			operationId: "undoCareerReply",
+			summary: "Undo changes applied from a message",
+			description:
+				"Restores the application fields the changes set and removes the offer they saved, while nothing has changed them since. Sent document versions stay recorded.",
+		})
+		.input(id)
+		.output(z.object({ stages: savedStagesSchema }))
+		.handler(({ context, input }) => careerService.undoReply(context.user.id, input.id)),
 	workspace: protectedProcedure
 		.route({
 			method: "GET",
@@ -318,12 +548,29 @@ export const careerRouter = {
 		})
 		.input(
 			applicationInput
-				.extend(careerWorkspaceSchema.partial().shape)
-				.extend({ expected: careerWorkspaceSchema.partial() }),
+				.extend(careerWorkspaceSchema.omit({ submissionReview: true }).partial().shape)
+				.extend({ expected: careerWorkspaceSchema.omit({ submissionReview: true }).partial() }),
 		)
 		.output(careerWorkspaceSchema)
 		.handler(({ context, input: { applicationId, expected, ...patch } }) =>
 			careerService.saveWorkspace(context.user.id, applicationId, patch, expected),
+		),
+	deleteWorkspaceAnswer: protectedProcedure
+		.route({
+			method: "DELETE",
+			path: "/career/workspace/{applicationId}/answers/{id}",
+			tags: ["Career"],
+			operationId: "deleteCareerWorkspaceAnswer",
+			summary: "Remove one unchanged workspace answer",
+			description:
+				"Removes only the answer matching the supplied previous value. Other answers, workspace fields and submitted history remain unchanged. Repeating an already completed removal is safe.",
+		})
+		.input(
+			applicationInput.extend({ id: z.string().min(1).max(64), expected: careerWorkspaceSchema.shape.answers.element }),
+		)
+		.output(careerWorkspaceSchema)
+		.handler(({ context, input }) =>
+			careerService.deleteWorkspaceAnswer(context.user.id, input.applicationId, input.id, input.expected),
 		),
 	submitApplication: protectedProcedure
 		.route({
@@ -337,11 +584,26 @@ export const careerRouter = {
 			applicationInput.extend({
 				answers: careerWorkspaceSchema.shape.answers,
 				expectedAnswers: careerWorkspaceSchema.shape.answers,
+				expectedDocuments: z
+					.object({ resumeId: z.string().nullable(), coverLetterId: z.string().nullable() })
+					.optional(),
 			}),
 		)
-		.output(z.void())
+		.output(
+			z.object({
+				stages: savedStagesSchema.describe(
+					"The stage this call saved on submission, with its stage-write ID. Empty on accepted retries.",
+				),
+			}),
+		)
 		.handler(({ context, input }) =>
-			careerService.submitApplication(context.user.id, input.applicationId, input.answers, input.expectedAnswers),
+			careerService.submitApplication(
+				context.user.id,
+				input.applicationId,
+				input.answers,
+				input.expectedAnswers,
+				input.expectedDocuments,
+			),
 		),
 	snapshotAnswers: protectedProcedure
 		.route({
@@ -350,7 +612,8 @@ export const careerRouter = {
 			tags: ["Career"],
 			operationId: "snapshotCareerAnswers",
 			summary: "Save the answers sent with an application",
-			description: "Saves the workspace's answers as sent, after the application is marked as applied.",
+			description:
+				"Saves unchanged pre-submission answers as sent. Rejects later workspace edits; use submitCareerApplication to record answers and submission atomically.",
 		})
 		.input(applicationInput)
 		.output(z.void())

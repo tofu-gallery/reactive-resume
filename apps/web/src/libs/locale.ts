@@ -3,9 +3,17 @@ import type { Locale } from "@reactive-resume/utils/locale";
 import { i18n } from "@lingui/core";
 import { msg } from "@lingui/core/macro";
 import Cookies from "js-cookie";
-import { defaultLocale, isLocale } from "@reactive-resume/utils/locale";
+import {
+	defaultLocale,
+	getPreferredLocale,
+	isLocale,
+	localeSchema,
+	localizedUrl,
+	supportedLocales,
+} from "@reactive-resume/utils/locale";
 
 const storageKey = "locale";
+const persistLocale = (locale: Locale) => Cookies.set(storageKey, locale, { expires: 365, path: "/", sameSite: "lax" });
 const messageLoaders = import.meta.glob<{ messages: Messages }>("../../locales/*.po");
 const relativeTimeDivisions: Array<{ amount: number; unit: Intl.RelativeTimeFormatUnit }> = [
 	{ amount: 31_536_000_000, unit: "year" },
@@ -74,24 +82,28 @@ export const localeMap = {
 	"zu-ZA": msg`Zulu`,
 } satisfies Record<Locale, MessageDescriptor>;
 
+export const selectableLocales = import.meta.env.DEV ? localeSchema.options : supportedLocales;
+
 export const resolveLocale = (locale: string): Locale => {
-	return isLocale(locale) ? locale : defaultLocale;
+	return isLocale(locale) && selectableLocales.includes(locale) ? locale : defaultLocale;
 };
 
 // Changing the locale reloads the page (`changeLocale`), so one formatter per locale is enough.
 const relativeTimeFormatters = new Map<string, Intl.RelativeTimeFormat>();
 
-function getRelativeTimeFormatter(locale: string) {
-	let formatter = relativeTimeFormatters.get(locale);
+function getRelativeTimeFormatter(locale: string, style: Intl.RelativeTimeFormatStyle = "long") {
+	const key = `${locale}:${style}`;
+	let formatter = relativeTimeFormatters.get(key);
 	if (!formatter) {
-		formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
-		relativeTimeFormatters.set(locale, formatter);
+		formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto", style });
+		relativeTimeFormatters.set(key, formatter);
 	}
 	return formatter;
 }
 
-export function formatRelativeTime(value: Date | string, locale: string) {
-	const formatter = getRelativeTimeFormatter(locale);
+/** "20 minutes ago"; with `short`, "20 min. ago", for narrow places such as a document card. */
+export function formatRelativeTime(value: Date | string, locale: string, style: Intl.RelativeTimeFormatStyle = "long") {
+	const formatter = getRelativeTimeFormatter(locale, style);
 	const date = value instanceof Date ? value : new Date(value);
 	const diffMs = date.getTime() - Date.now();
 	if (Number.isNaN(diffMs)) return formatter.format(0, "second");
@@ -103,17 +115,23 @@ export function formatRelativeTime(value: Date | string, locale: string) {
 		: formatter.format(0, "second");
 }
 
-export const getLocale = () => {
+export const hasLocalePreference = () =>
+	isLocale(new URLSearchParams(window.location.search).get(storageKey)) || Cookies.get(storageKey) !== undefined;
+
+export const getLocale = (accountLocale?: unknown) => {
 	// A `?locale=` address (the homepage's hreflang alternates) picks the language and keeps it, like the switcher.
 	const requested = new URLSearchParams(window.location.search).get(storageKey);
 	if (isLocale(requested)) {
-		Cookies.set(storageKey, requested);
-		return requested;
+		const locale = resolveLocale(requested);
+		persistLocale(locale);
+		return locale;
 	}
 
-	const locale = Cookies.get(storageKey);
-	if (!locale || !isLocale(locale)) return defaultLocale;
-	return locale;
+	const saved = Cookies.get(storageKey);
+	if (saved !== undefined) return resolveLocale(saved);
+	if (isLocale(accountLocale) && selectableLocales.includes(accountLocale)) return accountLocale;
+	// Browser hints affect the app only; neither persist them nor vary shared server HTML by Accept-Language.
+	return getPreferredLocale(navigator.languages ?? []);
 };
 
 const loadMessages = async (locale: Locale) => {
@@ -138,15 +156,17 @@ export const getLocaleMessages = async (locale: string) => {
 	}
 };
 
-export const loadLocale = async (locale: string) => {
+export const loadLocale = async (locale: string, current = () => true) => {
 	// Re-activating the active locale emits "change" and re-renders every translated component.
 	if (i18n.locale === locale) return;
 	const { locale: resolvedLocale, messages } = await getLocaleMessages(locale);
-	i18n.loadAndActivate({ locale: resolvedLocale, messages });
+	if (current()) i18n.loadAndActivate({ locale: resolvedLocale, messages });
 };
 
 export const changeLocale = (value: string | null) => {
 	if (!value || !isLocale(value)) return;
-	Cookies.set(storageKey, value);
+	const locale = resolveLocale(value);
+	persistLocale(locale);
+	window.history.replaceState(window.history.state, "", localizedUrl(window.location.href, locale));
 	window.location.reload();
 };

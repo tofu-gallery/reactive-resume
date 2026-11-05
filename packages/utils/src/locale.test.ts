@@ -1,5 +1,33 @@
 import { describe, expect, it } from "vite-plus/test";
-import { getLocaleAlternates, localizedUrl } from "./locale";
+import {
+	getLocaleAlternates,
+	getPreferredLocale,
+	isLocale,
+	localeSchema,
+	localizedUrl,
+	supportedLocales,
+} from "./locale";
+
+it.each([
+	[["de-DE"], "de-DE"],
+	[["unsupported", "fr-CA", "de-DE"], "fr-FR"],
+	[["de-AT", "fr-FR"], "de-DE"],
+	[["de-de"], "de-DE"],
+	[["en-GB", "en-US"], "en-GB"],
+	[["zu-ZA", "de-DE"], "de-DE"],
+	[["zu-ZA"], "en-US"],
+	[[], "en-US"],
+])("matches ordered language preferences %j to %s", (languages, expected) => {
+	expect(getPreferredLocale(languages)).toBe(expected);
+});
+
+it("keeps the testing catalog valid without counting it as a supported translation", () => {
+	expect(isLocale("zu-ZA")).toBe(true);
+	expect(localeSchema.options).toContain("zu-ZA");
+	expect(supportedLocales).not.toContain("zu-ZA");
+	expect(supportedLocales).toContain("de-DE");
+	expect(getLocaleAlternates("https://rxresu.me/")).toHaveLength(supportedLocales.length + 1);
+});
 
 describe("locale URLs", () => {
 	it("keeps the default locale on the plain address and puts others in the locale parameter", () => {

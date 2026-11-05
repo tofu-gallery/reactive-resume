@@ -2,15 +2,30 @@ import type { CoverLetterDraftInput } from "../../dto/cover-letter";
 import { ORPCError } from "@orpc/client";
 import { streamText } from "ai";
 import { letterDraftSystemPrompt } from "@reactive-resume/ai/prompts";
+import { aiModelForTask } from "@reactive-resume/ai/task-models";
+import { initialCoverLetterLocale } from "@reactive-resume/resume/cover-letter";
 import { buildMarkdown } from "@reactive-resume/resume/markdown";
 import { aiProvidersService } from "../ai-providers/service";
 import { dataBlock } from "../ai/data-block";
 import { getModel } from "../ai/service";
-import { applicationService } from "../applications/service";
+import { createAiUsage } from "../ai/usage";
+import { applicationService, assertApplicationVersion } from "../applications/service";
+import { assertDocumentVersion } from "../documents/ownership";
 import { resumeService } from "../resume/service";
 import { coverLetterService } from "./service";
 
 type Variant = CoverLetterDraftInput["variant"];
+
+type DraftLetterInput = (
+	| CoverLetterDraftInput
+	| {
+			application: Awaited<ReturnType<typeof applicationService.getById>>;
+			resume: Awaited<ReturnType<typeof resumeService.getById>> | null;
+			variant: "draft";
+			previous?: undefined;
+			includeProvenance?: boolean;
+	  }
+) & { userId: string; signal?: AbortSignal | undefined };
 
 const REQUESTS: Record<Variant, string> = {
 	draft: "Write the body of the letter.",
@@ -20,17 +35,19 @@ const REQUESTS: Record<Variant, string> = {
 
 type PromptInput = {
 	variant: Variant;
+	locale: string;
 	job?: string | undefined;
 	posting?: string | undefined;
 	resume?: string | undefined;
 	previous?: string | undefined;
 };
 
-/** The request, the job, the posting, the resume and, for a revision, the draft being revised. */
+/** The request, the letter's language, the job, the posting, the resume and, for a revision, the draft. */
 function buildLetterDraftPrompt(input: PromptInput): string {
 	const previous = input.variant === "draft" ? undefined : input.previous?.trim();
 	return [
 		previous ? REQUESTS[input.variant] : REQUESTS.draft,
+		`## The letter's language\n\nWrite in ${input.locale}. The greeting, sign-off and date on the page are written in it too.`,
 		input.job && `## The job\n\n${input.job}`,
 		input.posting && `## The posting\n\n${dataBlock("POSTING", input.posting)}`,
 		input.resume && `## The resume\n\n${dataBlock("RESUME", input.resume)}`,
@@ -44,17 +61,22 @@ function buildLetterDraftPrompt(input: PromptInput): string {
  * Streams a draft of the letter's body from its resume and its application's posting. Nothing is saved: the client
  * shows the draft until it's kept or discarded, so a failure leaves the letter as it was.
  */
-export async function* draftLetterBody(
-	input: CoverLetterDraftInput & { userId: string; signal?: AbortSignal | undefined },
-): AsyncGenerator<string> {
+export async function draftLetterBody(
+	input: DraftLetterInput,
+): Promise<AsyncGenerator<string | { aiOperationId: string }>> {
 	const { userId } = input;
-	const letter = await coverLetterService.getById({ id: input.id, userId });
-	const [resume, application] = await Promise.all([
-		letter.sourceResumeId ? resumeService.getById({ id: letter.sourceResumeId, userId }).catch(() => null) : null,
-		letter.sourceApplicationId
-			? applicationService.getById({ id: letter.sourceApplicationId, userId }).catch(() => null)
-			: null,
-	]);
+	const letter = "id" in input ? await coverLetterService.getById({ id: input.id, userId }) : null;
+	const [resume, application] =
+		"application" in input
+			? [input.resume, input.application]
+			: await Promise.all([
+					letter?.sourceResumeId
+						? resumeService.getById({ id: letter.sourceResumeId, userId }).catch(() => null)
+						: null,
+					letter?.sourceApplicationId
+						? applicationService.getById({ id: letter.sourceApplicationId, userId }).catch(() => null)
+						: null,
+				]);
 	if (!resume && !application) {
 		throw new ORPCError("BAD_REQUEST", { message: "Link the letter to a resume or an application first." });
 	}
@@ -67,21 +89,39 @@ export async function* draftLetterBody(
 	const posting =
 		application?.jobDescription?.trim() ||
 		(application?.requirements.length ? application.requirements.map((item) => `- ${item}`).join("\n") : undefined);
+	const usage = createAiUsage(userId, "draft-letter", provider, async (tx) => {
+		if (letter) await assertDocumentVersion(tx, userId, { kind: "letter", ...letter });
+		if (resume) await assertDocumentVersion(tx, userId, { kind: "resume", ...resume });
+		if (application) await assertApplicationVersion(tx, userId, application);
+	});
+	const model = getModel({
+		usage,
+		provider: provider.provider,
+		model: aiModelForTask(provider, "capable"),
+		apiKey: provider.apiKey,
+		...(provider.baseURL ? { baseURL: provider.baseURL } : {}),
+	});
+	const prompt = buildLetterDraftPrompt({
+		variant: input.variant,
+		locale:
+			letter?.style.metadata.page.locale ??
+			initialCoverLetterLocale(application?.postingSource?.language, resume?.data.metadata.page.locale),
+		job: application ? `${application.role} at ${application.company}` : undefined,
+		posting,
+		resume: resume ? buildMarkdown(resume.data) : undefined,
+		previous: input.previous,
+	});
+	await aiProvidersService.authorize({ userId, id: provider.id }, async (tx) => {
+		if (letter) await assertDocumentVersion(tx, userId, { kind: "letter", ...letter });
+		if (resume) await assertDocumentVersion(tx, userId, { kind: "resume", ...resume });
+		if (application) await assertApplicationVersion(tx, userId, application);
+	});
+	input.signal?.throwIfAborted();
 	const result = streamText({
-		model: getModel({
-			provider: provider.provider,
-			model: provider.model,
-			apiKey: provider.apiKey,
-			...(provider.baseURL ? { baseURL: provider.baseURL } : {}),
-		}),
+		model,
+		prompt,
 		system: letterDraftSystemPrompt,
-		prompt: buildLetterDraftPrompt({
-			variant: input.variant,
-			job: application ? `${application.role} at ${application.company}` : undefined,
-			posting,
-			resume: resume ? buildMarkdown(resume.data) : undefined,
-			previous: input.previous,
-		}),
+		maxRetries: 0,
 		...(input.signal ? { abortSignal: input.signal } : {}),
 	});
 
@@ -93,13 +133,17 @@ export async function* draftLetterBody(
 			cause,
 		});
 
-	try {
-		for await (const part of result.stream) {
-			if (part.type === "text-delta") yield part.text;
-			else if (part.type === "error") throw unreachable(part.error);
+	// Resolve and authorize inside the request scope; oRPC iterates the result after that scope has ended.
+	return (async function* () {
+		try {
+			if (input.includeProvenance) yield { aiOperationId: usage.operationId };
+			for await (const part of result.stream) {
+				if (part.type === "text-delta") yield part.text;
+				else if (part.type === "error") throw unreachable(part.error);
+			}
+		} catch (error) {
+			if (input.signal?.aborted) return;
+			throw error instanceof ORPCError ? error : unreachable(error);
 		}
-	} catch (error) {
-		if (input.signal?.aborted) return;
-		throw error instanceof ORPCError ? error : unreachable(error);
-	}
+	})();
 }

@@ -88,6 +88,10 @@ export type RawExtraction = {
 	pageCount: number;
 	/** True when only the first N pages were harvested. */
 	truncated: boolean;
+	/** A page's text could not be read; absent in older extraction receipts. */
+	textReadFailed?: boolean;
+	/** A page's links could not be read; absent in older extraction receipts. */
+	annotationReadFailed?: boolean;
 	pages: readonly RawPage[];
 	fonts: readonly RawFont[];
 	links: readonly RawLinkAnnotation[];
@@ -114,6 +118,8 @@ type BoundingBox = { x: number; y: number; width: number; height: number };
 
 export type TextSpan = BoundingBox & {
 	text: string;
+	/** An explicit text-layer separator ending here; it does not occupy the column gutter. */
+	spaceBefore?: boolean;
 	fontRef: string;
 	fontSize: number;
 	/** Index of the source item in the page's stream order. */
@@ -163,6 +169,8 @@ export type PageGeometry = {
 };
 
 export type ExtractedDocument = {
+	/** Standard PDF link targets remain available when displayed contact text wraps. */
+	links?: readonly RawLinkAnnotation[];
 	pages: readonly PageGeometry[];
 	/** All lines across all pages, in geometric reading order. */
 	lines: readonly TextLine[];
@@ -356,6 +364,8 @@ export type JdTermMatch = {
 	jdCount: number;
 	resumeCount: number;
 	weight: number;
+	/** A name the curated skill list knows ("Figma", "SQL"): one that belongs in Skills as it is. */
+	skill?: boolean;
 };
 
 export type JdMatchReport = {

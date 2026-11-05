@@ -1,4 +1,5 @@
 import type { WriteSection } from "./model";
+import type { DndLabel } from "@/libs/dnd";
 import type { SectionType } from "@reactive-resume/schema/resume/data";
 import type { KeyboardEvent, ReactNode } from "react";
 import { useSortable } from "@dnd-kit/sortable";
@@ -31,9 +32,10 @@ import { cn } from "@reactive-resume/utils/style";
 import { pendingProposals } from "../proposals/proposals";
 import { useEditorStore } from "../store";
 import { addEntryTo } from "./actions";
-import { countEntriesToCheck, getEntries, getSectionObject } from "./model";
+import { countEntriesToCheck, getEntries, getSectionObject, isDraftEntry } from "./model";
 import { IconPicker } from "@/components/input/icon-picker";
 import { useCurrentBuilderResumeSelector, useResumeStore, useUpdateResumeData } from "@/features/resume/builder/draft";
+import { undoToast } from "@/features/resume/builder/undo-toast";
 import { usePrompt } from "@/hooks/use-confirm";
 import { DRAG_SETTLE } from "@/libs/motion";
 import { getSectionTitle } from "@/libs/resume/section";
@@ -49,6 +51,8 @@ export function useSectionTitle(section: WriteSection) {
 type SectionRowProps = {
 	section: WriteSection;
 	locked: boolean;
+	/** The page and column the row prints in, read out while it's dragged. */
+	dragGroup?: string | undefined;
 	/** ⌥↑ / ⌥↓ on the focused title. Hidden sections sit outside the print order, so they have none. */
 	onMove?: ((direction: "up" | "down") => void) | undefined;
 	children: ReactNode;
@@ -58,10 +62,16 @@ type SectionRowProps = {
  * An outline row: drag handle, title (opens the section), entry count, the eye (hidden sections keep their
  * content but aren't printed), the chevron and the ⋯ menu. Open, it shows the section's entries.
  */
-export function SectionRow({ section, locked, onMove, children }: SectionRowProps) {
+export function SectionRow({ section, locked, dragGroup, onMove, children }: SectionRowProps) {
 	const title = useSectionTitle(section);
 	const hidden = useCurrentBuilderResumeSelector((resume) => getSectionObject(resume.data, section)?.hidden ?? false);
 	const count = useCurrentBuilderResumeSelector((resume) => getEntries(resume.data, section).length);
+	// Every entry hidden or still a draft: the section is "shown" but prints nothing.
+	const printsNothing = useCurrentBuilderResumeSelector((resume) => {
+		if (section.kind === "summary") return false;
+		const entries = getEntries(resume.data, section);
+		return entries.length > 0 && entries.every((entry) => entry.hidden || isDraftEntry(section.type, entry));
+	});
 	// Dates read from text that wasn't exact ask for a look (they print as typed until then).
 	const toCheck = useCurrentBuilderResumeSelector((resume) => countEntriesToCheck(getEntries(resume.data, section)));
 	const proposed = useProposedCount(section.id);
@@ -70,6 +80,7 @@ export function SectionRow({ section, locked, onMove, children }: SectionRowProp
 	const updateResumeData = useUpdateResumeData();
 	const { setNodeRef, transform, transition, isDragging, attributes, listeners } = useSortable({
 		id: section.id,
+		data: { label: title, group: dragGroup } satisfies DndLabel,
 		disabled: locked || hidden,
 		transition: DRAG_SETTLE,
 	});
@@ -100,13 +111,13 @@ export function SectionRow({ section, locked, onMove, children }: SectionRowProp
 				isDragging && "z-10 bg-raised shadow-e2",
 			)}
 		>
-			<div className="group/row flex h-11 items-center gap-0.5 rounded-lg pe-1 hover:bg-hover">
+			<div className="group/row @container flex h-11 items-center gap-0.5 rounded-lg pe-1 hover:bg-hover">
 				<button
 					type="button"
 					aria-label={t`Reorder ${title}`}
 					disabled={locked || hidden}
 					className={cn(
-						"flex h-11 w-7 shrink-0 cursor-grab items-center justify-center text-ink-3 active:cursor-grabbing disabled:cursor-default",
+						"flex h-11 w-7 shrink-0 cursor-grab items-center justify-center text-ink-3 active:cursor-grabbing disabled:cursor-default pointer-coarse:w-11",
 						hidden && "opacity-40",
 					)}
 					{...attributes}
@@ -121,7 +132,7 @@ export function SectionRow({ section, locked, onMove, children }: SectionRowProp
 					onClick={() => setOpen(section.id, !open)}
 					onKeyDown={onTitleKeyDown}
 					className={cn(
-						"min-w-0 flex-1 truncate rounded-md py-1 text-start text-sm font-medium",
+						"min-w-0 flex-1 truncate rounded-md py-1 text-start text-sm font-medium pointer-coarse:h-11",
 						hidden && "text-ink-3 line-through",
 					)}
 				>
@@ -129,9 +140,20 @@ export function SectionRow({ section, locked, onMove, children }: SectionRowProp
 				</button>
 
 				{proposed > 0 && (
+					// In a narrow column the badge is just the number, so the section's name stays readable.
 					<Badge variant="accent" className="shrink-0">
-						<Plural value={proposed} one="# proposed" other="# proposed" />
+						<span aria-hidden="true" className="@[18rem]:hidden">
+							{proposed}
+						</span>
+						<span className="sr-only @[18rem]:not-sr-only">
+							<Plural value={proposed} one="# proposed" other="# proposed" />
+						</span>
 					</Badge>
+				)}
+				{printsNothing && !hidden && (
+					<span className="max-@[16rem]:sr-only shrink-0 truncate text-xs text-ink-3">
+						<Trans>Not on the page</Trans>
+					</span>
 				)}
 				{toCheck > 0 && (
 					<Badge variant="warn" className="shrink-0">
@@ -140,7 +162,7 @@ export function SectionRow({ section, locked, onMove, children }: SectionRowProp
 				)}
 				{section.kind !== "summary" && (
 					<span className="px-1 font-mono text-xs text-ink-3">
-						<span aria-hidden="true">{count}</span>
+						<span aria-hidden="true">{i18n.number(count)}</span>
 						<span className="sr-only">{plural(count, { one: "# entry", other: "# entries" })}</span>
 					</span>
 				)}
@@ -158,7 +180,9 @@ export function SectionRow({ section, locked, onMove, children }: SectionRowProp
 					icon="caret-down"
 					label={open ? t`Close ${title}` : t`Open ${title}`}
 					size="icon-sm"
-					className={cn("text-ink-2 transition-transform duration-standard ease-enter", open && "rotate-180")}
+					// Keep the panel's timing above the primitive's duration-quick utility.
+					className={cn("text-ink-2 transition-transform ease-enter", open && "rotate-180")}
+					style={{ transitionDuration: open ? "var(--d2)" : "calc(var(--d2) * 0.7)" }}
 					onClick={() => setOpen(section.id, !open)}
 				/>
 				{!locked && <SectionMenu section={section} title={title} onMove={onMove} />}
@@ -192,9 +216,6 @@ function SectionMenu({ section, title, onMove }: SectionMenuProps) {
 			},
 			{ newStep: true },
 		);
-
-	const undoToast = (description: string) =>
-		toast.add({ description, actionProps: { children: t`Undo`, onClick: () => useResumeStore.getState().undo() } });
 
 	const isSkills = section.type === "skills";
 	const canSort = section.type === "experience" || section.type === "education";
@@ -232,23 +253,42 @@ function SectionMenu({ section, title, onMove }: SectionMenuProps) {
 	const rename = async () => {
 		const next = await prompt(t`Rename section`, {
 			description: t`Leave it empty to use the original title.`,
-			defaultValue: settings.title,
+			// The title as shown, also for a built-in section that keeps its default name.
+			defaultValue: title,
+			confirmText: t`Rename`,
 		});
-		if (next === null || next === settings.title) return;
+		if (next === null || next === settings.title || next === title) return;
 		edit((target) => {
 			target.title = next;
 		});
 	};
 
 	const reset = () => {
+		const before = "items" in settings ? { items: settings.items } : { content: settings.content };
 		edit((target) => {
 			if ("items" in target) target.items = [];
 			else target.content = "";
 		});
-		undoToast(t`${title} cleared`);
+		undoToast(t`${title} cleared`, {
+			// Later edits came after the clear: put the entries back if the section is still empty.
+			restore: () => {
+				const data = useResumeStore.getState().resume?.data;
+				const target = data ? getSectionObject(data, section) : undefined;
+				const empty = target ? ("items" in target ? target.items.length === 0 : !target.content) : false;
+				if (!empty) return false;
+				edit((draft) => {
+					if ("items" in draft && "items" in before) draft.items = structuredClone(before.items) as typeof draft.items;
+					else if ("content" in draft && "content" in before) draft.content = before.content;
+				});
+				return true;
+			},
+		});
 	};
 
 	const remove = () => {
+		const data = useResumeStore.getState().resume?.data;
+		const custom = data?.customSections.find((item) => item.id === section.id);
+		const places = layoutPlaces(data?.metadata.layout.pages ?? [], section.id);
 		updateResumeData(
 			(draft) => {
 				draft.customSections = draft.customSections.filter((custom) => custom.id !== section.id);
@@ -259,7 +299,21 @@ function SectionMenu({ section, title, onMove }: SectionMenuProps) {
 			},
 			{ newStep: true },
 		);
-		undoToast(t`${title} deleted`);
+		undoToast(t`${title} deleted`, {
+			// Later edits came after the delete: add the section back where it was.
+			restore: () => {
+				const data = useResumeStore.getState().resume?.data;
+				if (!custom || !data || data.customSections.some((item) => item.id === custom.id)) return false;
+				updateResumeData(
+					(draft) => {
+						draft.customSections.push(structuredClone(custom));
+						restoreToLayout(draft.metadata.layout.pages, custom.id, places);
+					},
+					{ newStep: true },
+				);
+				return true;
+			},
+		});
 	};
 
 	return (
@@ -420,5 +474,43 @@ const NONE: readonly never[] = [];
 function useProposedCount(sectionId: string) {
 	const proposals = useEditorStore((state) => (state.assistantOpen ? state.assistantProposals : NONE));
 	const data = useCurrentBuilderResumeSelector((resume) => resume.data);
-	return pendingProposals(data, proposals, sectionId).length;
+	const applications = useResumeStore((state) => state.proposalApplications);
+	return pendingProposals(data, proposals, sectionId, applications).length;
+}
+
+type LayoutPage = { fullWidth: boolean; main: string[]; sidebar: string[] };
+type LayoutPlace = { main: number; sidebar: number; others: string[]; pageCount: number };
+
+/** Where a section sits on each page, with the sections it shares that page with, to find the page again later. */
+function layoutPlaces(pages: LayoutPage[], id: string): LayoutPlace[] {
+	return pages.map((page) => ({
+		main: page.main.indexOf(id),
+		sidebar: page.sidebar.indexOf(id),
+		others: [...page.main, ...page.sidebar].filter((other) => other !== id),
+		pageCount: pages.length,
+	}));
+}
+
+/**
+ * Puts a restored section back where it was: its column and place, on the page that still holds the sections it
+ * shared it with (pages deleted or reordered since shift indexes). A page made full width since takes it in its main
+ * column; a page that can't be found leaves it at the end of the last page.
+ */
+function restoreToLayout(pages: LayoutPage[], id: string, places: LayoutPlace[]) {
+	let placed = false;
+	places.forEach((place, index) => {
+		if (place.main === -1 && place.sidebar === -1) return;
+		const byNeighbours = pages.find((page) =>
+			place.others.some((other) => [...page.main, ...page.sidebar].includes(other)),
+		);
+		// A page it had to itself is known only by position, which holds while the page count hasn't changed.
+		const page =
+			byNeighbours ?? (place.others.length === 0 && pages.length === place.pageCount ? pages[index] : undefined);
+		if (!page) return;
+		if (place.sidebar !== -1 && !page.fullWidth)
+			page.sidebar.splice(Math.min(place.sidebar, page.sidebar.length), 0, id);
+		else page.main.splice(Math.min(place.main === -1 ? page.main.length : place.main, page.main.length), 0, id);
+		placed = true;
+	});
+	if (!placed) pages.at(-1)?.main.push(id);
 }

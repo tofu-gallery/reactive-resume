@@ -2,13 +2,18 @@ import type { Kind, Lead, Schedule } from "./schedule-sheet";
 import type { RouterOutput } from "@/libs/orpc/client";
 import type { IconName } from "@reactive-resume/ui/components/icon";
 import type { Ref } from "react";
-import { t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural, t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useRouter } from "@tanstack/react-router";
+import { Link, useRouteContext, useRouter } from "@tanstack/react-router";
 import { AnimatePresence } from "motion/react";
 import { useRef, useState } from "react";
+import { latestOfferHints } from "@reactive-resume/schema/applications/next-step";
+import { upcomingApplicationEvents } from "@reactive-resume/schema/applications/upcoming";
+import { interviewPreparationDue } from "@reactive-resume/schema/career-practice";
 import { Button } from "@reactive-resume/ui/components/button";
+import { EmptyState } from "@reactive-resume/ui/components/empty-state";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { IconButton } from "@reactive-resume/ui/components/icon-button";
 import { Skeleton } from "@reactive-resume/ui/components/skeleton";
@@ -17,17 +22,22 @@ import { toast } from "@reactive-resume/ui/components/toast";
 import { getInitials } from "@reactive-resume/utils/string";
 import { cn } from "@reactive-resume/utils/style";
 import { CareerLoadError } from "./load-state";
+import { PrepareNow } from "./prepare-now";
 import { rollForward, ScheduleSheet, scheduleKind } from "./schedule-sheet";
-import { CollapseRow, Eyebrow, flash, InfoChip, Swap, useCareerTime, useNow, withUndo } from "./shared";
+import { CollapseRow, Eyebrow, flash, InfoChip, Swap, useCareerTime, useNow, withQueryUndo } from "./shared";
+import { formatDuration, interviewKindOf } from "@/features/applications/interviews";
 import {
-	collectInterviews,
-	formatDuration,
-	interviewKindOf,
-	upcomingInterviews,
-} from "@/features/applications/interviews";
+	compareNextStepSortKeys,
+	describeNextStep,
+	getNextStep,
+	needsAttention,
+	nextStepSortKey,
+} from "@/features/applications/next-step";
+import { offerHintFor, savedOffersQueryOptions, useOfferHints } from "@/features/applications/queries";
 import { applicationsListQueryOptions } from "@/features/applications/queries";
+import { useSaveTimezone } from "@/features/settings/use-save-timezone";
 import { toastError } from "@/libs/error-message";
-import { orpc } from "@/libs/orpc/client";
+import { client, orpc, prepareRpc } from "@/libs/orpc/client";
 
 type Notification = RouterOutput["career"]["notifications"][number];
 type Opportunity = RouterOutput["career"]["opportunities"][number];
@@ -39,23 +49,22 @@ type TodayPageProps = { schedule: string | undefined; onScheduleChange: (schedul
  * Below 1024px it's one column: Coming up, Needs you, New roles, Schedules.
  */
 export function TodayPage({ schedule, onScheduleChange }: TodayPageProps) {
+	const { session } = useRouteContext({ strict: false });
 	const now = useNow();
 	const rolesRef = useRef<HTMLElement>(null);
+	const queryClient = useQueryClient();
 	// Deleted schedules stay hidden locally until the Undo toast closes; any mutation refetches every query.
 	const [deleted, setDeleted] = useState<string[]>([]);
-	const remove = useMutation({
-		...orpc.career.deleteSchedule.mutationOptions(),
-		onError: (error, { id }) => {
-			setDeleted((current) => current.filter((item) => item !== id));
-			toastError(error, t`Couldn't delete this schedule. Try again.`, { allowServerMessage: true });
-		},
-	});
+
 	const deleteSchedule = (id: string) => {
-		setDeleted((current) => [...current, id]);
-		withUndo({
+		withQueryUndo({
+			queryClient,
+			queryKey: orpc.career.schedules.key(),
 			description: t`Schedule deleted`,
-			commit: () => remove.mutate({ id }),
-			onUndo: () => setDeleted((current) => current.filter((item) => item !== id)),
+			errorMessage: t`Couldn't delete this schedule. Try again.`,
+			prepare: () => prepareRpc(client.career.deleteSchedule, { id }),
+			hide: () => setDeleted((current) => [...current, id]),
+			restore: () => setDeleted((current) => current.filter((item) => item !== id)),
 		});
 	};
 
@@ -70,6 +79,7 @@ export function TodayPage({ schedule, onScheduleChange }: TodayPageProps) {
 
 	return (
 		<div className="flex flex-col gap-6 lg:grid lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start xl:grid-cols-[minmax(0,1fr)_380px]">
+			<TimezoneNotice className="order-first lg:col-span-full" />
 			<div className="contents lg:flex lg:min-w-0 lg:flex-col lg:gap-7">
 				<NeedsYou now={now} onReview={reviewRoles} className="order-2 lg:order-none" />
 				<NewRoles
@@ -84,8 +94,41 @@ export function TodayPage({ schedule, onScheduleChange }: TodayPageProps) {
 				<ComingUp now={now} className="order-1 lg:order-none" />
 				<Schedules deleted={deleted} onOpenSchedule={onScheduleChange} className="order-4 lg:order-none" />
 			</div>
-			<ScheduleSheet schedule={schedule} onScheduleChange={onScheduleChange} onDelete={deleteSchedule} />
+			<ScheduleSheet
+				key={session?.user.id}
+				schedule={schedule}
+				onScheduleChange={onScheduleChange}
+				onDelete={deleteSchedule}
+			/>
 		</div>
+	);
+}
+
+/**
+ * When the account's timezone isn't this device's, times here carry their zone ("16:56 UTC"); this says so once and
+ * offers the device's zone in one step, as Settings → Preferences does.
+ */
+function TimezoneNotice({ className }: { className?: string }) {
+	const { timeZone, deviceTimeZone } = useCareerTime();
+	const save = useSaveTimezone();
+	const [saving, setSaving] = useState(false);
+	if (!deviceTimeZone) return null;
+	return (
+		<p className={cn("flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-ink-2", className)}>
+			<Icon name="globe-simple" size={18} className="text-ink-3" />
+			<Trans>Times here are in {timeZone}, your account's timezone.</Trans>
+			<Button
+				variant="link"
+				className="h-auto p-0 text-[13px] text-ink-2 underline"
+				disabled={saving}
+				onClick={() => {
+					setSaving(true);
+					void save(deviceTimeZone).finally(() => setSaving(false));
+				}}
+			>
+				<Trans>Use this device's timezone ({deviceTimeZone})</Trans>
+			</Button>
+		</p>
 	);
 }
 
@@ -111,7 +154,7 @@ function SectionHeading({ id, title, count, note }: SectionHeadingProps) {
 			<h2 id={id} className="text-[17px] font-semibold">
 				{title}
 			</h2>
-			{count !== undefined && <span className="font-mono text-xs font-medium text-ink-3">{count}</span>}
+			{count !== undefined && <span className="font-mono text-xs font-medium text-ink-3">{i18n.number(count)}</span>}
 			{note && <span className="ms-auto text-xs text-ink-3">{note}</span>}
 		</div>
 	);
@@ -132,42 +175,46 @@ type NeedsYouProps = { now: Date; onReview: () => void; className?: string };
 function NeedsYou({ now, onReview, className }: NeedsYouProps) {
 	const queryClient = useQueryClient();
 	const router = useRouter();
-	const { time, when, locale } = useCareerTime();
+	const { time, when, locale, timeZone } = useCareerTime();
 	const dayOffset = useDayOffset();
 	const queryKey = orpc.career.notifications.queryKey({ input: {} });
 	const { data, isError, refetch } = useQuery(orpc.career.notifications.queryOptions({ input: {} }));
 	const applicationQuery = useQuery(applicationsListQueryOptions());
 	const applications = applicationQuery.data;
+	const hints = useOfferHints();
 	const [showRead, setShowRead] = useState(false);
 	const [pending, setPending] = useState<string[]>([]);
 	const setReadAt = (id: string, readAt: Date | null) =>
 		queryClient.setQueryData(queryKey, (current) => current?.map((row) => (row.id === id ? { ...row, readAt } : row)));
-	const markRead = useMutation({
-		...orpc.career.markNotificationRead.mutationOptions(),
-		onError: (error, { id }) => {
-			setPending((current) => current.filter((item) => item !== id));
-			setReadAt(id, null);
-			toastError(error, t`Couldn't mark this as read. Try again.`, { allowServerMessage: true });
-		},
-	});
 
 	const isUnread = (row: Notification) => !row.readAt && !pending.includes(row.id);
 	const unread = data?.filter(isUnread) ?? [];
 	const read = data?.filter((row) => !isUnread(row)) ?? [];
-	const rows = showRead ? (data ?? []) : unread;
+	const rows = showRead ? (data ?? []).filter((row) => !pending.includes(row.id)) : unread;
+	// The same next-step rules as the Applications list: due follow-ups, no reply, interviews this week, offers.
+	const attention = (applications ?? [])
+		.flatMap((application) => {
+			const step = getNextStep(application, now, timeZone, offerHintFor(hints, application.id));
+			return needsAttention(step, now)
+				? [{ application, step, key: nextStepSortKey(application, now, timeZone, offerHintFor(hints, application.id)) }]
+				: [];
+		})
+		.sort((a, b) => compareNextStepSortKeys(a.key, b.key, a.application.id, b.application.id));
 
 	// Hidden at once; the server hears about it when the toast closes. The cache edit drops the sidebar count too,
 	// while `pending` keeps the row hidden through any refetch.
 	const dismiss = (row: Notification) => {
-		setPending((current) => [...current, row.id]);
-		setReadAt(row.id, new Date());
-		withUndo({
+		withQueryUndo({
+			queryClient,
+			queryKey: orpc.career.notifications.key(),
 			description: t`Marked as read`,
-			commit: () => markRead.mutate({ id: row.id }),
-			onUndo: () => {
-				setPending((current) => current.filter((id) => id !== row.id));
-				setReadAt(row.id, null);
+			errorMessage: t`Couldn't mark this as read. Try again.`,
+			prepare: () => prepareRpc(client.career.markNotificationRead, { id: row.id }),
+			hide: () => {
+				setPending((current) => [...current, row.id]);
+				setReadAt(row.id, new Date());
 			},
+			restore: () => setPending((current) => current.filter((id) => id !== row.id)),
 		});
 	};
 
@@ -196,7 +243,11 @@ function NeedsYou({ now, onReview, className }: NeedsYouProps) {
 
 	return (
 		<section aria-labelledby="needs-you" className={cn("flex flex-col gap-2.5", className)}>
-			<SectionHeading id="needs-you" title={t`Needs you`} count={data ? unread.length : undefined} />
+			<SectionHeading
+				id="needs-you"
+				title={t`Needs you`}
+				count={data && applications ? unread.length + attention.length : undefined}
+			/>
 			{isError || applicationQuery.isError ? (
 				<CareerLoadError
 					onRetry={() => {
@@ -204,11 +255,11 @@ function NeedsYou({ now, onReview, className }: NeedsYouProps) {
 						void applicationQuery.refetch();
 					}}
 				/>
-			) : !data ? (
+			) : !data || !applications ? (
 				<Skeleton className="h-40 rounded-xl" />
 			) : (
-				<Swap id={rows.length > 0 ? "list" : "empty"}>
-					{rows.length > 0 ? (
+				<Swap id={rows.length + attention.length > 0 ? "list" : "empty"}>
+					{rows.length + attention.length > 0 ? (
 						<div role="list" className="overflow-hidden rounded-xl border border-line bg-surface">
 							<AnimatePresence initial={false}>
 								{rows.map((row) => {
@@ -257,27 +308,114 @@ function NeedsYou({ now, onReview, className }: NeedsYouProps) {
 										</CollapseRow>
 									);
 								})}
+								{attention.map(({ application, step }) => {
+									const text = describeNextStep(step, application, locale, timeZone);
+									return (
+										<CollapseRow
+											key={`application-${application.id}`}
+											role="listitem"
+											className="border-t border-line first:border-t-0"
+										>
+											<div
+												role="group"
+												aria-labelledby={`attention-${application.id}`}
+												className="flex items-start gap-3.5 px-4 py-3.5 [contain-intrinsic-size:auto_96px] [content-visibility:auto]"
+											>
+												<span
+													aria-hidden="true"
+													className={cn(
+														"grid size-[34px] shrink-0 place-items-center rounded-lg",
+														text.tone === "warn" ? "bg-warn-soft text-warn-text" : "bg-accent-soft text-accent-text",
+													)}
+												>
+													<Icon name={text.icon} size={20} />
+												</span>
+												<div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-3 gap-y-2">
+													<div className="grid min-w-0 flex-1 basis-56 gap-0.5">
+														<p id={`attention-${application.id}`} className="text-sm leading-5 font-semibold">
+															{text.title}
+														</p>
+														{text.sub && <p className="text-[13px] leading-[19px] text-ink-2">{text.sub}</p>}
+														<p className="mt-0.5 text-xs text-ink-3">
+															{application.company} · {application.role}
+														</p>
+													</div>
+													<Button
+														variant="secondary"
+														nativeButton={false}
+														className="h-8 px-3 text-[13px]"
+														render={
+															<Link
+																to="/dashboard/applications/$applicationId/{-$tab}"
+																params={{
+																	applicationId: application.id,
+																	tab: step.kind === "interview" ? "prepare" : "messages",
+																}}
+															/>
+														}
+													>
+														<Trans>Open workspace</Trans>
+													</Button>
+												</div>
+											</div>
+										</CollapseRow>
+									);
+								})}
 							</AnimatePresence>
 						</div>
-					) : (
-						<div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed border-line-2 p-7 text-center">
-							<p className="font-display text-[22px] leading-7 font-medium">
-								<Trans>You're up to date</Trans>
-							</p>
-							<p className="max-w-[300px] text-sm text-ink-2">
-								<Trans>New roles, reminders and finished briefings appear here.</Trans>
-							</p>
-							{read.length > 0 && (
-								<Button
-									variant="ghost"
-									size="sm"
-									className="text-ink-2 underline underline-offset-3"
-									onClick={() => setShowRead(true)}
-								>
-									<Trans>Show {read.length} read</Trans>
+					) : data?.length === 0 && applications?.length === 0 ? (
+						// A new account: what Career is for, and the first three things to do.
+						<EmptyState
+							title={<Trans>Your job search starts here</Trans>}
+							description={
+								<Trans>
+									Say what you're looking for, add facts about your work, then ask the coach. New roles, reminders and
+									finished briefings appear here.
+								</Trans>
+							}
+							action={
+								<Button nativeButton={false} render={<Link to="/dashboard/career/knowledge/preferences" />}>
+									<Trans>Set your preferences</Trans>
 								</Button>
-							)}
-						</div>
+							}
+							secondary={
+								<span className="flex flex-wrap justify-center gap-2">
+									<Button
+										variant="secondary"
+										nativeButton={false}
+										render={<Link to="/dashboard/career/knowledge/facts" />}
+									>
+										<Trans>Add facts</Trans>
+									</Button>
+									<Button
+										variant="secondary"
+										nativeButton={false}
+										render={
+											<Link to="/dashboard/career/coach/{-$conversationId}" params={{ conversationId: undefined }} />
+										}
+									>
+										<Trans>Ask the coach</Trans>
+									</Button>
+								</span>
+							}
+						/>
+					) : (
+						<EmptyState
+							title={<Trans>You're up to date</Trans>}
+							description={<Trans>New roles, reminders and finished briefings appear here.</Trans>}
+							secondary={
+								read.length > 0 ? (
+									<Button
+										variant="ghost"
+										size="sm"
+										className="text-ink-2 underline underline-offset-3"
+										onClick={() => setShowRead(true)}
+									>
+										<Trans>Show {i18n.number(read.length)} read</Trans>
+									</Button>
+								) : undefined
+							}
+						/>
 					)}
 				</Swap>
 			)}
@@ -307,6 +445,9 @@ function NewRoles({ ref, now, deleted, onOpenSchedule, className }: NewRolesProp
 	const [hidden, setHidden] = useState<string[]>([]);
 	const [tracked, setTracked] = useState<Tracked>({});
 	const [expanded, setExpanded] = useState(false);
+	const [selected, setSelected] = useState<string[]>([]);
+	const [bulkPending, setBulkPending] = useState(false);
+	const [bulkStatus, setBulkStatus] = useState("");
 	const invalidateRoles = () => queryClient.invalidateQueries({ queryKey: orpc.career.opportunities.key() });
 	// Callbacks live on the hooks, not on mutate(), so each of several quick calls gets its own.
 	const track = useMutation({
@@ -340,13 +481,6 @@ function NewRoles({ ref, now, deleted, onOpenSchedule, className }: NewRolesProp
 		onError: (error) =>
 			toastError(error, t`Couldn't remove it from Applications. Try again.`, { allowServerMessage: true }),
 	});
-	const dismiss = useMutation({
-		...orpc.career.dismissOpportunity.mutationOptions(),
-		onError: (error, { id }) => {
-			setHidden((current) => current.filter((item) => item !== id));
-			toastError(error, t`Couldn't hide this role. Try again.`, { allowServerMessage: true });
-		},
-	});
 
 	const visible = (rows ?? [])
 		.filter((row) => !hidden.includes(row.id) && (!row.trackedApplicationId || tracked[row.id]))
@@ -359,15 +493,45 @@ function NewRoles({ ref, now, deleted, onOpenSchedule, className }: NewRolesProp
 		schedules?.filter((schedule) => schedule.kind === "discovery" && !deleted.includes(schedule.id)) ?? [];
 	const active = discovery.find((schedule) => schedule.enabled) ?? discovery[0];
 
+	const selectable = visible.filter((row) => !row.trackedApplicationId && !tracked[row.id]);
+	const selection = selected.filter((id) => selectable.some((row) => row.id === id));
+	const bulk = async (kind: "track" | "dismiss") => {
+		if (bulkPending || !selection.length) return;
+		setBulkPending(true);
+		const failed: string[] = [];
+		// Each write takes the owner's mutex; send one at a time instead of flooding the server's queue.
+		for (const id of selection) {
+			try {
+				if (kind === "track") await client.career.trackOpportunity({ id });
+				else await client.career.dismissOpportunity({ id });
+			} catch {
+				failed.push(id);
+			}
+		}
+		const done = selection.filter((id) => !failed.includes(id));
+		setHidden((current) => [...new Set([...current, ...done])]);
+		setSelected(failed);
+		setBulkStatus(
+			failed.length
+				? t`${i18n.number(done.length)} updated; ${i18n.number(failed.length)} failed. Failed roles remain selected. Refresh or retry.`
+				: plural(done.length, { one: "# role updated.", other: "# roles updated." }),
+		);
+		await Promise.all([invalidateRoles(), queryClient.invalidateQueries({ queryKey: orpc.applications.key() })]);
+		setBulkPending(false);
+	};
+
 	const onTrack = (row: Opportunity) => track.mutate({ id: row.id });
 	const onUndoTrack = (applicationId: string) => untrack.mutate({ id: applicationId });
 
 	const onDismiss = (row: Opportunity) => {
-		setHidden((current) => [...current, row.id]);
-		withUndo({
+		withQueryUndo({
+			queryClient,
+			queryKey: orpc.career.opportunities.key(),
 			description: t`Hidden from New roles`,
-			commit: () => dismiss.mutate({ id: row.id }),
-			onUndo: () => setHidden((current) => current.filter((id) => id !== row.id)),
+			errorMessage: t`Couldn't hide this role. Try again.`,
+			prepare: () => prepareRpc(client.career.dismissOpportunity, { id: row.id }),
+			hide: () => setHidden((current) => [...current, row.id]),
+			restore: () => setHidden((current) => current.filter((id) => id !== row.id)),
 		});
 	};
 
@@ -436,6 +600,30 @@ function NewRoles({ ref, now, deleted, onOpenSchedule, className }: NewRolesProp
 				)
 			) : (
 				<div>
+					<div className="mb-3 flex flex-wrap items-center gap-2">
+						<Button
+							variant="ghost"
+							disabled={bulkPending || track.isPending}
+							onClick={() => setSelected(selection.length === selectable.length ? [] : selectable.map((row) => row.id))}
+						>
+							<Trans>Select all roles</Trans>
+						</Button>
+						<span className="text-xs">{t`${i18n.number(selection.length)} selected`}</span>
+						<Button
+							variant="secondary"
+							disabled={!selection.length || bulkPending || track.isPending}
+							onClick={() => void bulk("track")}
+						>
+							<Trans>Track selected</Trans>
+						</Button>
+						<Button
+							variant="ghost"
+							disabled={!selection.length || bulkPending || track.isPending}
+							onClick={() => void bulk("dismiss")}
+						>
+							<Trans>Dismiss selected</Trans>
+						</Button>
+					</div>
 					<AnimatePresence initial={false}>
 						{shown.map((row) => {
 							const offset = dayOffset(row.firstSeenAt, now);
@@ -451,7 +639,13 @@ function NewRoles({ ref, now, deleted, onOpenSchedule, className }: NewRolesProp
 													: t`Found ${day(row.firstSeenAt)}`
 										}
 										tracked={tracked[row.id]}
-										pending={track.isPending && track.variables?.id === row.id}
+										pending={(track.isPending && track.variables?.id === row.id) || bulkPending}
+										selected={selection.includes(row.id)}
+										onSelect={() =>
+											setSelected((current) =>
+												current.includes(row.id) ? current.filter((id) => id !== row.id) : [...current, row.id],
+											)
+										}
 										onTrack={onTrack}
 										onUndo={onUndoTrack}
 										onDismiss={onDismiss}
@@ -462,10 +656,15 @@ function NewRoles({ ref, now, deleted, onOpenSchedule, className }: NewRolesProp
 					</AnimatePresence>
 					{visible.length > shown.length && (
 						<Button variant="ghost" size="sm" className="text-ink-2" onClick={() => setExpanded(true)}>
-							<Trans>Show {visible.length - shown.length} more</Trans>
+							<Trans>Show {i18n.number(visible.length - shown.length)} more</Trans>
 						</Button>
 					)}
 				</div>
+			)}
+			{bulkStatus && (
+				<p role="status" className="text-sm">
+					{bulkStatus}
+				</p>
 			)}
 		</section>
 	);
@@ -473,6 +672,8 @@ function NewRoles({ ref, now, deleted, onOpenSchedule, className }: NewRolesProp
 
 type RoleCardProps = {
 	row: Opportunity;
+	selected: boolean;
+	onSelect: () => void;
 	found: string;
 	tracked: Tracked[string] | undefined;
 	pending: boolean;
@@ -483,16 +684,23 @@ type RoleCardProps = {
 
 const companyOf = (row: Opportunity) => row.company || new URL(row.url).hostname.replace(/^www\./, "");
 
-function RoleCard({ row, found, tracked, pending, onTrack, onUndo, onDismiss }: RoleCardProps) {
+function RoleCard({ row, found, tracked, pending, selected, onSelect, onTrack, onUndo, onDismiss }: RoleCardProps) {
 	const { matches, unknowns } = row;
+	const { when } = useCareerTime();
 	const company = companyOf(row);
-	const unknownLabels = { salary: t`Salary not listed`, office: t`Office days not stated` };
+	const unknownLabels = { salary: t`Salary not detected`, office: t`Workplace arrangement unknown` };
 	return (
 		<article
 			data-role-card
 			aria-labelledby={`role-${row.id}`}
 			className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4"
 		>
+			{!tracked && (
+				<label className="flex items-center gap-2 text-xs">
+					<input type="checkbox" checked={selected} disabled={pending} onChange={onSelect} />
+					{t`Select ${row.role}`}
+				</label>
+			)}
 			<div className="flex items-start gap-3">
 				<span
 					aria-hidden="true"
@@ -508,6 +716,29 @@ function RoleCard({ row, found, tracked, pending, onTrack, onUndo, onDismiss }: 
 				</div>
 			</div>
 			{row.snippet && <p className="text-sm leading-[21px] text-ink-2">{row.snippet}</p>}
+			<p className="text-xs text-ink-3">
+				{t`Source: ${new URL(row.url).hostname}`} · {t`Last seen in search: ${when(row.lastSeenAt)}`}
+			</p>
+			<p className="text-xs text-ink-3">
+				{row.discoverySource
+					? t`Found for “${row.discoverySource.query}”. Posting checked ${when(row.discoverySource.checkedAt)}.`
+					: t`Earlier discovery result. Search query and posting check time unknown.`}
+			</p>
+			<p className="text-xs text-ink-3">
+				<Trans>Postings can change or close. Publication date unknown; search coverage is incomplete.</Trans>
+			</p>
+			<p className="text-xs text-ink-2">
+				{matches.length
+					? t`Preference phrase matches: ${matches.join(" · ")}`
+					: t`No current target-role or location phrase matches.`}
+			</p>
+			<p className="text-xs text-ink-3">{t`Keyword overlap: ${(row.keywordOverlap ?? []).join(" · ") || t`None`}`}</p>
+			<p className="text-xs text-ink-3">
+				<Trans>
+					Phrase and keyword matches are text overlap, not verified salary, workplace or eligibility. AI fit has not
+					been assessed. Track, then open Fit for an optional assessment.
+				</Trans>
+			</p>
 			{matches.length + unknowns.length > 0 && (
 				<div className="flex flex-wrap gap-1.5">
 					{matches.map((match) => (
@@ -556,6 +787,7 @@ function RoleCard({ row, found, tracked, pending, onTrack, onUndo, onDismiss }: 
 							<Icon name="arrow-square-out" size={16} />
 						</Button>
 						<Button
+							disabled={pending}
 							variant="ghost"
 							className="ms-auto h-8 px-2.5 text-[13px] text-ink-2"
 							onClick={() => onDismiss(row)}
@@ -573,29 +805,44 @@ function RoleCard({ row, found, tracked, pending, onTrack, onUndo, onDismiss }: 
 
 type ComingUpProps = { now: Date; className?: string };
 
+/** Independent saved-item reads never block application dates; unavailable offer deadlines retain their own retry. */
 function ComingUp({ now, className }: ComingUpProps) {
-	const { format, time, relative, locale } = useCareerTime();
+	const { format, time, when, relative, locale, timeZone } = useCareerTime();
 	const applicationQuery = useQuery(applicationsListQueryOptions());
 	const applications = applicationQuery.data;
+	const offerQuery = useQuery(savedOffersQueryOptions());
 	const briefingQuery = useQuery(orpc.career.savedItems.queryOptions({ input: { kind: "briefing" } }));
 	const briefings = briefingQuery.data;
-	if (applicationQuery.isError || briefingQuery.isError)
+	if (applicationQuery.isError)
 		return (
 			<CareerLoadError
 				onRetry={() => {
 					void applicationQuery.refetch();
 					void briefingQuery.refetch();
+					void offerQuery.refetch();
 				}}
 			/>
 		);
-	if (applicationQuery.isPending || briefingQuery.isPending) return <Skeleton className="h-36 rounded-xl" />;
-	const open = (applications ?? []).filter((application) => application.status !== "closed");
-	const next = upcomingInterviews(collectInterviews(open), now)[0];
-	if (!next) return null;
+	if (applicationQuery.isPending) return <Skeleton className="h-36 rounded-xl" />;
+	const events = upcomingApplicationEvents(
+		applications ?? [],
+		offerQuery.data ? latestOfferHints(offerQuery.data) : undefined,
+		now,
+		timeZone,
+	);
+	const [next, ...later] = events.slice(0, 3);
+	const preparation = events.find((item) => item.kind === "interview" && interviewPreparationDue(item.at, now));
+	const offerError = offerQuery.isError ? <CareerLoadError onRetry={() => void offerQuery.refetch()} /> : null;
+	if (!next) return offerError;
 
-	const { application, interview, start } = next;
-	const kind = interviewKindOf(interview.kind)?.label ?? interview.kind;
-	const ready = briefings?.some((item) => item.interviewId === interview.id);
+	const { application, at: start } = next;
+	const label = (item: (typeof events)[number]) =>
+		item.kind === "offer"
+			? t`Reply to the offer`
+			: item.kind === "follow-up"
+				? t`Follow-up reminder`
+				: t`${interviewKindOf(item.interview.kind)?.label ?? item.interview.kind} interview`;
+	const ready = next.kind === "interview" && briefings?.some((item) => item.interviewId === next.interview.id);
 
 	return (
 		<section
@@ -608,13 +855,9 @@ function ComingUp({ now, className }: ComingUpProps) {
 				</span>
 			</Eyebrow>
 			<div className="flex items-start gap-3">
-				<span className="flex w-11 shrink-0 flex-col items-center rounded-lg bg-sunken py-1.5">
-					<span className="font-mono text-[11px] font-medium text-ink-3">
-						{format(start, { weekday: "short" }).toLocaleUpperCase(locale)}
-					</span>
-					<span className="font-display text-[22px] leading-[26px] font-medium">
-						{format(start, { day: "numeric" })}
-					</span>
+				<span className="flex min-w-[2.75rem] shrink-0 flex-col items-center rounded-lg bg-sunken py-1.5">
+					<span className="font-mono text-xs font-medium text-ink-3">{format(start, { weekday: "short" })}</span>
+					<span className="font-display text-[22px] leading-[26px]">{format(start, { day: "numeric" })}</span>
 				</span>
 				<div className="grid min-w-0 gap-0.5">
 					<p className="flex items-center gap-1.5 text-sm font-semibold">
@@ -623,11 +866,18 @@ function ComingUp({ now, className }: ComingUpProps) {
 							className="size-2 shrink-0 rounded-sm"
 							style={{ backgroundColor: `var(--stage-${application.status})` }}
 						/>
-						{t`${kind} interview`}
+						{label(next)}
 					</p>
 					<p className="text-[13px] text-ink-2">
-						{[application.company, time(start), formatDuration(interview.durationMinutes, locale)].join(" · ")}
+						{[
+							application.company,
+							time(start),
+							next.kind === "interview" ? formatDuration(next.interview.durationMinutes, locale) : null,
+						]
+							.filter(Boolean)
+							.join(" · ")}
 					</p>
+					{next.kind === "follow-up" && next.note && <p className="text-sm break-words text-ink-2">{next.note}</p>}
 					<p className="text-xs text-ink-3">
 						{ready ? `${relative(start, now)} · ${t`Briefing ready`}` : relative(start, now)}
 					</p>
@@ -640,13 +890,41 @@ function ComingUp({ now, className }: ComingUpProps) {
 				render={
 					<Link
 						to="/dashboard/applications/$applicationId/{-$tab}"
-						params={{ applicationId: application.id, tab: "prepare" }}
+						params={{ applicationId: application.id, tab: next.kind === "interview" ? "prepare" : "messages" }}
+						search={next.kind === "interview" ? { round: next.interview.id } : {}}
 					/>
 				}
 			>
 				<Trans>Open workspace</Trans>
 				<Icon name="arrow-right" size={18} className="rtl:-scale-x-100" />
 			</Button>
+			{later.length > 0 && (
+				<ul className="grid gap-1 border-t border-line pt-3">
+					{later.map((item) => (
+						<li key={item.key}>
+							<Link
+								to="/dashboard/applications/$applicationId/{-$tab}"
+								params={{ applicationId: item.application.id, tab: item.kind === "interview" ? "prepare" : "messages" }}
+								search={item.kind === "interview" ? { round: item.interview.id } : {}}
+								className="grid min-h-11 min-w-0 gap-0.5 rounded-sm text-[13px] hover:underline"
+							>
+								<span className="text-ink-3">{when(item.at)}</span>
+								<span className="font-medium break-words text-ink-2">{label(item)}</span>
+								<span className="truncate text-ink-3">{item.application.company}</span>
+							</Link>
+						</li>
+					))}
+				</ul>
+			)}
+			{preparation?.kind === "interview" && (
+				<PrepareNow
+					key={preparation.key}
+					applicationId={preparation.application.id}
+					interviewId={preparation.interview.id}
+					now={now}
+				/>
+			)}
+			{offerError}
 		</section>
 	);
 }
@@ -707,14 +985,24 @@ function Schedules({ deleted, onOpenSchedule, className }: SchedulesProps) {
 	const describe = (row: Schedule) => {
 		const application = applications?.find((item) => item.id === row.applicationId);
 		if (row.kind === "discovery") return row.query;
-		if (row.kind === "follow-up") return application ? `${application.company} · ${application.role}` : "";
+		if (row.kind === "follow-up")
+			return [application ? `${application.company} · ${application.role}` : "", row.query].filter(Boolean).join(" · ");
 		const interview = application?.activity.find((entry) => entry.type === "interview" && entry.id === row.interviewId);
 		const kind = interview?.type === "interview" ? (interviewKindOf(interview.kind)?.label ?? interview.kind) : null;
 		return [application?.company, kind ? t`${kind} interview` : null].filter(Boolean).join(" · ");
 	};
 
 	const status = (row: Schedule) => {
-		if (!row.intervalDays && row.lastQueuedAt) return t`Done · ${day(row.nextRunAt)}`;
+		// A one-off's queued run goes by its outcome: still running or retrying, failed after its last try, or done.
+		if (!row.intervalDays && row.lastQueuedAt) {
+			const run = row.lastRun?.status;
+			if (run === "failed") return t`Failed · ${day(row.nextRunAt)} · open to check it`;
+			if (run === "queued" || run === "running") return t`Running · ${day(row.nextRunAt)}`;
+			// A briefing refresh belongs to one interview: once it ran, it's done for that round.
+			if (row.kind === "prepare") return t`Ran ${day(row.nextRunAt)} · done for this interview`;
+			return t`Done · ${day(row.nextRunAt)}`;
+		}
+		if (row.lastRun?.status === "failed") return t`Last run failed · open to check it`;
 		let line = when(row.nextRunAt);
 		if (row.kind === "discovery") {
 			const clock = time(row.nextRunAt);
@@ -725,7 +1013,7 @@ function Schedules({ deleted, onOpenSchedule, className }: SchedulesProps) {
 					? t`Daily at ${clock} · next ${next}`
 					: days === 7
 						? t`Weekly at ${clock} · next ${next}`
-						: t`Every ${days} days at ${clock} · next ${next}`;
+						: t`Every ${ph({ days: i18n.number(days) })} days at ${clock} · next ${next}`;
 		} else if (row.kind === "prepare") {
 			const lead = row.lead === "2h" ? t`2 hours before` : row.lead === "morning" ? t`Morning of` : t`24 hours before`;
 			line = `${lead} · ${line}`;
@@ -786,14 +1074,13 @@ function Schedules({ deleted, onOpenSchedule, className }: SchedulesProps) {
 			) : !rows ? (
 				<Skeleton className="mx-4 mb-3 h-24" />
 			) : rows.length === 0 ? (
-				<p className="border-t border-line px-4 py-3 text-[13px] text-ink-3">
-					<Trans>Nothing scheduled yet.</Trans>
-				</p>
+				<EmptyState variant="compact" title={<Trans>Nothing scheduled yet.</Trans>} className="border-t border-line" />
 			) : (
 				<AnimatePresence initial={false}>
 					{rows.map((row) => {
 						const { icon, title } = scheduleKind(row.kind);
 						const done = !row.intervalDays && Boolean(row.lastQueuedAt);
+						const failed = row.lastRun?.status === "failed";
 						return (
 							<CollapseRow key={row.id} className="border-t border-line">
 								<div className="flex items-start gap-3 px-4 py-3">
@@ -805,7 +1092,12 @@ function Schedules({ deleted, onOpenSchedule, className }: SchedulesProps) {
 									>
 										<span className="text-sm font-semibold">{title}</span>
 										<span className="line-clamp-2 text-xs leading-[17px] text-ink-2">{describe(row)}</span>
-										<span className={cn("text-xs", row.enabled && !done ? "text-accent-text" : "text-ink-3")}>
+										<span
+											className={cn(
+												"text-xs",
+												failed ? "text-danger-text" : row.enabled && !done ? "text-accent-text" : "text-ink-3",
+											)}
+										>
 											{status(row)}
 										</span>
 									</button>
@@ -822,7 +1114,7 @@ function Schedules({ deleted, onOpenSchedule, className }: SchedulesProps) {
 				</AnimatePresence>
 			)}
 			<p className="border-t border-line px-4 pt-2.5 pb-3.5 text-xs leading-[17px] text-ink-3">
-				<Trans>Reminders appear here. Email copies are optional and need a verified address.</Trans>
+				<Trans>Results appear in Needs you. Email copies are optional and need a verified address.</Trans>
 			</p>
 		</section>
 	);

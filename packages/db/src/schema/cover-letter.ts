@@ -21,6 +21,7 @@ export const coverLetter = pg.pgTable(
 		name: pg.text("name").notNull(),
 		recipient: pg.text("recipient").notNull().default(""),
 		content: pg.text("content").notNull().default(""),
+		aiOperationIds: pg.text("ai_operation_ids").array().notNull().default([]),
 		greeting: pg.text("greeting"),
 		signOff: pg.text("sign_off"),
 		style: pg.jsonb("style").$type<CoverLetterStyle>().notNull(),
@@ -45,6 +46,10 @@ export const coverLetter = pg.pgTable(
 			.notNull()
 			.defaultNow()
 			.$onUpdate(() => new Date()),
+		// When the letter's text, recipient or design last changed, for "Last edited"; existing letters were backfilled
+		// from `updated_at`. A trigger in the migration keeps it. Renames, tags, locks, application links and Trash move
+		// only `updated_at` and `revision`.
+		editedAt: pg.timestamp("edited_at", { withTimezone: true }).defaultNow(),
 	},
 	(table) => [
 		pg.index().on(table.userId, table.updatedAt.desc(), table.id.desc()),
@@ -62,6 +67,7 @@ export type CoverLetterVersionKind = (typeof COVER_LETTER_VERSION_KINDS)[number]
 
 /** What a letter version keeps: everything that makes the letter read the way it did. */
 export type CoverLetterVersionData = {
+	aiOperationIds?: string[];
 	name: string;
 	recipient: string;
 	content: string;

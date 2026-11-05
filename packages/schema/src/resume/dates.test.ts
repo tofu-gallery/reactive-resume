@@ -8,6 +8,7 @@ import {
 	inferDateFormat,
 	readLegacyDates,
 	syncResumeDates,
+	resumeDatesToPeriod,
 } from "./dates";
 import { defaultResumeData } from "./default";
 
@@ -67,6 +68,10 @@ describe("inferDateFormat", () => {
 		expect(inferDateFormat(["03/2020 - 06/2021"], "en-US")).toBe("numeric");
 		expect(inferDateFormat(["2020-03 - 2021-06"], "en-US")).toBe("iso");
 	});
+
+	it("counts an expected end date", () => {
+		expect(inferDateFormat(["September 2023 – Expected May 2027"], "en-US")).toBe("long");
+	});
 });
 
 describe("getPresentLabel", () => {
@@ -74,9 +79,7 @@ describe("getPresentLabel", () => {
 		expect(getPresentLabel("en-US")).toBe("Present");
 		expect(getPresentLabel("de-DE")).toBe("Heute");
 		expect(getPresentLabel("xx-XX")).toBe("Present");
-	});
-
-	it("reads a malformed locale tag by its language instead of throwing", () => {
+		// A malformed tag is read by its language instead of throwing.
 		expect(getPresentLabel("de-DE-")).toBe("Heute");
 	});
 });
@@ -134,10 +137,20 @@ describe("formatYearMonth", () => {
 		["long", "en-US", "March 2022"],
 		["numeric", "en-US", "03/2022"],
 		["iso", "en-US", "2022-03"],
-		["long", "de-DE", "März 2022"],
-		["short", "fr-FR", "mars 2022"],
 	] as const)("prints 2022-03 as %s in %s", (format, locale, expected) => {
 		expect(formatYearMonth("2022-03", { locale, format })).toBe(expected);
+	});
+
+	it.each([
+		["ar-SA", "short", "٢٠١٩"],
+		["ar-SA", "iso", "2019"],
+	] as const)("prints a year-only date in %s (%s) in its month dates' digits", (locale, format, expected) => {
+		expect(formatYearMonth("2019", { locale, format })).toBe(expected);
+	});
+
+	it("keeps a year's leading zeros", () => {
+		expect(formatYearMonth("0019", { locale: "en-US", format: "short" })).toBe("0019");
+		expect(formatYearMonth("0019", { locale: "ar-SA", format: "long" })).toBe("٠٠١٩");
 	});
 });
 
@@ -236,6 +249,25 @@ describe("syncResumeDates", () => {
 		);
 	});
 
+	it.each(["During university / bis heute", "March 2022 - Present", "  Frühjahr — heute  "])(
+		"preserves custom text %j through save/reopen and locale/format changes",
+		(raw) => {
+			const data = parseResumeData(resume("2020 - 2022"));
+			const entry = job(data);
+			if (!entry) throw new Error("Missing entry.");
+			entry.dates = { ...readLegacyDates(raw, { locale: "en-US", single: false }), raw };
+			const award = data.sections.awards.items[0];
+			if (!award) throw new Error("Missing award.");
+			award.dates = { start: null, end: null, present: false, raw };
+			data.metadata.page.locale = "de-DE";
+			data.metadata.page.dateFormat = "iso";
+			const reopened = parseResumeData(JSON.parse(JSON.stringify(data)));
+			expect(job(reopened)?.period).toBe(raw);
+			expect(job(reopened)?.dates).toEqual(entry.dates);
+			expect(reopened.sections.awards.items[0]?.date).toBe(raw);
+		},
+	);
+
 	it("leaves text it couldn't read untouched, and is idempotent", () => {
 		const data = resume("Summer 2016 - 2018");
 		syncResumeDates(data);
@@ -245,5 +277,43 @@ describe("syncResumeDates", () => {
 		expect(job(data)?.period).toBe("Summer 2016 - 2018");
 		expect(job(data)?.dates?.raw).toBe("Summer 2016 - 2018");
 		expect(data).toEqual(once);
+	});
+});
+
+describe("expected end dates", () => {
+	it("prints an end date still to come as Expected", () => {
+		expect(
+			formatResumeDates({ start: "2023-09", end: "2027-05", present: false, expected: true }, { locale: "en-US" }),
+		).toBe("Sep 2023 – Expected May 2027");
+	});
+
+	it("leaves Expected out while the entry is ongoing or has no end date", () => {
+		expect(formatResumeDates({ start: "2023", end: null, present: true, expected: true }, { locale: "en-US" })).toBe(
+			"2023 – Present",
+		);
+		expect(formatResumeDates({ start: "2023", end: null, present: false, expected: true }, { locale: "en-US" })).toBe(
+			"2023",
+		);
+	});
+});
+
+describe("reading an expected end date back", () => {
+	it("round-trips through the printed text", () => {
+		const dates = { start: "2023-09", end: "2027-05", present: false, expected: true };
+		const text = formatResumeDates(dates, { locale: "en-US" });
+		expect(readLegacyDates(text, { locale: "en-US", single: false })).toEqual(dates);
+	});
+});
+
+describe("resumeDatesToPeriod", () => {
+	it("leaves out an end date kept while Present is on", () => {
+		expect(resumeDatesToPeriod({ start: "2023-09", end: "2020-01", present: true })).toEqual({
+			start: { year: 2023, month: 9 },
+			ongoing: true,
+		});
+		expect(resumeDatesToPeriod({ start: "2023-09", end: "2025-01", present: false })?.end).toEqual({
+			year: 2025,
+			month: 1,
+		});
 	});
 });

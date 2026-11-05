@@ -1,4 +1,5 @@
-name: Mobile Release
+name: Mobile release
+run-name: Mobile ${{ inputs.upload && 'submit' || 'build' }} · ${{ inputs.platform }} · ${{ inputs.format }} · ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
@@ -42,6 +43,7 @@ env:
 
 jobs:
   prepare:
+    name: Prepare release
     if: github.ref == 'refs/heads/main'
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 5
@@ -49,13 +51,15 @@ jobs:
       build_number: ${{ steps.release.outputs.build_number }}
       platforms: ${{ steps.release.outputs.platforms }}
     steps:
-      - uses: useblacksmith/checkout@v1
+      - name: Check out source (Blacksmith)
+        uses: useblacksmith/checkout@v1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-      - name: Validate request and allocate version without credentials
+      - name: Validate release inputs and allocate build number
         id: release
         env:
           PLATFORM: ${{ inputs.platform }}
@@ -64,6 +68,7 @@ jobs:
         run: node tooling/mobile/release.ts --prepare
 
   build:
+    name: Build ${{ matrix.platform }} (${{ inputs.format }})
     needs: prepare
     environment: mobile-signing
     strategy:
@@ -77,44 +82,63 @@ jobs:
       MOBILE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
       BUNDLE_GEMFILE: ${{ github.workspace }}/tooling/mobile/Gemfile
     steps:
-      - uses: useblacksmith/checkout@v1
+      - name: Check out source (Blacksmith)
+        uses: useblacksmith/checkout@v1
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
-      - uses: ruby/setup-ruby@v1
+      - name: Set up Ruby and gems
+        uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3"
           bundler-cache: true
           working-directory: tooling/mobile
-      - name: Check signing file handling
+      - name: Test signing credential handling
         run: |
           bundle exec ruby tooling/mobile/signing_test.rb
           ruby tooling/mobile/build_test.rb
-      - name: Check production distribution
+      - name: Test iOS multi-target signing configuration
+        if: matrix.platform == 'ios'
+        run: ruby tooling/mobile/ios_build_test.rb
+      - name: Test store distribution configuration
         run: ruby tooling/mobile/distribution_test.rb
-      - uses: actions/setup-java@v5
+      - name: Set up Java
+        uses: actions/setup-java@v5
         if: matrix.platform == 'android'
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         if: matrix.platform == 'android'
         with:
           packages: platform-tools platforms;android-37.0 build-tools;37.0.0 ndk;27.1.12297006 ndk;28.2.13676358 cmake;3.22.1
-      - run: pnpm install --frozen-lockfile
-      - name: Check mobile source
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and test mobile app
         run: |
           pnpm --filter mobile typecheck
           pnpm --filter mobile test
-      - uses: expo/expo-github-action@v9
+      - name: Test iOS pending-share lifecycle without signing
+        if: matrix.platform == 'ios'
+        run: |
+          swiftc apps/mobile/node_modules/expo-sharing/ios/shared/Constants.swift \
+            apps/mobile/node_modules/expo-sharing/ios/shared/ShareProtocol.swift \
+            apps/mobile/node_modules/expo-sharing/ios/shared/PendingPosting.swift \
+            tooling/mobile/incoming_share_test.swift -o "$RUNNER_TEMP/incoming-share-test"
+          "$RUNNER_TEMP/incoming-share-test"
+      - name: Set up EAS CLI
+        uses: expo/expo-github-action@v9
         with:
           eas-version: 25.2.0
           token: ${{ secrets.EXPO_TOKEN }}
-      - name: Validate signing credentials after approval
+      - name: Validate signing credentials
         env:
           UPLOAD: "false"
           MOBILE_BUILD_NUMBER_BASE: ${{ vars.MOBILE_BUILD_NUMBER_BASE }}
@@ -126,10 +150,11 @@ jobs:
           IOS_DISTRIBUTION_P12_BASE64: ${{ matrix.platform == 'ios' && secrets.IOS_DISTRIBUTION_P12_BASE64 || '' }}
           IOS_DISTRIBUTION_P12_PASSWORD: ${{ matrix.platform == 'ios' && secrets.IOS_DISTRIBUTION_P12_PASSWORD || '' }}
           IOS_PROVISION_PROFILE_BASE64: ${{ matrix.platform == 'ios' && secrets.IOS_PROVISION_PROFILE_BASE64 || '' }}
+          IOS_SHARE_PROVISION_PROFILE_BASE64: ${{ matrix.platform == 'ios' && secrets.IOS_SHARE_PROVISION_PROFILE_BASE64 || '' }}
         run: node tooling/mobile/release.ts
-      - name: Fetch reviewed native Forme binaries
+      - name: Fetch reviewed Forme binaries
         run: node packages/forme-native/scripts/fetch-prebuilt.mjs --platform "$PLATFORM"
-      - name: Build signed binary with selected update environment
+      - name: Build signed binary
         working-directory: apps/mobile
         env:
           ANDROID_KEYSTORE_BASE64: ${{ matrix.platform == 'android' && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
@@ -139,6 +164,7 @@ jobs:
           IOS_DISTRIBUTION_P12_BASE64: ${{ matrix.platform == 'ios' && secrets.IOS_DISTRIBUTION_P12_BASE64 || '' }}
           IOS_DISTRIBUTION_P12_PASSWORD: ${{ matrix.platform == 'ios' && secrets.IOS_DISTRIBUTION_P12_PASSWORD || '' }}
           IOS_PROVISION_PROFILE_BASE64: ${{ matrix.platform == 'ios' && secrets.IOS_PROVISION_PROFILE_BASE64 || '' }}
+          IOS_SHARE_PROVISION_PROFILE_BASE64: ${{ matrix.platform == 'ios' && secrets.IOS_SHARE_PROVISION_PROFILE_BASE64 || '' }}
         run: |
           eas env:exec "$MOBILE_UPDATE_CHANNEL" --non-interactive \
             'pnpm exec expo prebuild --platform "$PLATFORM" --clean --no-install && cd ../../tooling/mobile && if [ "$FORMAT" = apk ]; then bundle exec fastlane android build abi:"$ABI"; else bundle exec fastlane "$PLATFORM" build; fi'
@@ -153,7 +179,7 @@ jobs:
           unzip -Z1 "$apk" > "$RUNNER_TEMP/apk-entries.txt"
           grep -Fx "lib/$ABI/libforme_native.so" "$RUNNER_TEMP/apk-entries.txt"
 
-      - name: Record native runtime fingerprint
+      - name: Record runtime fingerprint and release manifest
         working-directory: apps/mobile
         run: |
           eas fingerprint:generate --platform "$PLATFORM" --environment "$MOBILE_UPDATE_CHANNEL" --json --non-interactive \
@@ -163,7 +189,7 @@ jobs:
             --arg xcode "$(if [[ "$PLATFORM" == ios ]]; then xcodebuild -version; fi)" \
             '{commit: $sha, platform: $platform, buildNumber: $build, format: $format, abi: $abi, channel: $channel, xcode: $xcode}' \
             > "$RUNNER_TEMP/mobile-release/release.json"
-      - name: Save signed binary
+      - name: Upload signed binary
         uses: actions/upload-artifact@v7
         with:
           name: mobile-${{ matrix.platform }}-${{ needs.prepare.outputs.build_number }}
@@ -173,7 +199,7 @@ jobs:
             ${{ runner.temp }}/mobile-release/*.ipa
           if-no-files-found: error
           retention-days: ${{ inputs.format == 'apk' && 14 || 90 }}
-      - name: Archive release manifest, fingerprint, symbols and mappings
+      - name: Upload release evidence
         uses: actions/upload-artifact@v7
         with:
           name: mobile-${{ matrix.platform }}-${{ needs.prepare.outputs.build_number }}-evidence
@@ -189,7 +215,8 @@ jobs:
           echo "### $PLATFORM build $MOBILE_BUILD_NUMBER" >> "$GITHUB_STEP_SUMMARY"
           echo "Commit: $GITHUB_SHA. Format: $FORMAT. OTA channel: $MOBILE_UPDATE_CHANNEL. Release evidence retained for 90 days." >> "$GITHUB_STEP_SUMMARY"
 
-  upload:
+  submit:
+    name: Submit ${{ matrix.platform }} for production review
     needs: [prepare, build]
     if: inputs.upload && inputs.format == 'store'
     permissions:
@@ -205,28 +232,32 @@ jobs:
     env:
       BUNDLE_GEMFILE: ${{ github.workspace }}/tooling/mobile/Gemfile
     steps:
-      - uses: useblacksmith/checkout@v1
+      - name: Check out source (Blacksmith)
+        uses: useblacksmith/checkout@v1
         with:
           persist-credentials: false
-      - name: Require successful CI for the exact production commit
+      - name: Require successful main CI for source commit
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const { requireSuccessfulCI } = await import(`${process.env.GITHUB_WORKSPACE}/tooling/docker/check-ci.mjs`);
             await requireSuccessfulCI({ github, repo: context.repo, sha: context.sha });
-      - uses: actions/setup-node@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-      - uses: ruby/setup-ruby@v1
+      - name: Set up Ruby and gems
+        uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3"
           bundler-cache: true
           working-directory: tooling/mobile
-      - uses: actions/download-artifact@v8
+      - name: Download signed binary
+        uses: actions/download-artifact@v8
         with:
           name: mobile-${{ matrix.platform }}-${{ needs.prepare.outputs.build_number }}
           path: ${{ runner.temp }}/mobile-release
-      - name: Submit production release for store review
+      - name: Submit binary for production review
         working-directory: tooling/mobile
         env:
           PLATFORM: ${{ matrix.platform }}

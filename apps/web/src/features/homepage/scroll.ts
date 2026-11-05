@@ -34,6 +34,8 @@ type LandingState = {
 	designStep: number;
 	/** Design: zoomed out to the contact sheet, so the template tabs are gone. */
 	designZoomed: boolean;
+	/** Design: far enough into its exit that the closing heading is fading, so its link leaves the tab order. */
+	designExiting: boolean;
 	/** Check: the scan's progress, in 40 steps, which drives the score and the checklist. */
 	checkProgress: number;
 	/** Tailor: how many of the posting's four keywords are matched. */
@@ -57,6 +59,7 @@ export const useLanding = create<LandingState>()(() => ({
 	writeStep: 0,
 	designStep: 0,
 	designZoomed: false,
+	designExiting: false,
 	checkProgress: 0,
 	keywordCount: 0,
 	shareReady: false,
@@ -73,9 +76,12 @@ const PREPARE_STEPS = [0.19, 0.36, 0.53, 0.7, 0.84];
 
 const smoothstep = (value: number) => value * value * (3 - 2 * value);
 
+/** Where Design's closing heading has fully faded out of the scene, and where its link stops taking focus. */
+const DESIGN_EXIT_AT = 0.66;
+
 /**
  * How dark Share's sky is, from 0 to 1: night falls over the scene's first fifth and lifts into dawn over its last
- * stretch, both eased, so neither end snaps. The engine writes it as --nt on Share and on the page, for the header.
+ * stretch, both eased, so neither end snaps. The engine writes it as --nt on Share and the header's ink consumers.
  */
 function shareNight(progress: number) {
 	return smoothstep(clamp01((progress - 0.02) / 0.22)) * (1 - smoothstep(clamp01((progress - 0.72) / 0.28)));
@@ -101,17 +107,81 @@ export function sectionProgress(top: number, height: number, viewportHeight: num
 	return clamp01((viewportHeight - top) / Math.max(1, Math.min(height, viewportHeight)));
 }
 
+/**
+ * How far a section has scrolled out of the viewport, from 0 as its bottom reaches the bottom edge to 1 once its bottom
+ * passes the top edge. A pinned scene holds its last frame while it leaves, so Design uses this to hand its closing
+ * headline over to Check instead of letting the word hang over the next scene.
+ */
+export function sectionExitProgress(bottom: number, viewportHeight: number) {
+	return clamp01((viewportHeight - bottom) / Math.max(1, viewportHeight));
+}
+
 const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
 
 export const prefersReducedMotion = () => window.matchMedia(reducedMotionQuery).matches;
 
-/** Scrolls to a point within a scene, e.g. `at = 0.93` for the end of Write's accepted suggestion. */
+let sceneNavigation = 0;
+let stopSceneNavigation: (() => void) | undefined;
+const scrollKeys = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
+
+const supportsTransitionTypes = () => globalThis.CSS?.supports?.("selector(:active-view-transition-type(a))") === true;
+
+/**
+ * Scrolls to a point within a scene, e.g. `at = 0.93` for the end of Write's accepted suggestion. Within a scene or to
+ * the next one it scrolls smoothly, since scrubbing through is the story. A longer jump cuts straight there instead of
+ * fast-forwarding through every scene between, fading through like a page change (index.css) where the browser can.
+ * Reduced motion always cuts.
+ */
 export function goToScene(index: number, at: number) {
 	const section = document.querySelector<HTMLElement>(`[data-scene="${index}"]`);
 	if (!section) return;
+	stopSceneNavigation?.();
 	const rect = section.getBoundingClientRect();
 	const top = rect.top + window.scrollY + at * Math.max(0, rect.height - window.innerHeight);
-	window.scrollTo({ top, behavior: prefersReducedMotion() ? "auto" : "smooth" });
+	const navigation = ++sceneNavigation;
+	const cut = () => {
+		if (navigation === sceneNavigation) window.scrollTo({ top, behavior: "instant" });
+	};
+
+	if (prefersReducedMotion()) return cut();
+	if (Math.abs(index - useLanding.getState().activeScene) <= 1) return window.scrollTo({ top, behavior: "smooth" });
+	if (!document.startViewTransition || !supportsTransitionTypes()) return cut();
+	const controller = new AbortController();
+	const cleanup = () => {
+		controller.abort();
+		if (stopSceneNavigation === cleanup) stopSceneNavigation = undefined;
+	};
+	const interrupt = (event: Event) => {
+		if (event.type === "keydown" && !scrollKeys.has((event as KeyboardEvent).key)) return;
+		sceneNavigation++;
+		cleanup();
+	};
+	stopSceneNavigation = cleanup;
+	for (const type of ["wheel", "touchmove", "keydown"])
+		window.addEventListener(type, interrupt, { passive: true, signal: controller.signal });
+	const transition = document.startViewTransition({ update: cut, types: ["page"] });
+	void transition.updateCallbackDone.then(cleanup, cleanup);
+}
+
+/**
+ * Renders a pinned scene and decodes its images while it's still a screen or two away, so its first frame on screen
+ * isn't the one that pays for them. Scenes further off go back to skipping their rendering (landing.css).
+ */
+function warmScenes(sections: HTMLElement[], nearby: Set<number>, decoded: WeakSet<HTMLImageElement>) {
+	for (const section of sections) {
+		const near = nearby.has(Number(section.dataset.scene));
+		if (section.dataset.pin !== undefined && near !== (section.dataset.warm !== undefined))
+			section.toggleAttribute("data-warm", near);
+		if (!near) continue;
+		for (const image of section.querySelectorAll("img")) {
+			if (decoded.has(image)) continue;
+			// Only the drawing for the current theme: the other one is display: none.
+			if (typeof image.checkVisibility === "function" && !image.checkVisibility()) continue;
+			decoded.add(image);
+			image.loading = "eager";
+			void image.decode().catch(() => undefined);
+		}
+	}
 }
 
 /**
@@ -157,12 +227,17 @@ export function useScrollScenes(root: RefObject<HTMLElement | null>) {
 
 		const reducedMotion = window.matchMedia(reducedMotionQuery);
 		const sections = [...container.querySelectorAll<HTMLElement>("[data-scene]")];
+		const header = container.querySelector<HTMLElement>("header");
+		const nightInk = [...container.querySelectorAll<HTMLElement>(".night-ink")];
 		const sectionAt = (index: number) => sections.find((section) => section.dataset.scene === String(index));
 		// Rewriting an unchanged --p would still restyle the whole section, so only changes are written.
 		const writtenProgress = new WeakMap<HTMLElement, string>();
+		const writtenExit = new WeakMap<HTMLElement, string>();
 
 		// Where Check's lens comes to rest, as a share of its page: over the date line it flags.
 		let lensPark = { x: 60, y: 50 };
+
+		const decodedImages = new WeakSet<HTMLImageElement>();
 
 		// Values that only change with the viewport, not with scrolling.
 		const measuredScenes = new Set<number>();
@@ -198,9 +273,9 @@ export function useScrollScenes(root: RefObject<HTMLElement | null>) {
 			const stack = design?.querySelector<HTMLElement>("[data-stack]");
 			if (!design || !stack) return;
 			const pageWidth = stack.offsetWidth || 1;
-			// Six columns and three rows of pages, 0.12 of a page apart, kept clear of the closing line beneath.
+			// Seven columns and three rows of pages, 0.12 of a page apart, kept clear of the closing line beneath.
 			const scale = Math.min(
-				(window.innerWidth * 0.94) / (6.6 * pageWidth),
+				(window.innerWidth * 0.94) / (7.72 * pageWidth),
 				(window.innerHeight * 0.57) / (4.122 * pageWidth),
 			);
 			design.style.setProperty("--smin", scale.toFixed(4));
@@ -210,6 +285,7 @@ export function useScrollScenes(root: RefObject<HTMLElement | null>) {
 		let frame = 0;
 		let writtenClock = "";
 		let writtenNight = "";
+		let writtenSceneProgress = "";
 
 		const measure = () => {
 			frame = 0;
@@ -217,7 +293,9 @@ export function useScrollScenes(root: RefObject<HTMLElement | null>) {
 			const reduced = reducedMotion.matches;
 			const progress: number[] = [];
 			const nearby = new Set<number>();
+			const exits: { section: HTMLElement; value: string }[] = [];
 			let activeScene: number = SCENE.hero;
+			let designExiting = false;
 
 			for (const section of sections) {
 				const index = Number(section.dataset.scene);
@@ -225,8 +303,15 @@ export function useScrollScenes(root: RefObject<HTMLElement | null>) {
 				if (rect.top < viewportHeight * 2 && rect.bottom > -viewportHeight) nearby.add(index);
 				const pinned = section.dataset.pin !== undefined;
 				progress[index] = reduced ? 1 : sectionProgress(rect.top, rect.height, viewportHeight, pinned);
+				if (pinned) {
+					// The heading's fade reads the rounded value, so the focus flag must use the same frame of reference.
+					const value = sectionExitProgress(rect.bottom, viewportHeight).toFixed(3);
+					if (index === SCENE.design) designExiting = Number(value) >= DESIGN_EXIT_AT;
+					if (writtenExit.get(section) !== value) exits.push({ section, value });
+				}
 				if (rect.top <= viewportHeight / 2 && rect.bottom > viewportHeight / 2) activeScene = index;
 			}
+			warmScenes(sections, nearby, decodedImages);
 			// Descendant geometry would force content-visibility to render an offscreen scene.
 			layout(nearby);
 			// The footer's desk paints itself in as it scrolls up, finishing exactly when the page ends.
@@ -241,6 +326,11 @@ export function useScrollScenes(root: RefObject<HTMLElement | null>) {
 			}
 			const tailorSection = sectionAt(SCENE.tailor);
 			if (tailorSection && nearby.has(SCENE.tailor) && window.innerWidth >= 900) drawThreads(tailorSection);
+			// Every geometry read above is done, so the exit writes can't force a second layout mid-measure.
+			for (const { section, value } of exits) {
+				section.style.setProperty("--out", value);
+				writtenExit.set(section, value);
+			}
 			for (const section of sections) {
 				const value = (progress[Number(section.dataset.scene)] ?? 0).toFixed(4);
 				if (writtenProgress.get(section) === value) continue;
@@ -249,17 +339,23 @@ export function useScrollScenes(root: RefObject<HTMLElement | null>) {
 			}
 
 			const at = (scene: number) => progress[scene] ?? 0;
+			// Keep continuous header values local: inheriting them from the page restyles every scene.
+			const sceneProgress = clamp01(at(activeScene)).toFixed(3);
+			if (sceneProgress !== writtenSceneProgress) {
+				header?.style.setProperty("--sp", sceneProgress);
+				writtenSceneProgress = sceneProgress;
+			}
 			const scan = clamp01((at(SCENE.check) - 0.06) / 0.8);
 			const prepare = at(SCENE.prepare);
 
 			// Prepare's clock hands turn with the scroll; the minutes are written once, here, for the CSS and the readout.
 			const minutes = prepareMinutes(prepare);
-			// Share's night: on the scene for its sky, and on the page while Share is on screen, for the header's ink.
+			// Share keeps its sky; the header and theme cord follow it only while Share is on screen.
 			const night = reduced ? 1 : shareNight(at(SCENE.share));
 			const pageNight = (activeScene === SCENE.share ? night : 0).toFixed(3);
 			if (`${night.toFixed(3)}|${pageNight}` !== writtenNight) {
 				sectionAt(SCENE.share)?.style.setProperty("--nt", night.toFixed(3));
-				container.style.setProperty("--nt", pageNight);
+				for (const element of nightInk) element.style.setProperty("--nt", pageNight);
 				writtenNight = `${night.toFixed(3)}|${pageNight}`;
 			}
 
@@ -290,6 +386,7 @@ export function useScrollScenes(root: RefObject<HTMLElement | null>) {
 				writeStep: at(SCENE.write) >= 0.84 ? 2 : at(SCENE.write) >= 0.4 ? 1 : 0,
 				designStep: stepsPassed(at(SCENE.design), [0.15, 0.31, 0.47, 0.63]),
 				designZoomed: at(SCENE.design) >= 0.84,
+				designExiting,
 				checkProgress: Math.round(scan * 40) / 40,
 				keywordCount: stepsPassed(at(SCENE.tailor), [0.19, 0.31, 0.43, 0.55]),
 				shareReady: at(SCENE.share) >= 0.66,

@@ -1,8 +1,8 @@
 import type { IconName } from "./icon";
-import type { ComponentRef, ReactNode } from "react";
+import type { ComponentRef, ReactNode, Ref } from "react";
 import type { TextInputProps } from "react-native";
 import { useLingui } from "@lingui/react/macro";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState } from "react";
 import { I18nManager, Platform, Pressable, TextInput, View } from "react-native";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import { filterOptions } from "@reactive-resume/utils/string";
@@ -17,6 +17,7 @@ const android = Platform.OS === "android";
 
 export type TextFieldProps = Omit<TextInputProps, "style" | "value" | "onChangeText" | "placeholderTextColor"> & {
 	label: string;
+	ref?: Ref<ComponentRef<typeof TextInput> | null> | undefined;
 	value: string;
 	onChangeText: (value: string) => void;
 	/** Helper text under the field. Replaced by `error` when there is one. */
@@ -28,6 +29,8 @@ export type TextFieldProps = Omit<TextInputProps, "style" | "value" | "onChangeT
 	prefix?: string | undefined;
 	/** Monospace value (keys, URLs, JSON). */
 	mono?: boolean | undefined;
+	/** Left to right in every language: usernames and web addresses, which use Latin letters a–z. */
+	ltr?: boolean | undefined;
 };
 
 type FieldProps = {
@@ -67,18 +70,22 @@ type InputBoxProps = Omit<TextFieldProps, "label" | "helper"> & {
 	hint?: string | undefined;
 	multiline?: boolean | undefined;
 	minHeight?: number | undefined;
+	maxHeight?: number | undefined;
 };
 
 /** The bordered box: 1 pt `lineStrong`, 2 pt `accent` while focused, 2 pt `dangerText` with an error. */
 function InputBox({
 	accessibilityLabel,
+	ref: inputRef,
 	hint,
 	error,
 	trailing,
 	prefix,
 	mono,
+	ltr: alwaysLtr,
 	multiline,
 	minHeight,
+	maxHeight,
 	onFocus,
 	onBlur,
 	...input
@@ -87,6 +94,14 @@ function InputBox({
 	const ref = useRef<ComponentRef<typeof TextInput>>(null);
 	const [focused, setFocused] = useState(false);
 	const border = error ? 2 : focused ? 2 : 1;
+	const ltr =
+		alwaysLtr === true ||
+		input.keyboardType === "url" ||
+		input.keyboardType === "email-address" ||
+		input.keyboardType === "phone-pad" ||
+		input.inputMode === "url" ||
+		input.inputMode === "email" ||
+		input.inputMode === "tel";
 
 	return (
 		<Pressable
@@ -94,9 +109,11 @@ function InputBox({
 			onPress={() => ref.current?.focus()}
 			style={{
 				flexDirection: "row",
+				direction: ltr ? "ltr" : undefined,
 				alignItems: multiline ? "flex-start" : "center",
 				gap: space.s2,
 				minHeight: minHeight ?? size.input,
+				...(maxHeight ? { maxHeight } : {}),
 				// The thicker focus border eats into the padding, so the text does not move.
 				paddingHorizontal: space.s3 - (border - 1),
 				paddingVertical: multiline ? space.s3 - (border - 1) : 0,
@@ -112,13 +129,18 @@ function InputBox({
 				</Text>
 			) : null}
 			<TextInput
-				ref={ref}
+				ref={(node) => {
+					ref.current = node;
+					if (typeof inputRef === "function") return inputRef(node);
+					if (inputRef) inputRef.current = node;
+				}}
 				accessibilityLabel={accessibilityLabel}
 				accessibilityHint={hint}
 				placeholderTextColor={colors.ink3}
 				selectionColor={colors.accent}
 				cursorColor={colors.accent}
 				multiline={multiline}
+				scrollEnabled={maxHeight ? true : undefined}
 				textAlignVertical={multiline ? "top" : "center"}
 				{...input}
 				onFocus={(event) => {
@@ -135,7 +157,8 @@ function InputBox({
 						flex: 1,
 						color: colors.ink,
 						paddingVertical: multiline ? 0 : space.s2,
-						textAlign: I18nManager.isRTL ? "right" : "left",
+						textAlign: ltr ? "left" : I18nManager.isRTL ? "right" : "left",
+						writingDirection: ltr ? "ltr" : undefined,
 					},
 				]}
 			/>
@@ -160,9 +183,11 @@ export function TextField({ label, helper, error, ...input }: TextFieldProps) {
 export type TextAreaProps = Omit<TextFieldProps, "multiline" | "trailing" | "prefix"> & {
 	/** Visible lines before the field scrolls. Defaults to 4. */
 	minLines?: number | undefined;
+	/** After this many lines the field scrolls inside itself. Undefined grows with the text. */
+	maxLines?: number | undefined;
 };
 
-export function TextArea({ label, helper, error, minLines = 4, ...input }: TextAreaProps) {
+export function TextArea({ label, helper, error, minLines = 4, maxLines, ...input }: TextAreaProps) {
 	const { space, type } = useTheme();
 
 	return (
@@ -174,6 +199,7 @@ export function TextArea({ label, helper, error, minLines = 4, ...input }: TextA
 				error={error}
 				multiline
 				minHeight={type.bodyLarge.lineHeight * minLines + space.s3 * 2}
+				{...(maxLines ? { maxHeight: type.bodyLarge.lineHeight * maxLines + space.s3 * 2 } : {})}
 			/>
 		</Field>
 	);
@@ -183,6 +209,7 @@ export type SelectOption<T extends string> = {
 	value: T;
 	label: string;
 	description?: string | undefined;
+	keywords?: readonly string[] | undefined;
 	icon?: IconName | undefined;
 };
 
@@ -314,6 +341,8 @@ export type SegmentedProps<T extends string> = {
 	/** The accessible name of the group. */
 	label?: string | undefined;
 	orientation?: "horizontal" | "vertical";
+	/** Size horizontal choices to their content instead of filling the row. */
+	compact?: boolean;
 };
 
 type SegmentProps = {
@@ -322,9 +351,10 @@ type SegmentProps = {
 	active: boolean;
 	onPress: () => void;
 	stacked: boolean;
+	compact: boolean;
 };
 
-function Segment({ label, icon, active, onPress, stacked }: SegmentProps) {
+function Segment({ label, icon, active, onPress, stacked, compact }: SegmentProps) {
 	const { colors, motion, radius, shadows, size, space } = useTheme();
 	const shown = useSharedValue(active ? 1 : 0);
 
@@ -343,7 +373,7 @@ function Segment({ label, icon, active, onPress, stacked }: SegmentProps) {
 			// 40 pt inside the track's 2 pt padding; the slop brings the target to 44.
 			hitSlop={{ top: space.s0, bottom: space.s0 }}
 			style={{
-				flex: stacked ? undefined : 1,
+				flex: stacked || compact ? undefined : 1,
 				minHeight: size.hit - space.s0 * 2,
 				flexDirection: "row",
 				alignItems: "center",
@@ -382,6 +412,7 @@ export function Segmented<T extends string>({
 	onChange,
 	label,
 	orientation = "horizontal",
+	compact = false,
 }: SegmentedProps<T>) {
 	const { colors, radius, space } = useTheme();
 	const stacked = orientation === "vertical";
@@ -405,6 +436,7 @@ export function Segmented<T extends string>({
 					icon={option.icon}
 					active={option.value === value}
 					stacked={stacked}
+					compact={compact}
 					onPress={() => {
 						if (option.value === value) return;
 						haptics.selection();
@@ -455,7 +487,7 @@ export function Chip({ label, selected, onPress, icon, onRemove }: ChipProps) {
 				paddingEnd: onRemove ? space.s1 + space.s0 : space.s3,
 				borderRadius: radius.rLg,
 				borderWidth: 1,
-				borderColor: selected ? colors.accent : colors.line2,
+				borderColor: selected ? colors.accent : colors.lineStrong,
 				backgroundColor: pressed && onPress && !android ? colors.sunken : selected ? colors.accentSoft : colors.raised,
 				overflow: "hidden",
 			})}
@@ -481,6 +513,8 @@ export function Chip({ label, selected, onPress, icon, onRemove }: ChipProps) {
 }
 
 export type ChipInputProps = {
+	/** Explicit saves include unfinished text; ordinary Return/comma entry stays unchanged. */
+	commitRef?: Ref<() => string[]>;
 	label: string;
 	values: string[];
 	onChange: (values: string[]) => void;
@@ -502,6 +536,7 @@ export function ChipInput({
 	suggestions,
 	helper,
 	suggestionsLabel,
+	commitRef,
 }: ChipInputProps) {
 	const { space } = useTheme();
 	const [draft, setDraft] = useState("");
@@ -509,7 +544,13 @@ export function ChipInput({
 		const next = [...values];
 		for (const item of items.map((value) => value.trim())) if (item && !next.includes(item)) next.push(item);
 		if (next.length !== values.length) onChange(next);
+		return next;
 	};
+	useImperativeHandle(commitRef, () => () => {
+		const next = add([draft]);
+		setDraft("");
+		return next;
+	});
 	const query = draft.trim().toLocaleLowerCase();
 	const offered = (suggestions ?? []).filter(
 		(suggestion) => !values.includes(suggestion) && suggestion.toLocaleLowerCase().includes(query),
@@ -557,7 +598,14 @@ export function ChipInput({
 					) : null}
 					<View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.s1 + space.s0 }}>
 						{offered.map((suggestion) => (
-							<Chip key={suggestion} label={suggestion} onPress={() => add([suggestion])} />
+							<Chip
+								key={suggestion}
+								label={suggestion}
+								onPress={() => {
+									add([suggestion]);
+									setDraft("");
+								}}
+							/>
 						))}
 					</View>
 				</View>

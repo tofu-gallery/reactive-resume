@@ -81,7 +81,7 @@ export const pictureSchema = z.object({
 		.describe("The width of the shadow of the picture to display on the resume, defined in points (pt)."),
 });
 
-export const customFieldSchema = z.object({
+const customFieldSchema = z.object({
 	id: z.string().describe("The unique identifier for the custom field. Usually generated as a UUID."),
 	icon: iconSchema,
 	text: z.string().describe("The text to display for the custom field."),
@@ -98,7 +98,7 @@ export const basicsSchema = z.object({
 	customFields: z.array(customFieldSchema).describe("The custom fields to display on the resume."),
 });
 
-export const summarySchema = z.object({
+const summarySchema = z.object({
 	title: z.string().describe("The title of the summary of the resume."),
 	icon: z
 		.string()
@@ -341,7 +341,7 @@ export const coverLetterItemSchema = baseItemSchema.extend({
 
 export type CoverLetterItem = z.infer<typeof coverLetterItemSchema>;
 
-export const baseSectionSchema = z.object({
+const baseSectionSchema = z.object({
 	title: z.string().describe("The title of the section."),
 	icon: z
 		.string()
@@ -389,7 +389,7 @@ const skillKeywordLayoutSchema = z
 	.catch("inline")
 	.describe("How skill keywords are displayed: inline separated by commas, or one bullet per keyword.");
 
-export const skillsSectionSchema = itemSection(skillItemSchema, "The items to display in the skills section.")
+const skillsSectionSchema = itemSection(skillItemSchema, "The items to display in the skills section.")
 	.extend({
 		keywordLayout: skillKeywordLayoutSchema,
 		layout: z
@@ -587,9 +587,47 @@ export const colorDesignSchema = z.object({
 		),
 });
 
+export const entryHeaderLayouts = ["stacked", "inline", "compact", "date-column", "eyebrow"] as const;
+export const entryHeaderAccents = ["none", "rule", "bar", "band"] as const;
+
+export const entryHeaderSchema = z.object({
+	layout: z
+		.enum(entryHeaderLayouts)
+		.catch("stacked")
+		.describe(
+			"How the header of each Experience, Education and Volunteer entry is arranged. 'stacked' is two rows (name and location, then role and date), 'inline' puts everything on one row, 'compact' puts the lead and the date on top with the rest grouped below, 'date-column' sets dates in a column on the left, and 'eyebrow' puts a small line above a larger lead. Dates also move to the left column for Projects, Awards, Certifications and Publications with 'date-column'.",
+		),
+	lead: z
+		.enum(["organization", "role"])
+		.catch("organization")
+		.describe(
+			"Which comes first in Experience and Education entries: the organization (company, school) or the role (position, field of study).",
+		),
+	accent: z
+		.enum(entryHeaderAccents)
+		.catch("none")
+		.describe(
+			"Decoration in the accent color around each entry header: 'none', 'rule' (a line under it), 'bar' (a bar beside it) or 'band' (a tinted background).",
+		),
+});
+
+export type EntryHeader = z.infer<typeof entryHeaderSchema>;
+
+export const defaultEntryHeader: EntryHeader = { layout: "stacked", lead: "organization", accent: "none" };
+
+/** Resumes saved before entry headers existed have no settings; read them through this. */
+export const entryHeaderOf = (design: { entry?: Partial<EntryHeader> | undefined }): EntryHeader => ({
+	...defaultEntryHeader,
+	...design.entry,
+});
+
 const designSchema = z.object({
 	level: levelDesignSchema,
 	colors: colorDesignSchema,
+	entry: entryHeaderSchema
+		.optional()
+		.catch(undefined)
+		.describe("How entry headers are arranged and decorated. When missing, entries use the stacked layout."),
 });
 
 export const typographySchema = z.object({
@@ -747,6 +785,18 @@ export const metadataSchema = z.object({
 		"Structured style rules that target semantic resume sections and slots for PDF rendering.",
 	),
 	stylesheet: semanticStylesheetSchema.optional(),
+	web: z
+		.object({
+			showCredit: z
+				.boolean()
+				.catch(true)
+				.describe("Whether the web page shows the small 'Made with Reactive Resume' footer."),
+		})
+		.optional()
+		.catch(undefined)
+		.describe(
+			"Settings for the resume's public web page, which uses the resume's template. Missing until the author changes them in Share.",
+		),
 	check: z
 		.object({
 			ignored: z

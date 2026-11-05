@@ -20,8 +20,14 @@ template and design changes, custom styles, and edits you accept from the Assist
 These shortcuts undo resume-wide changes when your cursor isn't in a text field. Inside a field, they undo your typing
 in that field. Click outside the field first to undo a change such as a template switch.
 
+The **Undo** and **Redo** buttons (curved arrows) in the editor bar always step through the resume-wide history, even
+while you're typing in a field, where the shortcuts undo that field's typing instead. In the mobile app they sit in the
+top bar of every tab. They're dimmed when there's nothing to undo or redo.
+
 Many actions also show a message with an **Undo** button right after you make them, for example deleting an entry,
-switching template, **Fit to one page** or **Reset to template defaults**.
+switching template, **Fit to one page** or **Reset design defaults**. That button takes back that action only.
+If you've edited something since, it doesn't undo your newer edit: a deleted entry or section, or a cleared section,
+comes back where it was, and for other actions the message tells you to use Undo to step back through your changes.
 
 How undo behaves:
 
@@ -31,8 +37,12 @@ How undo behaves:
 - **Undo lasts while the resume is open.** Reloading the page or opening the resume again starts a fresh undo history.
   So does restoring a version, or a change arriving from somewhere else, such as another tab or an API client.
 
-The cover letter editor has no document-wide undo. Use <kbd>⌘</kbd> <kbd>Z</kbd> inside the text you're editing, or
-restore a version from History.
+On web, the cover letter editor has no document-wide undo. Use <kbd>⌘</kbd> <kbd>Z</kbd> inside the text you're editing, or
+restore a version from History. Native mobile uses its editor-bar Undo and Redo controls.
+
+An accepted **Improve** suggestion is a separate step. Undo and Redo restore its request references with its wording,
+including an accepted suggestion whose wording is unchanged. Earlier import or letter-draft sources stay attached.
+These actions do not send another AI request; weekly usage still includes the original attempt.
 
 <Tip>
   Changes that couldn't be saved, for example because you went offline or closed the tab, are kept on your device. The
@@ -42,13 +52,13 @@ restore a version from History.
 ## Open History
 
 On a desktop-width window, select the **History** icon (a clock) in the editor bar, next to the Assistant icon.
-History opens in the **Share & export** panel on its **History** tab. On a narrower window, select **Share**, then the
-**History** tab.
+History opens in the **Download & history** panel on its **History** tab. On a narrower window or a phone, select the
+resume's name at the top left to open the document menu, then **History**.
 
-<Frame caption="History lists Now at the top, then saved versions from newest to oldest">
+<Frame caption="Name a version so you can recognize it later">
   <img
     src="/images/guides/undoing-changes-and-version-history/history-tab.webp"
-    alt="The History tab of the Share & export panel: a field to name the current version, then a timeline with Now, a named version marked with a bookmark, an Editing session and Created"
+    alt="Download & history with the History tab selected and a named Original for game studios version among saved versions"
   />
 </Frame>
 
@@ -77,7 +87,7 @@ letters appear.
 Name a version before a big change, or when you send the resume somewhere, so it's easy to find later.
 
 <Steps>
-  <Step title="Open History">Select the **History** icon, or **Share** then **History**.</Step>
+  <Step title="Open History">Select the **History** icon, or open the document name menu and choose **History**.</Step>
   <Step title="Type a name">
     In **Name this version**, type a short name such as "Sent to Lumen" or "Before tailoring" (up to 80 characters).
   </Step>
@@ -102,20 +112,20 @@ versions can be renamed or deleted; the others are kept for as long as the table
   </Step>
 </Steps>
 
-<Frame caption="Previewing a named version: the page shows it read-only until you restore it or go back to now">
+<Frame caption="Review a saved version before restoring">
   <img
     src="/images/guides/undoing-changes-and-version-history/history-viewing-a-named-version.webp"
-    alt="The History tab with a dark bar reading Viewing Today 01:44 AM · Original for game studios · read-only, with Restore this version and Back to now buttons, and the named version selected in the timeline"
+    alt="History showing a named version in read-only preview, with Restore this version and Back to now"
   />
 </Frame>
 
 Restoring never throws anything away. Before it replaces your resume, Reactive Resume saves the current state as
 **Before restore**, then adds **Restored a version** after it. To undo a restore, restore **Before restore**.
 
-<Frame caption="After a restore, the state you replaced is saved as Before restore">
+<Frame caption="Restoring saves the previous state first">
   <img
     src="/images/guides/undoing-changes-and-version-history/history-after-restoring.webp"
-    alt="The History timeline after a restore: Now, Restored a version, Before restore, the named version, Editing session and Created"
+    alt="History timeline after restoring a named version, including Before restore and Restored a version entries"
   />
 </Frame>
 
@@ -126,6 +136,14 @@ Restoring never throws anything away. Before it replaces your resume, Reactive R
 
 A version holds the whole resume: content, design, custom styles and private notes. Its public link settings aren't
 part of it.
+
+For AI PDF and Word imports, **History** also shows the saved version's original provider, model and request attempts on web and mobile. Copies and restore points keep the sources paired with that content. Older versions without recorded sources show that request history is unavailable; that doesn't mean no AI was used. Restoring or copying never runs the model again. Request sources remain private and are included in **Export everything**, not public resumes or employer downloads.
+
+<Accordion title="Browser recovery copies">
+  If saving a resume fails, a recovery copy may stay in this browser for up to seven days. Successful sign-out or
+  account deletion clears these copies, saved contact snapshots and career drafts from browser storage. Save or export
+  unfinished work before signing out. Server-saved versions follow the History retention rules above.
+</Accordion>
 
 ## Related guides
 

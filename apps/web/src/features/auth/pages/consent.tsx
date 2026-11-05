@@ -1,6 +1,7 @@
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { Button } from "@reactive-resume/ui/components/button";
 import { cn } from "@reactive-resume/utils/style";
@@ -11,6 +12,8 @@ import { ENTER_CLASS } from "@/libs/motion";
 type OAuthConsentPageProps = {
 	oauthQuery: string;
 	email: string;
+	isAnonymous: boolean;
+	disableSignups: boolean;
 };
 
 /** Resolves with an error message, or null when Better Auth's redirect plugin takes over. */
@@ -32,14 +35,16 @@ function redirectDestination(redirectUri: string | null) {
 	if (!redirectUri) return null;
 	try {
 		const url = new URL(redirectUri);
-		// Native apps return through their own scheme, which has no host.
-		return url.host || url.protocol.replace(/:$/, "");
+		if (url.protocol === "http:" || url.protocol === "https:") return url.host;
+		// Any installed app can claim a custom scheme, even one spelled like a website, so keep the scheme and its
+		// separator: a site's host never ends in ":".
+		return url.host ? `${url.protocol}//${url.host}` : url.protocol;
 	} catch {
 		return null;
 	}
 }
 
-export function OAuthConsentPage({ oauthQuery, email }: OAuthConsentPageProps) {
+export function OAuthConsentPage({ oauthQuery, email, isAnonymous, disableSignups }: OAuthConsentPageProps) {
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string>();
 	const query = new URLSearchParams(oauthQuery);
@@ -57,7 +62,11 @@ export function OAuthConsentPage({ oauthQuery, email }: OAuthConsentPageProps) {
 		enabled: validRequest,
 		retry: false,
 		queryFn: async () => {
-			const { data, error } = await authClient.oauth2.publicClient({ query: { client_id: clientId } });
+			// The provider checks the request's signature and expiry here, so a forged or expired request reads as invalid.
+			const { data, error } = await authClient.oauth2.publicClientPrelogin({
+				client_id: clientId,
+				oauth_query: oauthQuery,
+			});
 			if (error || !data)
 				throw new Error(
 					t`This connection request is invalid or has expired. Start the connection again from your client.`,
@@ -67,7 +76,8 @@ export function OAuthConsentPage({ oauthQuery, email }: OAuthConsentPageProps) {
 	});
 
 	async function submit(accept: boolean) {
-		if (pending || !client || !validRequest) return;
+		// Guests may only decline, which returns them to the client without granting anything.
+		if (pending || !client || !validRequest || (isAnonymous && accept)) return;
 		setPending(true);
 		setError(undefined);
 		const failure = await requestConsent(accept, oauthQuery);
@@ -80,21 +90,66 @@ export function OAuthConsentPage({ oauthQuery, email }: OAuthConsentPageProps) {
 	return (
 		<>
 			<div className="space-y-2 text-center">
-				<h1 className="text-2xl font-semibold tracking-tight">
+				<h1 className="text-[30px] leading-9">
 					<Trans>Connect an application</Trans>
 				</h1>
-				<p className="text-sm wrap-anywhere text-ink-3">
-					<Trans>Signed in as {email}</Trans>
-				</p>
+				{!isAnonymous && (
+					<p className="text-sm wrap-anywhere text-ink-3">
+						<Trans>Signed in as {email}</Trans>
+					</p>
+				)}
 			</div>
+			{/* Settle the request before offering anything: sign-up links would only resume a dead request. */}
 			{!validRequest || isError ? (
-				<p key="invalid" role="alert" className={ENTER_CLASS}>
-					<Trans>This connection request is invalid or has expired. Start the connection again from your client.</Trans>
-				</p>
+				<div key="invalid" className={cn(ENTER_CLASS, "grid justify-items-center gap-4 text-center")}>
+					<p role="alert" className="rounded-lg bg-warn-soft px-3 py-2.5 text-sm text-warn-text">
+						<Trans>
+							This connection request is invalid or has expired. Start the connection again from your client.
+						</Trans>
+					</p>
+					<Button variant="secondary" nativeButton={false} render={<Link to="/dashboard" />}>
+						<Trans>Go to dashboard</Trans>
+					</Button>
+				</div>
 			) : isPending ? (
 				<p role="status">
-					<Trans>Loading connection request...</Trans>
+					<Trans>Loading connection request…</Trans>
 				</p>
+			) : isAnonymous ? (
+				<div className="space-y-4">
+					<p>
+						<Trans>Create an account to connect apps. Guest accounts are temporary.</Trans>
+					</p>
+					<div className="flex flex-wrap gap-2">
+						{!disableSignups && (
+							<Button
+								className="flex-1"
+								nativeButton={false}
+								render={<Link to="/auth/register" search={{ callbackURL: `/api/auth/oauth?${oauthQuery}` }} />}
+							>
+								<Trans>Create account</Trans>
+							</Button>
+						)}
+						<Button
+							className="flex-1"
+							nativeButton={false}
+							variant="secondary"
+							render={<Link to="/auth/login" search={{ callbackURL: `/api/auth/oauth?${oauthQuery}` }} />}
+						>
+							<Trans>Sign in</Trans>
+						</Button>
+					</div>
+					{client && (
+						<Button className="w-full" variant="ghost" disabled={pending} onClick={() => void submit(false)}>
+							<Trans>Cancel connection</Trans>
+						</Button>
+					)}
+					{error && (
+						<p role="alert" className={cn(ENTER_CLASS, "text-sm text-danger-text")}>
+							{error}
+						</p>
+					)}
+				</div>
 			) : client ? (
 				<div className={cn(ENTER_CLASS, "space-y-4")}>
 					<div className="space-y-1 wrap-anywhere">
@@ -104,14 +159,17 @@ export function OAuthConsentPage({ oauthQuery, email }: OAuthConsentPageProps) {
 						</p>
 						{destination && (
 							<p className="text-xs text-ink-3">
-								<Trans>Access is sent to</Trans>: <span className="font-medium text-ink">{destination}</span>
+								{/* One message, so translators can place the address where their language puts it. */}
+								<Trans>
+									Access is sent to <span className="font-medium text-ink">{destination}</span>
+								</Trans>
 							</p>
 						)}
 					</div>
 					<p className="text-sm">
 						<Trans>Only allow applications you trust. This application will be able to:</Trans>
 					</p>
-					<ul className="list-disc space-y-2 pl-5 text-sm">
+					<ul className="list-disc space-y-2 ps-5 text-sm">
 						{["api:read", "api:write", "api:delete"].some((scope) => scopes.has(scope)) ? (
 							<>
 								{scopes.has("api:read") && (
@@ -144,12 +202,13 @@ export function OAuthConsentPage({ oauthQuery, email }: OAuthConsentPageProps) {
 								</Trans>
 							</li>
 						)}
-						{scopes.has("profile") && (
+						{/* Reading the whole account already covers the profile and email address. */}
+						{scopes.has("profile") && !scopes.has("api:read") && (
 							<li>
 								<Trans>Read your profile information.</Trans>
 							</li>
 						)}
-						{scopes.has("email") && (
+						{scopes.has("email") && !scopes.has("api:read") && (
 							<li>
 								<Trans>Read your email address.</Trans>
 							</li>
@@ -160,6 +219,9 @@ export function OAuthConsentPage({ oauthQuery, email }: OAuthConsentPageProps) {
 							</li>
 						)}
 					</ul>
+					<p className="text-xs text-ink-3">
+						<Trans>You can disconnect it anytime in Settings → AI & developer.</Trans>
+					</p>
 					{error && (
 						<p role="alert" className={cn(ENTER_CLASS, "text-sm text-danger-text")}>
 							{error}

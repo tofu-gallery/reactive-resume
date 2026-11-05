@@ -3,22 +3,26 @@
 import type { SavedData, SavedItem } from "../hooks";
 import type { WorkspaceTabProps } from "../shell";
 import type { RecordStop, Recording, VoiceSettings } from "../voice";
+import type { PracticeQuestion as Question } from "@reactive-resume/schema/career-practice";
 import type { ReactNode } from "react";
+import { i18n } from "@lingui/core";
+import { ph } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import * as DocumentPicker from "expo-document-picker";
 import { File } from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { useEffect, useRef, useState } from "react";
 import { Linking, Pressable, View } from "react-native";
-import { latest, useDraft, useGenerate, useSavedItems, useStories, workspaceError } from "../hooks";
+import { canUseCareerStory, threePracticeQuestions } from "@reactive-resume/schema/career-practice";
+import { latest, useDraft, useGenerate, useSavedItems, useStories, useFacts, workspaceError } from "../hooks";
 import { acceptedAudioType, clock, MAX_SECONDS, writeNumbersAsDigits } from "../logic";
-import { Actions, Block, PrivacyLine, Progress, useWorking, workingSteps } from "../parts";
+import { Actions, AiNotice, Block, PrivacyLine, Progress, GenerateNotice, useWorking, workingSteps } from "../parts";
 import { WorkspaceScreen } from "../shell";
 import { afterTranscribed, createRequests, playLatest } from "../state";
 import { deleteQuietly, speak, transcribe, usePlayer, useRecorder, useVoiceSettings } from "../voice";
 import { client } from "@/api/client";
 import { AIProviderSetupSheet, useHasAIProvider } from "@/features/ai/providers";
-import { useUserTime } from "@/features/application-detail/hooks";
+import { useNow, useUserTime } from "@/features/application-detail/hooks";
 import {
 	Banner,
 	Button,
@@ -37,7 +41,6 @@ import {
 
 type Practice = SavedData<"practice">;
 type Attempt = SavedItem & { data: Practice };
-type Question = { text: string; origin: Practice["origin"] };
 type Mode = Practice["mode"];
 /** A transcribed answer: the server's transcript id and text. */
 type Spoken = { id: string; text: string; seconds: number | null };
@@ -57,31 +60,75 @@ export function PractiseTab() {
 	return <WorkspaceScreen tab="practise">{(props) => <Practise {...props} />}</WorkspaceScreen>;
 }
 
-function Practise({ application, version, interview, speak: speakFirst, story, now, go }: WorkspaceTabProps) {
+type PractiseProps = Omit<WorkspaceTabProps, "application" | "addInterview"> & {
+	application: WorkspaceTabProps["application"] | null;
+};
+
+type StoryPracticeProps = { storyId: string };
+
+export function StoryPractice({ storyId }: StoryPracticeProps) {
+	const { t } = useLingui();
+	const saved = useSavedItems(null);
+	const [versionId, setVersionId] = useState<string>();
+	const now = useNow();
+	return (
+		<View>
+			<Text color="ink3">{t`Practice without an application`}</Text>
+			<Practise
+				application={null}
+				version={saved.data?.find((item) => item.id === versionId && item.evidence.storyIds.includes(storyId))}
+				interview={undefined}
+				speak={true}
+				story={storyId}
+				now={now}
+				go={(_tab, search) => setVersionId(search?.version)}
+			/>
+		</View>
+	);
+}
+
+function Practise({ application, version, interview, speak: speakFirst, story, warmup, now, go }: PractiseProps) {
 	const { t } = useLingui();
 	const { space } = useTheme();
-	const saved = useSavedItems(application.id);
-	const stories = useStories(application.id);
+	const saved = useSavedItems(application?.id ?? null);
+	const stories = useStories(application?.id ?? null);
+	const facts = useFacts(application?.id ?? null);
 	const voice = useVoiceSettings();
+	if (warmup && !interview) return <Banner tone="warn" message={t`This interview is unavailable.`} />;
 	const viewing = version && isAttempt(version) ? version : undefined;
-	const attempts = saved.data?.filter(isAttempt) ?? [];
-	const selectedStory = story ? stories.data?.find((item) => item.id === story) : undefined;
-	const company = application.company;
+	const attempts =
+		saved.data
+			?.filter(isAttempt)
+			.filter((item) => application !== null || !story || item.evidence.storyIds.includes(story)) ?? [];
+	const selectedStory = story
+		? stories.data?.find(
+				(item) => item.id === story && canUseCareerStory(item, facts.data ?? [], application?.id ?? null),
+			)
+		: undefined;
+	const company = application?.company ?? "";
 
-	if (story && stories.isError)
+	if (story && (stories.isError || facts.isError))
 		return (
 			<Banner
 				tone="danger"
 				message={t`Your story couldn't be loaded.`}
-				action={{ label: t`Try again`, onPress: () => void stories.refetch() }}
+				action={{
+					label: t`Try again`,
+					onPress: () => {
+						void stories.refetch();
+						void facts.refetch();
+					},
+				}}
 			/>
 		);
-	if (story && stories.isPending) return <Skeleton height={space.s12 * 5} />;
+	if (story && (stories.isPending || facts.isPending)) return <Skeleton height={space.s12 * 5} />;
 	if (story && !selectedStory)
 		return (
 			<View style={{ gap: space.s3 }}>
 				<Banner tone="warn" message={t`This story is unavailable or uses facts that are switched off.`} />
-				<Button variant="secondary" label={t`Practice another question`} onPress={() => go("practise")} />
+				{application && (
+					<Button variant="secondary" label={t`Practice another question`} onPress={() => go("practise")} />
+				)}
 			</View>
 		);
 
@@ -93,6 +140,11 @@ function Practise({ application, version, interview, speak: speakFirst, story, n
 		...simulated.map((text) => ({ text, origin: "simulated" as const })),
 		...[...new Set(recalled)].map((text) => ({ text, origin: "recalled" as const })),
 	];
+	const fallbacks = [
+		t`Tell me about a piece of work you're proud of. What was your part in it, and how did you measure success?`,
+		t`Tell me about a time you disagreed with a colleague. How did you resolve it?`,
+		t`Why do you want this role at ${company}?`,
+	];
 	const questions: Question[] = storyTitle
 		? [
 				{
@@ -100,30 +152,48 @@ function Practise({ application, version, interview, speak: speakFirst, story, n
 					origin: "simulated",
 				},
 			]
-		: found.length > 0
-			? found
-			: [
-					t`Tell me about a piece of work you're proud of. What was your part in it, and how did you measure success?`,
-					t`Tell me about a time you disagreed with a colleague. How did you resolve it?`,
-					t`Why do you want this role at ${company}?`,
-				].map((text) => ({ text, origin: "simulated" as const }));
+		: warmup
+			? threePracticeQuestions(found, fallbacks)
+			: found.length > 0
+				? found
+				: fallbacks.map((text) => ({ text, origin: "simulated" as const }));
+
+	if (saved.isError)
+		return (
+			<Banner
+				tone="danger"
+				message={t`Couldn't load this. Your saved data hasn't changed.`}
+				action={{ label: t`Try again`, onPress: () => void saved.refetch() }}
+			/>
+		);
 
 	return (
 		<View style={{ gap: space.s4 }}>
 			{viewing ? (
-				<SavedAttempt item={viewing} />
+				<View style={{ gap: space.s3 }}>
+					{application === null && (
+						<Button
+							variant="secondary"
+							label={t({ message: "Practice", context: "Button: rehearse interview answers" })}
+							onPress={() => go("practise")}
+						/>
+					)}
+					<SavedAttempt item={viewing} />
+				</View>
 			) : saved.isPending ? (
 				<Skeleton height={space.s12 * 6} />
 			) : (
 				<Session
-					key={`${application.id}:${interview?.id ?? "none"}:${story ?? "general"}`}
-					applicationId={application.id}
+					key={`${application?.id ?? "shared"}:${interview?.id ?? "none"}:${story ?? "general"}:${warmup ? "three" : "all"}`}
+					application={application}
+					applicationId={application?.id ?? null}
 					interviewId={interview?.id ?? null}
 					questions={questions}
 					storyId={selectedStory?.id}
 					storyTitle={storyTitle}
 					voice={voice}
 					initialMode={speakFirst ? "spoken" : "typed"}
+					warmup={warmup === true}
 				/>
 			)}
 			<Block title={t`Your attempts`}>
@@ -143,7 +213,9 @@ function Practise({ application, version, interview, speak: speakFirst, story, n
 					))
 				)}
 				<Text variant="caption" color="ink3">
-					{t`Compare attempts to see what improved. Practice questions are simulated, not from ${company}.`}
+					{application
+						? t`Compare attempts to see what improved. Practice questions are simulated, not from ${company}.`
+						: t`Compare attempts to see what improved. Practice questions are simulated.`}
 				</Text>
 			</Block>
 		</View>
@@ -173,26 +245,41 @@ function AttemptRow({ item, now, current, onOpen }: AttemptRowProps) {
 // ---- One question at a time ----
 
 type SessionProps = {
-	applicationId: string;
+	application: WorkspaceTabProps["application"] | null;
+	applicationId: string | null;
 	interviewId: string | null;
 	questions: Question[];
 	storyId: string | undefined;
 	storyTitle: string | undefined;
 	voice: VoiceSettings;
 	initialMode: Mode;
+	warmup: boolean;
 };
 
-function Session({ applicationId, interviewId, questions, voice, initialMode, storyId, storyTitle }: SessionProps) {
+function Session({
+	application,
+	applicationId,
+	interviewId,
+	questions,
+	voice,
+	initialMode,
+	storyId,
+	storyTitle,
+	warmup,
+}: SessionProps) {
 	const { t } = useLingui();
 	const { colors, radius, space } = useTheme();
 	const generate = useGenerate(applicationId);
 	const provider = useHasAIProvider().defaultProvider;
-	const draft = useDraft<PracticeDraft>(`practice:${applicationId}:${interviewId ?? "none"}:${storyId ?? "general"}`, {
-		question: questions[0] ?? { text: t`Tell me about a piece of work you're proud of.`, origin: "simulated" },
-		mode: initialMode,
-		answer: "",
-		spoken: null,
-	});
+	const draft = useDraft<PracticeDraft>(
+		`practice:${applicationId}:${interviewId ?? "none"}:${storyId ?? "general"}${warmup ? ":three" : ""}`,
+		{
+			question: questions[0] ?? { text: t`Tell me about a piece of work you're proud of.`, origin: "simulated" },
+			mode: initialMode,
+			answer: "",
+			spoken: null,
+		},
+	);
 	const { question, mode, answer, spoken } = draft.value;
 	const setMode = (next: Mode) => draft.setValue((current) => ({ ...current, mode: next }));
 	const setAnswer = (next: string) => draft.setValue((current) => ({ ...current, answer: next }));
@@ -218,6 +305,8 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 	const keepRef = useRef(voice.settings.keep);
 	// Bumped by each new transcription and by switching mode, so a slower, older result can't land over newer input.
 	const generation = useRef(0);
+	const transcription = useRef<AbortController | null>(null);
+	useEffect(() => () => transcription.current?.abort(), [applicationId, transcriber?.providerId, transcriber?.model]);
 	useEffect(() => {
 		keepRef.current = voice.settings.keep;
 	});
@@ -237,16 +326,20 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 
 	const send = async (recording: Recording) => {
 		if (!transcriber) return;
+		transcription.current?.abort();
+		const request = new AbortController();
+		transcription.current = request;
 		const run = ++generation.current;
 		setStep({ name: "transcribing" });
 		try {
 			const result = await transcribe({
+				signal: request.signal,
 				recording,
 				providerId: transcriber.providerId,
 				model: transcriber.model,
 				applicationId,
 			});
-			if (!alive.current || run !== generation.current) return;
+			if (!alive.current || run !== generation.current || request.signal.aborted) return;
 			setAnswer(result.text);
 			setSpoken({ id: result.id, text: result.text, seconds: recording.seconds });
 			setStep({ name: "idle" });
@@ -260,7 +353,8 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 			audioRef.current = next;
 			setAudio(next);
 		} catch {
-			if (alive.current && run === generation.current) setStep({ name: "error" });
+			if (alive.current && run === generation.current)
+				setStep(request.signal.aborted ? { name: "idle" } : { name: "error" });
 		}
 	};
 
@@ -305,6 +399,7 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 	const chooseMode = (next: Mode) => {
 		if (next === "typed" && step.name === "recording") void recorder.cancel();
 		generation.current++;
+		transcription.current?.abort();
 		if (next === "typed" || step.name === "transcribing") setStep({ name: "idle" });
 		setMode(next);
 	};
@@ -341,11 +436,10 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 	const position = (index % questions.length) + 1;
 	const total = questions.length;
 	const recordingNow = step.name === "recording";
-	const elapsed = clock(recorder.seconds);
+	const elapsed = clock(recorder.seconds, i18n.locale);
 	const model = transcriber?.model ?? "";
-	const providerName = provider?.label ?? t`your AI connection`;
 	const transcriberName = transcriber?.label ?? "";
-	const spokenFor = spoken?.seconds != null ? clock(spoken.seconds) : t`audio file`;
+	const spokenFor = spoken?.seconds != null ? clock(spoken.seconds, i18n.locale) : t`audio file`;
 	const answerField = (
 		<TextArea
 			label={t`Your answer`}
@@ -360,7 +454,7 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 	return (
 		<View style={{ gap: space.s4 }}>
 			<Block
-				title={`${t`Question ${position} of ${total}`} · ${question.origin === "recalled" ? t`Recalled` : t`Practice`}`}
+				title={`${t`Question ${ph({ position: i18n.number(position) })} of ${ph({ total: i18n.number(total) })}`} · ${question.origin === "recalled" ? t`Recalled` : t`Practice`}`}
 				trailing={<HearIt key={question.text} text={question.text} voice={voice} player={player} />}
 			>
 				<Text variant="heading">{question.text}</Text>
@@ -537,19 +631,11 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 						loading={generate.isPending}
 						onPress={getFeedback}
 					/>
+					<GenerateNotice generate={generate} onRetry={getFeedback} />
 					<Text variant="caption" color="ink2">
-						{t`Compared with your stories and the posting.`}
+						{application ? t`Compared with your stories and the posting.` : t`Compared with your stories.`}
 					</Text>
-					{provider ? (
-						<PrivacyLine>
-							{t`Get feedback sends the question, your answer, this posting and your stories to ${providerName}.`}
-						</PrivacyLine>
-					) : (
-						<>
-							<PrivacyLine>{t`Feedback needs an AI connection. Nothing is sent until you ask.`}</PrivacyLine>
-							<Button variant="link" icon="key" label={t`Connect an AI provider`} onPress={() => setSetup(true)} />
-						</>
-					)}
+					<AiNotice task="practice" application={application} interview={interviewId !== null} />
 				</View>
 			</Block>
 
@@ -569,7 +655,7 @@ function Session({ applicationId, interviewId, questions, voice, initialMode, st
 						<Button variant="ghost" size="sm" icon="arrow-right" label={t`Next question`} onPress={nextQuestion} />
 					</Actions>
 					<Text variant="caption" color="ink3">
-						{t`Saved to Saved · Practice`}
+						{t`Saved to Library · Practice`}
 					</Text>
 				</FeedbackCard>
 			) : null}
@@ -616,28 +702,37 @@ function HearIt({ text, voice, player }: HearItProps) {
 	const { t } = useLingui();
 	const [busy, setBusy] = useState(false);
 	const [requests] = useState(createRequests);
+	const speech = useRef<AbortController | null>(null);
 	// A reply that lands after leaving (or after a newer question) is deleted instead of played.
 	useEffect(() => requests.invalidate, [requests]);
 	const reader = voice.settings.speak;
+	useEffect(() => () => speech.current?.abort(), [text, reader?.providerId, reader?.model]);
 	if (!reader) return null;
 	const stop = () => {
 		requests.invalidate();
+		speech.current?.abort();
 		player.stop();
 		setBusy(false);
 	};
 	const play = async () => {
 		if (player.playing || busy) return stop();
 		setBusy(true);
+		const request = new AbortController();
+		speech.current = request;
 		let played = false;
 		try {
 			played = await playLatest(
 				requests,
-				() => speak(reader, text),
+				() => speak(reader, text, request.signal),
 				(file) => player.play(file.uri, () => deleteQuietly(file)),
 				deleteQuietly,
 			);
 			if (played) setBusy(false);
 		} catch (error) {
+			if (request.signal.aborted) {
+				if (speech.current === request) setBusy(false);
+				return;
+			}
 			stop();
 			showToast({ message: workspaceError(error, t`Spoken audio is unavailable. Continue with the text question.`) });
 		}

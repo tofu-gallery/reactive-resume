@@ -1,9 +1,9 @@
+import type { TranscriptLabels } from "@reactive-resume/ai/tools/transcript";
 import type { WorkspaceTab } from "@reactive-resume/schema/career";
 import type { FileUIPart, UIMessage } from "ai";
-import { useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
-import { agentWebSources } from "@reactive-resume/ai/tools/agent-tool-contracts";
-import { client, orpc } from "@/libs/orpc/client";
+import { i18n } from "@lingui/core";
+import { ph, t } from "@lingui/core/macro";
+import { transcriptOf as sharedTranscriptOf } from "@reactive-resume/ai/tools/transcript";
 
 /** What a message shares with the model; each context chip turns one off. The career coach uses the last four. */
 export type MessageContext = {
@@ -19,6 +19,14 @@ export type MessageContext = {
 
 export type ChatAttachment = { id: string; filename: string; mediaType: string };
 
+/** Name the upload limit that was reached in every conversation composer. */
+export const attachmentErrorMessages = () => ({
+	AGENT_ATTACHMENT_LIMIT: t`Attach up to 10 files per message.`,
+	AGENT_ATTACHMENT_TOO_LARGE: t`Files can be up to 25 MB.`,
+	AGENT_THREAD_ATTACHMENTS_FULL: t`A conversation's files can total up to 100 MB. Start a new conversation.`,
+	AGENT_ACCOUNT_ATTACHMENTS_FULL: t`Your assistant files can total up to 1 GB. Delete conversations you no longer need.`,
+});
+
 export const attachmentPart = (attachment: ChatAttachment): FileUIPart => ({
 	type: "file",
 	url: `agent-attachment:${attachment.id}`,
@@ -26,26 +34,29 @@ export const attachmentPart = (attachment: ChatAttachment): FileUIPart => ({
 	filename: attachment.filename,
 });
 
-type TranscriptLabels = { user: string; assistant: string; sources?: string };
+type TranscriptNames = { user: string; assistant: string; sources: string };
 
-/** The conversation as plain text, speaker by speaker, for Copy transcript. Tool steps are left out. */
-export function transcriptOf(messages: readonly UIMessage[], labels: TranscriptLabels) {
-	return messages
-		.flatMap((message) => {
-			const text = message.parts
-				.flatMap((part) => (part.type === "text" ? [part.text] : []))
-				.join("")
-				.trim();
-			const sources = agentWebSources(message)
-				.map((source) => `${source.title}: ${source.url}`)
-				.join("\n");
-			const content = [text, ...(sources ? [`${labels.sources ?? "Sources"}:\n${sources}`] : [])]
-				.filter(Boolean)
-				.join("\n\n");
-			return content ? [`${message.role === "user" ? labels.user : labels.assistant}: ${content}`] : [];
-		})
-		.join("\n\n");
+/** Copy transcript's wording in the reader's language: speakers, edits with their outcome, and question answers. */
+function transcriptLabels(names: TranscriptNames): TranscriptLabels {
+	const statusLabel = { pending: t`proposed`, accepted: t`accepted`, rejected: t`rejected` };
+	return {
+		...names,
+		edit: ({ number, location, before, after, status }) => {
+			const outcome = statusLabel[status];
+			return before.trim()
+				? t`Edit ${ph({ number: i18n.number(number) })} · ${location}: "${before}" → "${after}" (${outcome})`
+				: t`Edit ${ph({ number: i18n.number(number) })} · ${location}: added "${after}" (${outcome})`;
+		},
+		question: (question, answer) => (answer === null ? t`Q: ${question}` : `${t`Q: ${question}`}\n${t`A: ${answer}`}`),
+	};
 }
+
+/** The conversation as plain text for Copy transcript; `statusOf` gives edits' latest decisions. */
+export const transcriptOf = (
+	messages: readonly UIMessage[],
+	names: TranscriptNames,
+	statusOf?: (id: string) => "pending" | "accepted" | "rejected" | undefined,
+) => sharedTranscriptOf(messages, transcriptLabels(names), statusOf);
 
 export const fileToBase64 = (file: File) =>
 	new Promise<string>((resolve, reject) => {
@@ -54,23 +65,3 @@ export const fileToBase64 = (file: File) =>
 		reader.onerror = reject;
 		reader.readAsDataURL(file);
 	});
-
-/**
- * A conversation whose connection was switched off or removed continues on `provider` (the default, which its privacy
- * line names), rather than failing on send.
- */
-export function useConversationConnection(
-	summary: { id: string; aiProviderId: string | null } | undefined,
-	provider: { id: string } | undefined,
-) {
-	const queryClient = useQueryClient();
-	const staleId = summary && provider && summary.aiProviderId !== provider.id ? summary.id : null;
-	const providerId = provider?.id;
-	useEffect(() => {
-		if (!staleId || !providerId) return;
-		void client.agent.threads
-			.update({ id: staleId, aiProviderId: providerId })
-			.then(() => queryClient.invalidateQueries({ queryKey: orpc.agent.threads.key() }))
-			.catch(() => undefined);
-	}, [staleId, providerId, queryClient]);
-}

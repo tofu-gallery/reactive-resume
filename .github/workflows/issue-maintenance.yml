@@ -1,4 +1,4 @@
-name: Issue Maintenance
+name: Issue maintenance
 
 on:
   issues:
@@ -11,6 +11,7 @@ permissions: {}
 
 jobs:
   label:
+    name: Label new issues
     if: github.event_name == 'issues'
     permissions:
       contents: read
@@ -18,19 +19,19 @@ jobs:
     runs-on: ${{ vars.USE_BLACKSMITH == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
 
     steps:
-      - name: Checkout Repository
+      - name: Check out source
         if: ${{ vars.USE_BLACKSMITH != 'true' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Checkout Repository (Blacksmith)
+      - name: Check out source (Blacksmith)
         if: ${{ vars.USE_BLACKSMITH == 'true' }}
         uses: useblacksmith/checkout@v1
         with:
           persist-credentials: false
 
-      - name: Apply Form Labels
+      - name: Apply issue-form labels
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
@@ -45,14 +46,15 @@ jobs:
               });
             }
 
-  stale:
+  cleanup:
+    name: Maintain inactive needs-info issues
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       issues: write
     runs-on: ${{ vars.USE_BLACKSMITH == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
 
     steps:
-      - name: Close Inactive Issues Awaiting Information
+      - name: Mark and close inactive needs-info issues
         uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11
         with:
           only-issue-labels: "status: needs info"

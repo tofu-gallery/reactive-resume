@@ -1,4 +1,5 @@
-import type { ImportedDocument } from "./import-file";
+import type { ImportedDocument, ImportToReview } from "./import-file";
+import type { Locale } from "@reactive-resume/utils/locale";
 import type { DocumentPickerAsset } from "expo-document-picker";
 import { plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
@@ -9,31 +10,54 @@ import { getNetworkStateAsync } from "expo-network";
 import { useRouter, Stack, useLocalSearchParams } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, View } from "react-native";
-import { forEachDatedEntry } from "@reactive-resume/schema/resume/dates";
-import { importDocument, ImportError } from "./import-file";
+import { forEachDatedEntry, hasUnreadableDateText } from "@reactive-resume/schema/resume/dates";
+import { localeSchema } from "@reactive-resume/utils/locale";
+import { copyForJob } from "./copy-for-job";
+import { defaultCopySource } from "./filter";
+import { createReviewedResume, importDocument, ImportError } from "./import-file";
 import { useNewDocuments } from "./new-documents";
 import { documentError, useDocumentRefresh, useDocuments } from "./queries";
 import { client, orpc } from "@/api/client";
 import { getServer, useSession } from "@/auth/session";
 import { AIProviderSetupSheet, useHasAIProvider } from "@/features/ai/providers";
+import { getLocaleOptions } from "@/features/settings/locale-names";
+import { SECTION_TITLES } from "@/features/write/fields";
+import { selectableLocales } from "@/i18n";
 import { routes } from "@/routes";
-import { Banner, Button, Card, ListRow, Screen, SelectSheet, Switch, Text, TextField, useTheme } from "@/ui";
+import { Banner, Button, Card, ListRow, Screen, SelectSheet, Switch, Text, TextArea, TextField, useTheme } from "@/ui";
 
 type Step = "choose" | "copy" | "import";
 
+/** The "For which job?" option that adds a job inline instead of picking a saved one. */
+const ADD_JOB = "__add-job";
+
 export function NewDocument() {
 	const router = useRouter();
-	const { t } = useLingui();
+	const { t, i18n } = useLingui();
 	const { colors, space } = useTheme();
-	const params = useLocalSearchParams<{ step?: string; sourceResumeId?: string; applicationId?: string }>();
+	const params = useLocalSearchParams<{
+		context?: string;
+		step?: string;
+		sourceResumeId?: string;
+		sourceLetterId?: string;
+		applicationId?: string;
+		destination?: string;
+	}>();
+	const jobFirst = params.context === "career" || params.context === "applications";
+	const letterFirst = params.context === "letters";
+	const openSaveJob = () => router.replace(routes.newJob());
 	const session = useSession();
 	const documents = useDocuments();
 	const refresh = useDocumentRefresh();
 	const ai = useHasAIProvider();
 	const [setup, setSetup] = useState(false);
 	const [step, setStep] = useState<Step>(params.step === "copy" ? "copy" : "choose");
+	const [locale, setLocale] = useState<Locale>();
 	const [sourceId, setSourceId] = useState<string | null>(params.sourceResumeId ?? null);
+	const [letterResumeId, setLetterResumeId] = useState(params.sourceResumeId ?? "");
+	const [letterSourceId, setLetterSourceId] = useState(params.sourceLetterId ?? "");
 	const [jobId, setJobId] = useState<string | null>(params.applicationId ?? null);
+	const [newJob, setNewJob] = useState<{ company: string; role: string; posting: string } | null>(null);
 	const [name, setName] = useState<string | null>(null);
 	const [aiPdf, setAiPdf] = useState<boolean | null>(null);
 	const [asset, setAsset] = useState<DocumentPickerAsset | null>(null);
@@ -41,24 +65,33 @@ export function NewDocument() {
 	const [progress, setProgress] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [created, setCreated] = useState<ImportedDocument | null>(null);
+	const [pending, setPending] = useState<ImportToReview | null>(null);
+	const [keepLeftovers, setKeepLeftovers] = useState(true);
 	const [applicationLinked, setApplicationLinked] = useState(false);
 	const [summary, setSummary] = useState<string | null>(null);
 	const running = useRef(false);
 	const mounted = useRef(true);
 	const abort = useRef<AbortController | null>(null);
 	const cached = useRef<File | null>(null);
-	const options = orpc.applications.list.queryOptions({ input: {} });
+	const options = orpc.applications.listSummary.queryOptions({ input: {} });
 	const applications = useQuery({
 		...options,
 		queryKey: [...options.queryKey, session.server],
 		enabled: step === "copy" && session.status === "signed-in",
 	});
 	const resumes = (documents.data ?? []).filter((document) => document.type === "resume");
-	const source = resumes.find((document) => document.id === sourceId) ?? resumes[0];
-	const jobs = (applications.data ?? []).filter((application) => application.status !== "closed");
-	const job = jobs.find((application) => application.id === jobId);
+	const earlierLetters = (documents.data ?? []).filter((document) => document.type === "letter");
+	// A named resume (the editor's Copy for a job) is the only source until the list has it: never another resume.
+	const source = sourceId ? resumes.find((document) => document.id === sourceId) : defaultCopySource(resumes);
+	const jobs = (applications.data ?? []).filter(
+		(application) => application.status !== "closed" || application.id === params.applicationId,
+	);
+	const job = newJob ? undefined : jobs.find((application) => application.id === jobId);
+	const waitingForJob = !newJob && Boolean(jobId) && !job && applications.isFetching;
+	const company = newJob ? newJob.company.trim() : job?.company;
+	const newJobReady = !newJob || (!!newJob.company.trim() && !!newJob.role.trim());
 	const suggested = (
-		job ? `${source?.name.split(" — ")[0] ?? ""} — ${job.company}` : t`${source?.name ?? ""} (copy)`
+		company ? `${source?.name.split(" — ")[0] ?? ""} — ${company}` : t`${source?.name ?? ""} (copy)`
 	).slice(0, 100);
 	const cleanupFile = () => {
 		try {
@@ -78,7 +111,9 @@ export function NewDocument() {
 	}, []);
 	const open = (document: ImportedDocument) => {
 		useNewDocuments.getState().markOpened(document);
-		router.replace(document.type === "resume" ? routes.builder(document.id) : routes.letter(document.id));
+		if (document.type === "resume" && params.destination === "job-match")
+			router.replace({ pathname: routes.builder(document.id, "check"), params: { tab: "match" } });
+		else router.replace(document.type === "resume" ? routes.builder(document.id) : routes.letter(document.id));
 	};
 	const run = async (task: (signal: AbortSignal) => Promise<void>) => {
 		if (running.current) return;
@@ -122,14 +157,25 @@ export function NewDocument() {
 		run(async (signal) => {
 			let document: ImportedDocument;
 			if (kind === "letter") {
-				const latest = resumes.toSorted((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+				const selected = resumes.find((resume) => resume.id === letterResumeId);
+				// A number when an untitled letter already exists, so the library can tell them apart until they're named.
+				const base = t`Untitled letter`;
+				const taken = new Set(
+					(await client.documents.list({ type: "letter", q: base }, { signal })).map((letter) =>
+						letter.name.toLowerCase(),
+					),
+				);
+				let name = base;
+				for (let number = 2; taken.has(name.toLowerCase()); number++) name = `${base} ${number}`;
 				const letter = await client.coverLetters.create(
 					{
-						name: t`Untitled letter`,
+						name,
 						recipient: "",
 						content: "",
-						...(latest ? { resumeId: latest.id } : {}),
+						...(selected ? { resumeId: selected.id } : {}),
 						...(params.applicationId ? { applicationId: params.applicationId } : {}),
+						// The server copies the selected letter's body and keeps both letters' histories separate.
+						...(letterSourceId ? { sourceLetterId: letterSourceId } : {}),
 					},
 					{ signal },
 				);
@@ -141,6 +187,7 @@ export function NewDocument() {
 						tags: [],
 						autoName: kind === "blank",
 						withSampleData: kind === "sample",
+						...(locale ? { locale } : {}),
 					},
 					{ signal },
 				);
@@ -154,24 +201,70 @@ export function NewDocument() {
 		});
 	const copy = () =>
 		run(async (signal) => {
-			if (!source || !(name ?? suggested).trim()) return;
-			const id = await client.documents.copyForJob(
-				{ resumeId: source.id, name: (name ?? suggested).trim(), ...(job ? { applicationId: job.id } : {}) },
-				{ signal },
-			);
+			if (!source || !(name ?? suggested).trim() || !newJobReady || waitingForJob) return;
+			const pasted = newJob?.posting.trim() ?? "";
+			const truncated = pasted.length > 20_000;
+			const input = {
+				resumeId: source.id,
+				name: (name ?? suggested).trim(),
+				...(newJob
+					? {
+							// The job and its copy are saved together, or neither is.
+							application: {
+								company: newJob.company.trim(),
+								role: newJob.role.trim(),
+								...(pasted
+									? {
+											jobDescription: pasted.slice(0, 20_000),
+											postingSource: {
+												method: "paste" as const,
+												format: "text" as const,
+												truncated,
+												completeness: truncated ? ("incomplete" as const) : ("unknown" as const),
+											},
+										}
+									: {}),
+							},
+						}
+					: jobId
+						? { applicationId: jobId }
+						: {}),
+			};
+			const id = await copyForJob(input, signal);
+			if (newJob) void applications.refetch();
 			if (current(signal)) {
 				const document = { id, type: "resume" as const };
+				const forJob = Boolean(newJob || jobId);
 				setCreated(document);
 				setApplicationLinked(true);
-				if (job && ai.hasAIProvider) onCopiedForJob(id);
+				if (params.destination === "job-match") open(document);
+				else if (forJob && ai.hasAIProvider) onCopiedForJob(id);
 				else open(document);
 			}
 		});
 	const read = (picked: DocumentPickerAsset) =>
 		run(async (signal) => {
 			setProgress(t`Reading the file and finding sections…`);
-			const document = await importDocument(picked, ai.hasAIProvider, aiPdf ?? ai.hasAIProvider, signal);
+			const result = await importDocument(picked, ai.hasAIProvider, aiPdf ?? false, signal, locale);
 			if (!current(signal)) return;
+			// Read with AI: nothing is created until the user has seen what came in and what didn't.
+			if (result.type === "review") {
+				setKeepLeftovers(true);
+				setPending(result);
+				return;
+			}
+			await finishImport(result, signal);
+		});
+	const confirmImport = (reviewed: ImportToReview) =>
+		run(async (signal) => {
+			setProgress(t`Creating the resume…`);
+			const document = await createReviewedResume(reviewed, keepLeftovers, signal, locale);
+			if (!current(signal)) return;
+			setPending(null);
+			await finishImport(document, signal);
+		});
+	const finishImport = async (document: ImportedDocument, signal: AbortSignal) => {
+		{
 			setCreated(document);
 			useNewDocuments.getState().markNew(document);
 			cleanupFile();
@@ -185,7 +278,7 @@ export function NewDocument() {
 					);
 					let flagged = 0;
 					forEachDatedEntry(resume.data, (entry) => {
-						if (entry.dates?.raw) flagged++;
+						if (hasUnreadableDateText(entry.dates)) flagged++;
 					});
 					const entries = sections.reduce((total, section) => total + section.items.length, 0);
 					if (current(signal))
@@ -196,7 +289,8 @@ export function NewDocument() {
 					/* Import already succeeded; a summary failure must not offer a duplicate import. */
 				}
 			}
-		});
+		}
+	};
 	const pick = () =>
 		run(async (signal) => {
 			const result = await getDocumentAsync({
@@ -221,7 +315,7 @@ export function NewDocument() {
 		<Screen>
 			<Stack.Screen
 				options={{
-					title: t`New document`,
+					title: letterFirst ? t`New cover letter` : t`New`,
 					sheetGrabberVisible: !busy,
 					gestureEnabled: !busy,
 					headerBackVisible: !busy,
@@ -236,13 +330,100 @@ export function NewDocument() {
 			) : (
 				<>
 					{error && <Banner tone="danger" message={error} />}
+					{!created && step !== "copy" && (
+						<>
+							<SelectSheet
+								label={t`Resume language`}
+								value={locale ?? ""}
+								disabled={busy}
+								options={[{ value: "", label: t`Default` }, ...getLocaleOptions(i18n, selectableLocales)]}
+								onChange={(value) => setLocale(localeSchema.safeParse(value).data)}
+							/>
+							<Text
+								variant="caption"
+								color="ink3"
+							>{t`Sets section titles, date words and text direction. Your content isn't translated.`}</Text>
+						</>
+					)}
 					{busy && (
 						<View accessibilityLiveRegion="polite" style={{ flexDirection: "row", gap: space.s3 }}>
 							<ActivityIndicator color={colors.accent} />
 							<Text>{progress ?? t`Creating document…`}</Text>
 						</View>
 					)}
-					{created ? (
+					{pending && !created ? (
+						<>
+							<Text variant="heading">{t`Check what was found`}</Text>
+							{pending.review.sections.length > 0 ? (
+								<Card>
+									{pending.review.sections.map((section) => (
+										<ListRow
+											key={section.key}
+											title={
+												section.title.trim() ||
+												(section.key in SECTION_TITLES
+													? i18n._(SECTION_TITLES[section.key as keyof typeof SECTION_TITLES])
+													: section.key)
+											}
+											subtitle={
+												section.key === "summary"
+													? t`text`
+													: plural(section.entries, { one: "# entry", other: "# entries" })
+											}
+										/>
+									))}
+								</Card>
+							) : (
+								<Text color="ink2">{t`No sections were found in this file.`}</Text>
+							)}
+							{pending.review.missingContact && (
+								<Banner tone="warn" message={t`Name and contact details weren't found. Add them in Basics.`} />
+							)}
+							{pending.review.notImported.length > 0 ? (
+								<>
+									<Text variant="label">
+										{plural(pending.review.notImported.length, {
+											one: "# line wasn't placed in any section:",
+											other: "# lines weren't placed in any section:",
+										})}
+									</Text>
+									{pending.review.notImported.map((line) => (
+										<Text key={line} variant="caption" color="ink2">
+											{`• ${line}`}
+										</Text>
+									))}
+									<View style={{ flexDirection: "row", alignItems: "center", gap: space.s3 }}>
+										<Text
+											style={{ flex: 1 }}
+										>{t`Add them as a section called “More from your file” to sort later`}</Text>
+										<Switch
+											label={t`Add them as a section called “More from your file” to sort later`}
+											value={keepLeftovers}
+											onValueChange={setKeepLeftovers}
+											disabled={busy}
+										/>
+									</View>
+								</>
+							) : null}
+							{(!pending.compared || pending.partial) && (
+								<Text variant="caption" color="ink2">
+									{!pending.compared
+										? t`This file's text couldn't be compared with what came in, so lines left out aren't listed. Check each section against your file in the editor.`
+										: t`Only part of this file could be compared with what came in. Check each section against your file in the editor.`}
+								</Text>
+							)}
+							<Button label={t`Create resume`} loading={busy} onPress={() => void confirmImport(pending)} />
+							<Button
+								label={t`Choose another file`}
+								variant="secondary"
+								disabled={busy}
+								onPress={() => {
+									setPending(null);
+									void pick();
+								}}
+							/>
+						</>
+					) : created ? (
 						<>
 							<Text variant="heading">{t`Document ready`}</Text>
 							<Text color="ink2">{summary ?? t`Your document was saved. Review it in the editor.`}</Text>
@@ -268,57 +449,115 @@ export function NewDocument() {
 						<>
 							{step === "choose" && (
 								<>
-									<Text variant="heading">{t`New document`}</Text>
-									<Card>
-										<ListRow
-											title={t`Import a resume`}
-											subtitle={t`PDF, Word, Reactive Resume, JSON Resume or LinkedIn export.`}
-											leading="file-arrow-up"
-											chevron
-											disabled={busy}
-											onPress={() => setStep("import")}
-										/>
-									</Card>
-									<Card>
-										<ListRow
-											title={t`Copy a resume for a job`}
-											subtitle={t`Start from one you have and link the application.`}
-											leading="copy"
-											chevron
-											disabled={busy}
-											onPress={() => setStep("copy")}
-										/>
-									</Card>
-									<Card>
-										<ListRow
-											title={t`Start blank`}
-											subtitle={t`Start with your name. Build from there.`}
-											leading="file-plus"
-											disabled={busy}
-											onPress={() => void create("blank")}
-										/>
-									</Card>
+									<Text variant="heading">{letterFirst ? t`New cover letter` : t`New`}</Text>
+									{jobFirst && (
+										<Card>
+											<ListRow
+												title={t`Save a job`}
+												subtitle={t`Paste a job link or posting to track it in Applications.`}
+												leading="briefcase"
+												chevron
+												disabled={busy}
+												onPress={openSaveJob}
+											/>
+										</Card>
+									)}
+									{!letterFirst && (
+										<>
+											<Card>
+												<ListRow
+													title={t`Import a resume`}
+													subtitle={t`PDF, Word, Reactive Resume, JSON Resume or LinkedIn export.`}
+													leading="file-arrow-up"
+													chevron
+													disabled={busy}
+													onPress={() => setStep("import")}
+												/>
+											</Card>
+											<Card>
+												<ListRow
+													title={t`Copy a resume for a job`}
+													subtitle={t`Start from one you have and link the application.`}
+													leading="copy"
+													chevron
+													disabled={busy}
+													onPress={() => setStep("copy")}
+												/>
+											</Card>
+											<Card>
+												<ListRow
+													title={t`Start blank`}
+													subtitle={t`Start with your name. Build from there.`}
+													leading="file-plus"
+													disabled={busy}
+													onPress={() => void create("blank")}
+												/>
+											</Card>
+										</>
+									)}
+									<SelectSheet
+										label={t`Resume for a new letter`}
+										value={letterResumeId}
+										options={[
+											{ value: "", label: t`No resume` },
+											...resumes.map((resume) => ({ value: resume.id, label: resume.name })),
+										]}
+										onChange={setLetterResumeId}
+										disabled={busy}
+									/>
+									<SelectSheet
+										label={t`Start from an earlier letter`}
+										value={letterSourceId}
+										options={[
+											{ value: "", label: t`Blank letter`, description: t`Your own body, no earlier letter` },
+											...earlierLetters.map((letter) => ({
+												value: letter.id,
+												label: letter.name,
+												description: letter.application
+													? t`Written for ${letter.application.company}`
+													: t`Not linked to a job`,
+											})),
+										]}
+										onChange={setLetterSourceId}
+										disabled={busy}
+									/>
+									<Text variant="caption" color="ink3">
+										{t`Starting from an earlier letter copies its body. The new letter keeps its own recipient, date and history.`}
+									</Text>
 									<Button
-										label={t`New cover letter instead`}
+										label={letterFirst ? t`New cover letter` : t`New cover letter instead`}
 										icon="envelope-simple"
-										variant="ghost"
+										variant={letterFirst ? "primary" : "ghost"}
 										disabled={busy || documents.isPending || documents.isError}
 										onPress={() => void create("letter")}
 									/>
-									<Button
-										label={t`Try with a sample resume`}
-										icon="sparkle"
-										variant="ghost"
-										disabled={busy}
-										onPress={() => void create("sample")}
-									/>
-									<Button
-										label={t`Check a PDF with the ATS checker`}
-										icon="list-checks"
-										variant="ghost"
-										disabled={busy}
-										onPress={() => router.replace(routes.atsChecker())}
-									/>
+									{!letterFirst && (
+										<>
+											<Button
+												label={t`Try with a sample resume`}
+												icon="sparkle"
+												variant="ghost"
+												disabled={busy}
+												onPress={() => void create("sample")}
+											/>
+											{!jobFirst && (
+												<Button
+													label={t`Save a job instead`}
+													icon="briefcase"
+													variant="ghost"
+													disabled={busy}
+													onPress={openSaveJob}
+												/>
+											)}
+											<Button
+												label={t`Check a PDF with the ATS checker`}
+												icon="list-checks"
+												variant="ghost"
+												disabled={busy}
+												onPress={() => router.replace(routes.atsChecker())}
+											/>
+										</>
+									)}
 									{documents.isError && (
 										<Banner
 											tone="danger"
@@ -344,13 +583,24 @@ export function NewDocument() {
 									<SelectSheet
 										label={t`Start from`}
 										value={source?.id ?? null}
-										options={resumes.map((document) => ({ value: document.id, label: document.name }))}
+										options={resumes.map((document) => ({
+											value: document.id,
+											label: document.name,
+											description: document.application
+												? t`Copy for ${document.application.company}`
+												: t`Not linked to a job`,
+										}))}
 										disabled={busy}
 										onChange={(id) => {
 											setSourceId(id);
 											setName(null);
 										}}
 									/>
+									{source && (
+										<Text variant="caption" color="ink3">
+											{source.application ? t`Copy for ${source.application.company}` : t`Not linked to a job`}
+										</Text>
+									)}
 									{applications.isError && (
 										<Banner
 											tone="danger"
@@ -360,20 +610,51 @@ export function NewDocument() {
 									)}
 									<SelectSheet
 										label={t`For which job?`}
-										value={job?.id ?? ""}
+										value={newJob ? ADD_JOB : (job?.id ?? "")}
 										options={[
 											{ value: "", label: t`No job yet` },
 											...jobs.map((application) => ({
 												value: application.id,
 												label: `${application.company} · ${application.role}`,
 											})),
+											{ value: ADD_JOB, label: t`Add a job`, icon: "plus" },
 										]}
 										disabled={busy || applications.isPending}
 										onChange={(id) => {
-											setJobId(id || null);
+											setNewJob(id === ADD_JOB ? { company: "", role: "", posting: "" } : null);
+											if (id !== ADD_JOB) setJobId(id || null);
 											setName(null);
 										}}
 									/>
+									{newJob && (
+										<>
+											<TextField
+												label={t`Company`}
+												value={newJob.company}
+												maxLength={200}
+												editable={!busy}
+												onChangeText={(company) => setNewJob((current) => current && { ...current, company })}
+											/>
+											<TextField
+												label={t`Role`}
+												value={newJob.role}
+												maxLength={200}
+												editable={!busy}
+												onChangeText={(role) => setNewJob((current) => current && { ...current, role })}
+											/>
+											<TextArea
+												label={t`Job posting (optional)`}
+												value={newJob.posting}
+												maxLength={100_000}
+												editable={!busy}
+												onChangeText={(posting) => setNewJob((current) => current && { ...current, posting })}
+											/>
+											<Text
+												variant="caption"
+												color="ink3"
+											>{t`Saved to Applications as a saved job, then linked to the copy. No AI request is made.`}</Text>
+										</>
+									)}
 									<TextField
 										label={t`Name`}
 										value={name ?? suggested}
@@ -382,14 +663,16 @@ export function NewDocument() {
 										editable={!busy}
 									/>
 									<Button
-										label={t`Create copy`}
+										label={newJob ? t`Save job and create copy` : t`Create copy`}
 										loading={busy}
 										disabled={
+											!newJobReady ||
 											!source ||
 											!(name ?? suggested).trim() ||
 											(name ?? suggested).length > 100 ||
 											documents.isError ||
-											applications.isError
+											applications.isError ||
+											waitingForJob
 										}
 										onPress={() => void copy()}
 									/>
@@ -398,12 +681,12 @@ export function NewDocument() {
 							{step === "import" && (
 								<>
 									<Text variant="heading">{t`Import a resume`}</Text>
-									<Text color="ink2">{t`PDF uses your AI provider when one is ready. Turn off the AI switch to read its text layer on your server. Word (.docx) needs an AI provider. Current and v4 Reactive Resume JSON, cover letters, JSON Resume and LinkedIn exports (.zip) are supported. Up to 10 MB.`}</Text>
+									<Text color="ink2">{t`PDF reads its text layer on your server by default, without AI. Turn on the AI switch to send it to your provider. Word (.docx) needs an AI provider. Current and v4 Reactive Resume JSON, cover letters, JSON Resume and LinkedIn exports (.zip) are supported. Up to 10 MB.`}</Text>
 									<View style={{ flexDirection: "row", alignItems: "center", gap: space.s3 }}>
 										<Text style={{ flex: 1 }}>{t`Use AI for PDF imports`}</Text>
 										<Switch
 											label={t`Use AI for PDF imports`}
-											value={aiPdf ?? ai.hasAIProvider}
+											value={aiPdf ?? false}
 											onValueChange={setAiPdf}
 											disabled={busy}
 										/>

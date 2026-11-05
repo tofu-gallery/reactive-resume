@@ -1,6 +1,7 @@
 import type { LetterMode } from "@/features/letters/use-letter-mode";
 import type { CoverLetter } from "@reactive-resume/schema/cover-letter/data";
 import { t } from "@lingui/core/macro";
+import { useLingui } from "@lingui/react/macro";
 import { useHotkey } from "@tanstack/react-hotkeys";
 import { getRouteApi } from "@tanstack/react-router";
 import { useEffect } from "react";
@@ -8,11 +9,14 @@ import { Tabs, TabsContent } from "@reactive-resume/ui/components/tabs";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { cn } from "@reactive-resume/utils/style";
 import { LetterDesignPanel } from "./design-panel";
+import { LetterDownloadSheet } from "./download-sheet";
 import { LetterBar, useDownloadLetter } from "./letter-bar";
 import { LetterPage } from "./letter-page";
-import { LetterShareSheet } from "./share-sheet";
 import { LetterWritePanel } from "./write-panel";
 import { LetterAssistant } from "@/features/assistant/dock";
+import { useAssistantShortcutEnabled } from "@/features/assistant/shortcut";
+import { useMarkDocumentOpened } from "@/features/documents/new-documents";
+import { useShortcutSettings } from "@/features/keyboard-shortcuts/settings";
 import { useLetterEditorStore } from "@/features/letters/store";
 import {
 	useLetterMode,
@@ -43,6 +47,7 @@ export function LetterShell() {
 	useLinkedUpdateNotice();
 	useUnsavedGuard();
 	useLetterWebMcpTools(routeApi.useParams().coverLetterId);
+	useMarkDocumentOpened(routeApi.useParams().coverLetterId);
 
 	return (
 		<Tabs value={mode} onValueChange={(value) => setMode(value as LetterMode)} className="contents">
@@ -56,7 +61,7 @@ export function LetterShell() {
 				assistant={<LetterAssistant />}
 				mobile={<MobileBody mode={mode} onModeChange={setMode} />}
 			>
-				<LetterShareSheet />
+				<LetterDownloadSheet />
 				<LetterHotkeys onModeChange={setMode} />
 			</EditorFrame>
 		</Tabs>
@@ -115,18 +120,34 @@ function MobileBody({ mode, onModeChange }: MobileBodyProps) {
 
 /** 1 and 2 switch modes outside fields, ⌘P downloads the PDF, ⌘⇧E opens Download. Saving is automatic. */
 function LetterHotkeys({ onModeChange }: { onModeChange: (mode: LetterMode) => void }) {
+	const assistantShortcutEnabled = useAssistantShortcutEnabled();
+	const { t } = useLingui();
+	const characterShortcuts = useShortcutSettings((state) => state.characterShortcuts);
 	const download = useDownloadLetter();
-	const setShareTab = useEditorStore((state) => state.setShareTab);
+	const setSheetTab = useEditorStore((state) => state.setSheetTab);
 
-	useHotkey("1", () => switchModeInstantly(() => onModeChange("write")));
-	useHotkey("2", () => switchModeInstantly(() => onModeChange("design")));
-	useHotkey("Mod+P", () => void download.run());
-	useHotkey("Mod+Shift+E", () => setShareTab("download"));
-	useHotkey("Mod+J", () => useEditorStore.getState().setAssistantOpen(!useEditorStore.getState().assistantOpen, true));
-	useHotkey("Mod+S", () => {
-		void useLetterEditorStore.getState().flush();
-		toast.add({ type: "info", description: t`Your changes are saved automatically.`, id: "auto-save" });
+	useHotkey("1", () => switchModeInstantly(() => onModeChange("write")), {
+		enabled: characterShortcuts,
+		meta: { name: t`Write` },
 	});
+	useHotkey("2", () => switchModeInstantly(() => onModeChange("design")), {
+		enabled: characterShortcuts,
+		meta: { name: t`Design` },
+	});
+	useHotkey("Mod+P", () => void download.run(), { meta: { name: t`Download PDF` } });
+	useHotkey("Mod+Shift+E", () => setSheetTab("download"), { meta: { name: t`Download & history` } });
+	useHotkey("Mod+J", () => useEditorStore.getState().setAssistantOpen(!useEditorStore.getState().assistantOpen, true), {
+		enabled: assistantShortcutEnabled,
+		meta: { name: t`Assistant` },
+	});
+	useHotkey(
+		"Mod+S",
+		() => {
+			void useLetterEditorStore.getState().flush();
+			toast.add({ type: "info", description: t`Your changes are saved automatically.`, id: "auto-save" });
+		},
+		{ meta: { name: t`Save` } },
+	);
 
 	return null;
 }
@@ -135,8 +156,10 @@ function LetterHotkeys({ onModeChange }: { onModeChange: (mode: LetterMode) => v
 function useUnsavedGuard() {
 	useEffect(() => {
 		const onBeforeUnload = (event: BeforeUnloadEvent) => {
-			const { status, pending } = useLetterEditorStore.getState();
-			if (status === "saved" && Object.keys(pending).length === 0) return;
+			const { status, pending, draft } = useLetterEditorStore.getState();
+			// An unkept draft is work the user paid for; reloading without a warning would lose it silently.
+			const unkept = draft.phase === "streaming" || draft.phase === "ready";
+			if (!unkept && status === "saved" && Object.keys(pending).length === 0) return;
 			void useLetterEditorStore.getState().flush();
 			event.preventDefault();
 		};

@@ -1,3 +1,4 @@
+import type { CoverLetter } from "@reactive-resume/schema/cover-letter/data";
 import type { ResumeData } from "@reactive-resume/schema/resume/data";
 import { ORPCError } from "@orpc/server";
 import z from "zod";
@@ -5,7 +6,8 @@ import { env } from "@reactive-resume/env/server";
 import { composeCoverLetter, createCoverLetterResumeData } from "@reactive-resume/resume/cover-letter";
 import { getResumeExportData } from "@reactive-resume/resume/export-sections";
 import { buildMarkdown } from "@reactive-resume/resume/markdown";
-import { generateFilename } from "@reactive-resume/utils/file";
+import { getDefaultFileName } from "@reactive-resume/utils/file";
+import { contentDisposition } from "@reactive-resume/utils/http";
 import { protectedProcedure } from "../../context";
 import { pdfExportRateLimit } from "../../middleware/rate-limit";
 import { coverLetterService } from "../cover-letters/service";
@@ -17,15 +19,40 @@ const exportInput = z.object({
 });
 const exportOutput = z.object({ headers: z.object({ "content-disposition": z.string() }), body: z.file() });
 
+/** Same composition for current-document downloads and approved version packets. */
+export function letterExportData(
+	letter: CoverLetter,
+	words = {
+		greeting: "Dear {name},",
+		teamGreeting: "Dear hiring team,",
+		hiringTeam: "Hiring team",
+		signOff: "Kind regards,",
+	},
+) {
+	const composed = composeCoverLetter(letter, {
+		...words,
+		greeting: (name) => words.greeting.replace("{name}", () => name),
+		formatDate: (date) =>
+			new Date(`${date}T12:00:00Z`).toLocaleDateString(letter.style.metadata.page.locale, {
+				day: "numeric",
+				month: "long",
+				year: "numeric",
+				timeZone: "UTC",
+			}),
+	});
+	return createCoverLetterResumeData({ ...letter, ...composed });
+}
+
 /** Builds the download response (headers + body) for a resume or cover letter in the requested format. */
-async function fileResponse(
+export async function fileResponse(
 	data: ResumeData,
 	name: string,
 	format: z.infer<typeof exportInput>["format"],
 	json: unknown,
 	includeCoverLetterHeader = false,
+	target: "resume" | "cover-letter" = "resume",
 ) {
-	const filename = generateFilename(name, format);
+	const filename = `${getDefaultFileName({ name, slug: "", data }, target)}.${format}`;
 	let body: File;
 	try {
 		if (format === "json") body = new File([JSON.stringify(json, null, 2)], filename, { type: "application/json" });
@@ -44,8 +71,8 @@ async function fileResponse(
 			else {
 				const blob =
 					format === "odt"
-						? await (await import("@reactive-resume/odt")).buildOdt(data, resolveTitle)
-						: await (await import("@reactive-resume/docx")).buildDocx(data, resolveTitle);
+						? await (await import("@reactive-resume/odt")).buildOdt(data, resolveTitle, { includeCoverLetterHeader })
+						: await (await import("@reactive-resume/docx")).buildDocx(data, resolveTitle, { includeCoverLetterHeader });
 				body = new File([blob], filename, { type: blob.type });
 			}
 		}
@@ -53,7 +80,7 @@ async function fileResponse(
 		console.error("[document export] Rendering failed", error);
 		throw new ORPCError("INTERNAL_SERVER_ERROR", { message: "Couldn't generate the document. Try again." });
 	}
-	return { headers: { "content-disposition": `attachment; filename="${filename}"` }, body };
+	return { headers: { "content-disposition": contentDisposition(filename) }, body };
 }
 
 export const documentExports = {
@@ -107,25 +134,8 @@ export const documentExports = {
 				hiringTeam: "Hiring team",
 				signOff: "Kind regards,",
 			};
-			const composed = composeCoverLetter(letter, {
-				...words,
-				greeting: (name) => words.greeting.replace("{name}", () => name),
-				formatDate: (date) =>
-					new Date(`${date}T12:00:00Z`).toLocaleDateString(letter.style.metadata.page.locale, {
-						day: "numeric",
-						month: "long",
-						year: "numeric",
-						timeZone: "UTC",
-					}),
-			});
 			const json =
 				input.format === "json" ? await coverLetterService.export({ id: input.id, userId: context.user.id }) : null;
-			return fileResponse(
-				createCoverLetterResumeData({ ...letter, ...composed }),
-				letter.name,
-				input.format,
-				json,
-				true,
-			);
+			return fileResponse(letterExportData(letter, words), letter.name, input.format, json, true, "cover-letter");
 		}),
 };

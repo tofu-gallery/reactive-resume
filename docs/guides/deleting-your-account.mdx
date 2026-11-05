@@ -7,7 +7,7 @@ Deleting your account removes it and everything in it for good. There is no grac
 
 ## Before you start
 
-[Export your data](/guides/exporting-your-data) from **Settings → Account → Your data**. The zip holds your resumes, cover letters, job applications and Career data as JSON files.
+[Export your data](/guides/exporting-your-data) from **Settings → Account → Your data**. The zip holds your records, document history and referenced uploaded files. Check `upload-manifest.json` for skipped files and keep those separately before deleting the account. Older servers may export file references only.
 
 ## Delete your account
 
@@ -17,35 +17,36 @@ Deleting your account removes it and everything in it for good. There is no grac
   </Step>
 
 <Step title="Select Delete…">
-  Next to **Delete account**, select **Delete…**. The **Delete your account?** dialog lists how many documents,
-  applications and API keys will go.
+  Next to **Delete account**, select **Delete…**. The **Delete your account?** dialog says that all your documents,
+  applications, API keys and public links are deleted for good.
 </Step>
 
 <Step title="Type delete to confirm">
-  Type `delete` into the box. The **Delete** button stays unavailable until the word matches. To back out, select **Keep
-  account**.
+  Type `delete` into the box. The **Delete account** button stays unavailable until the word matches. To back out,
+  select **Keep account**.
 </Step>
 
-  <Step title="Select Delete">
+  <Step title="Select Delete account">
     Reactive Resume deletes your account, signs you out and takes you to the home page.
   </Step>
 </Steps>
 
-<Frame caption="The dialog names what will be removed before you confirm">
+<Frame caption="Account deletion requires typed confirmation">
   <img
     src="/images/guides/deleting-your-account/delete-account-dialog.webp"
-    alt="The Delete your account? dialog saying 1 document, 0 applications, 0 API keys and every public link are removed permanently, with delete typed in the confirmation box and Keep account and Delete buttons"
+    alt="Delete your account confirmation explaining permanent removal, with Type delete to confirm and Keep account"
   />
 </Frame>
 
 ## What gets deleted
 
-- Every resume and cover letter, including those in the trash, and their version history.
+- Every resume and cover letter, including those in the trash, and their version history, including named employer-form packet versions. Downloaded packets and PDFs remain outside the app.
 - Every job application, including its workspace answers, saved results, offers and voice transcripts.
-- Career facts, stories, preferences, conversations, schedules, notifications and discovered roles.
+- Career facts, stories, saved reviewed answers, preferences, conversations, schedules, notifications and discovered roles.
 - Every public resume link. Anyone who opens one sees a page that no longer exists.
 - Your uploaded files, such as photos.
 - Your assistant conversations, API keys, saved AI providers, passkeys and linked social accounts.
+- Your recorded AI request usage and saved writing reviews.
 
 <Warning>
   This can't be undone from the app. To use Reactive Resume again, [create a new account](/guides/creating-an-account)
@@ -55,4 +56,6 @@ Deleting your account removes it and everything in it for good. There is no grac
 ## Related guides
 
 - [Exporting your data](/guides/exporting-your-data): download everything before you delete.
-- [Exporting your resume](/guides/exporting-your-resume): keep a PDF or JSON of a single resume.
+- [Downloading your resume](/guides/exporting-your-resume): keep a PDF or JSON of a single resume.
+
+Deleting an account also deletes its private application profile and references. To remove only those details, use **Settings → Profile → Manage profile → Delete profile** on web or native mobile. This leaves Career preferences, documents and submitted application snapshots unchanged. Self-identification data is not collected. Already downloaded or shared exports cannot be deleted remotely.

@@ -1,5 +1,11 @@
 import type { Style } from "../forme/style-types";
-import type { ResumeData, StyleIntent, StyleRule, StyleSlot } from "@reactive-resume/schema/resume/data";
+import type {
+	CustomSectionType,
+	ResumeData,
+	StyleIntent,
+	StyleRule,
+	StyleSlot,
+} from "@reactive-resume/schema/resume/data";
 import type { SemanticStylesheet, StylesheetSource } from "@reactive-resume/schema/resume/stylesheet";
 import {
 	escapeCssComment,
@@ -11,11 +17,6 @@ import { styleRulesSchema } from "@reactive-resume/schema/resume/data";
 import { getSectionStyleRuleContext } from "@reactive-resume/schema/resume/style-rules";
 import { rgbaStringToHex } from "@reactive-resume/utils/color";
 import { resolveStyleRuleSlot } from "../templates/shared/style-rules";
-
-export type LegacyStyleConversion = {
-	source: StylesheetSource;
-	sanitizedRules: readonly StyleRule[];
-};
 
 const styleSlots = [
 	"section",
@@ -89,7 +90,9 @@ const ruleBaseSelector = (rule: StyleRule): string => {
 	return "section";
 };
 
-const resolvedRuleStyle = (data: ResumeData, rule: StyleRule, slot: StyleSlot): Style => {
+type SectionTypes = ReadonlyMap<string, CustomSectionType>;
+
+const resolvedRuleStyle = (data: ResumeData, rule: StyleRule, slot: StyleSlot, sectionTypes: SectionTypes): Style => {
 	const isolated = {
 		...data,
 		metadata: { ...data.metadata, styleRules: [rule] },
@@ -98,7 +101,7 @@ const resolvedRuleStyle = (data: ResumeData, rule: StyleRule, slot: StyleSlot): 
 		rule.target.scope === "sectionType"
 			? { slot, sectionId: "", sectionType: rule.target.sectionType }
 			: rule.target.scope === "sectionId"
-				? { slot, ...getSectionStyleRuleContext(data, rule.target.sectionId) }
+				? { slot, ...getSectionStyleRuleContext(data, rule.target.sectionId, sectionTypes) }
 				: { slot, sectionId: "" };
 	return resolveStyleRuleSlot(isolated, options);
 };
@@ -123,27 +126,32 @@ const serializeBlock = (
 		blocks: [{ selector, declarations, ...(comment === undefined ? {} : { comment }) }],
 	}).trimEnd();
 
-const appliesToAwards = (data: ResumeData, rule: StyleRule): boolean => {
+const appliesToAwards = (data: ResumeData, rule: StyleRule, sectionTypes: SectionTypes): boolean => {
 	if (rule.target.scope === "global") return true;
 	if (rule.target.scope === "sectionType") return rule.target.sectionType === "awards";
-	return getSectionStyleRuleContext(data, rule.target.sectionId).sectionType === "awards";
+	return getSectionStyleRuleContext(data, rule.target.sectionId, sectionTypes).sectionType === "awards";
 };
 
-const textWeightSelector = (data: ResumeData, rule: StyleRule, base: string): string => {
+const textWeightSelector = (data: ResumeData, rule: StyleRule, base: string, sectionTypes: SectionTypes): string => {
 	const selectors = [
 		`${base} field:not([name="content"]):not([name="description"]):not([name="recipient"]):not([name="keywords"]):not([role~="primary-text"])`,
 		`${base} item[role~="nested-role"] > item-header > field[name="position"]`,
 	];
-	if (appliesToAwards(data, rule)) selectors.push(`${base} field[name="title"]`);
+	if (appliesToAwards(data, rule, sectionTypes)) selectors.push(`${base} field[name="title"]`);
 	return selectors.join(",\n");
 };
 
-const scizorBoldColorSelector = (data: ResumeData, rule: StyleRule, base: string): string | undefined => {
+const scizorBoldColorSelector = (
+	data: ResumeData,
+	rule: StyleRule,
+	base: string,
+	sectionTypes: SectionTypes,
+): string | undefined => {
 	const sectionType =
 		rule.target.scope === "sectionType"
 			? rule.target.sectionType
 			: rule.target.scope === "sectionId"
-				? getSectionStyleRuleContext(data, rule.target.sectionId).sectionType
+				? getSectionStyleRuleContext(data, rule.target.sectionId, sectionTypes).sectionType
 				: undefined;
 	if (sectionType === "awards") return;
 
@@ -166,10 +174,10 @@ const levelDecorationDeclarations = (
 	return { width: fontSize, height: fontSize };
 };
 
-const activeSlotChunks = (data: ResumeData, rule: StyleRule, slot: StyleSlot): string[] => {
+const activeSlotChunks = (data: ResumeData, rule: StyleRule, slot: StyleSlot, sectionTypes: SectionTypes): string[] => {
 	const base = ruleBaseSelector(rule);
 	const selector = selectorForSlot(base, slot);
-	const declarations = declarationsFromStyle(resolvedRuleStyle(data, rule, slot));
+	const declarations = declarationsFromStyle(resolvedRuleStyle(data, rule, slot, sectionTypes));
 	const combinedTextDeclarations = slot === "text" ? { ...declarations } : undefined;
 	const chunks: string[] = [];
 	const comments: string[] = [];
@@ -184,7 +192,9 @@ const activeSlotChunks = (data: ResumeData, rule: StyleRule, slot: StyleSlot): s
 		delete declarations.fontWeight;
 		if (Object.keys(declarations).length > 0)
 			chunks.push(serializeBlock(selector, declarations, rule.label || rule.id));
-		chunks.push(serializeBlock(textWeightSelector(data, rule, base), { fontWeight }, rule.label || rule.id));
+		chunks.push(
+			serializeBlock(textWeightSelector(data, rule, base, sectionTypes), { fontWeight }, rule.label || rule.id),
+		);
 		comments.push(
 			"Legacy Bold hosts keep the template bold weight; award titles remain the explicit unbold exception.",
 		);
@@ -204,7 +214,7 @@ const activeSlotChunks = (data: ResumeData, rule: StyleRule, slot: StyleSlot): s
 	}
 
 	if (slot === "text" && declarations.color !== undefined) {
-		const restorationSelector = scizorBoldColorSelector(data, rule, base);
+		const restorationSelector = scizorBoldColorSelector(data, rule, base, sectionTypes);
 		if (restorationSelector) {
 			chunks.push(
 				serializeBlock(
@@ -226,10 +236,10 @@ const activeSlotChunks = (data: ResumeData, rule: StyleRule, slot: StyleSlot): s
 	return [...chunks, ...comments.map((comment) => `/* ${escapeCssComment(comment)} */`)];
 };
 
-const disabledRuleChunk = (data: ResumeData, rule: StyleRule): string => {
+const disabledRuleChunk = (data: ResumeData, rule: StyleRule, sectionTypes: SectionTypes): string => {
 	const blocks = styleSlots.flatMap((slot) => {
 		if (!rule.slots[slot]) return [];
-		const declarations = declarationsFromStyle(resolvedRuleStyle(data, { ...rule, enabled: true }, slot));
+		const declarations = declarationsFromStyle(resolvedRuleStyle(data, { ...rule, enabled: true }, slot, sectionTypes));
 		if (Object.keys(declarations).length === 0) return [];
 		const base = ruleBaseSelector(rule);
 		return [
@@ -242,7 +252,8 @@ const disabledRuleChunk = (data: ResumeData, rule: StyleRule): string => {
 	return `/* Disabled legacy rule: ${label}${body ? `\n${body}` : ""}\n*/`;
 };
 
-export function convertLegacyStyleRules(data: ResumeData): LegacyStyleConversion {
+function convertLegacyStyleRules(data: ResumeData): StylesheetSource {
+	const sectionTypes = new Map(data.customSections.map((section) => [section.id, section.type]));
 	const sanitizedRules = styleRulesSchema.parse(data.metadata.styleRules ?? []);
 	const sanitizedData = {
 		...data,
@@ -257,15 +268,14 @@ export function convertLegacyStyleRules(data: ResumeData): LegacyStyleConversion
 		)
 		.map(({ rule }) => rule);
 	const chunks = orderedRules.flatMap((rule) => {
-		if (!rule.enabled) return [disabledRuleChunk(sanitizedData, rule)];
-		return styleSlots.flatMap((slot) => (rule.slots[slot] ? activeSlotChunks(sanitizedData, rule, slot) : []));
+		if (!rule.enabled) return [disabledRuleChunk(sanitizedData, rule, sectionTypes)];
+		return styleSlots.flatMap((slot) =>
+			rule.slots[slot] ? activeSlotChunks(sanitizedData, rule, slot, sectionTypes) : [],
+		);
 	});
 	const text = chunks.length > 0 ? `${chunks.join("\n\n")}\n` : "";
 
-	return {
-		source: { languageVersion: 1, text },
-		sanitizedRules,
-	};
+	return { languageVersion: 1, text };
 }
 
 /**
@@ -287,7 +297,7 @@ export function needsLegacyStyleConversion(
  * out, unless that would push the stylesheet over its size limit. The rules themselves are left in the data.
  */
 export function convertLegacyStylesheet(data: ResumeData): SemanticStylesheet {
-	const converted = convertLegacyStyleRules(data).source;
+	const converted = convertLegacyStyleRules(data);
 	const draft = data.metadata.stylesheet?.source.text.replace(/^\s*@version\s+\d+\s*;\s*/, "").trim();
 	const withDraft =
 		draft && draft !== converted.text.trim()

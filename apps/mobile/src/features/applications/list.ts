@@ -1,16 +1,40 @@
-import type { Application } from "./types";
-import type { ApplicationStatus } from "@reactive-resume/schema/applications/data";
-import { getNextStep } from "./next-step";
+import type { ApplicationLane } from "./lanes";
+import type { ApplicationSummary as Application } from "./types";
+import type { OfferHint } from "@reactive-resume/schema/applications/next-step";
+import {
+	compareNextStepSortKeys,
+	getNextStep,
+	needsAttention,
+	nextStepSortKey,
+} from "@reactive-resume/schema/applications/next-step";
+import { createDefaultApplicationLanes, resolveLane, visibleLanes } from "./lanes";
 import { LIST_ORDER } from "./stages";
 
 export type ApplicationSort = "updated" | "role" | "next";
-export type ApplicationFilters = { search: string; tag: string; showClosed: boolean };
+export type ApplicationFilters = { search: string; tag: string; showClosed: boolean; needsYou?: boolean };
 
-export function filterApplications(applications: readonly Application[], filters: ApplicationFilters) {
+export function filterApplications(
+	applications: readonly Application[],
+	filters: ApplicationFilters,
+	now = new Date(),
+	timeZone = "UTC",
+	offers?: ReadonlyMap<string, OfferHint>,
+) {
 	const search = filters.search.trim().toLocaleLowerCase();
 	return applications.filter(
 		(application) =>
 			(filters.showClosed || application.status !== "closed") &&
+			(!filters.needsYou ||
+				(offers === undefined && application.status === "offer") ||
+				needsAttention(
+					getNextStep(
+						application,
+						now,
+						timeZone,
+						offers === undefined ? undefined : (offers.get(application.id) ?? null),
+					),
+					now,
+				)) &&
 			(!filters.tag || application.tags.includes(filters.tag)) &&
 			(!search ||
 				[
@@ -26,34 +50,51 @@ export function groupApplications(
 	sort: ApplicationSort,
 	direction: "asc" | "desc",
 	now = new Date(),
+	lanes: ApplicationLane[] = createDefaultApplicationLanes().map((lane) => ({
+		...lane,
+		position: LIST_ORDER.indexOf(lane.category),
+	})),
+	timeZone = "UTC",
+	offers?: ReadonlyMap<string, OfferHint>,
 ) {
-	const nextTime = (application: Application) => {
-		const step = getNextStep(application, now);
-		return step.kind === "interview" || step.kind === "follow-up" ? step.at.getTime() : Infinity;
-	};
+	// Next step reads the same keys as web: dated steps soonest first, then the longest wait in the stage.
+	const keys = new Map(
+		sort === "next"
+			? applications.map((application) => [
+					application.id,
+					nextStepSortKey(
+						application,
+						now,
+						timeZone,
+						offers === undefined ? undefined : (offers.get(application.id) ?? null),
+					),
+				])
+			: [],
+	);
 	const compare = (a: Application, b: Application) => {
-		const left = sort === "next" ? nextTime(a) : new Date(a.updatedAt).getTime();
-		const right = sort === "next" ? nextTime(b) : new Date(b.updatedAt).getTime();
-		const order =
-			sort === "role"
-				? a.role.localeCompare(b.role) || a.company.localeCompare(b.company)
-				: left === right
-					? 0
-					: left < right
-						? -1
-						: 1;
+		let order: number;
+		if (sort === "role") order = a.role.localeCompare(b.role) || a.company.localeCompare(b.company);
+		else if (sort === "next") {
+			const [rankA, timeA] = keys.get(a.id) ?? [1, 0];
+			const [rankB, timeB] = keys.get(b.id) ?? [1, 0];
+			return compareNextStepSortKeys([rankA, timeA], [rankB, timeB], a.id, b.id, direction);
+		} else order = new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
 		return (direction === "asc" ? order : -order) || a.id.localeCompare(b.id);
 	};
-	return LIST_ORDER.map((status) => ({
-		status,
-		data: applications.filter((application) => application.status === status).sort(compare),
-	})).filter((group) => group.data.length > 0);
+	return visibleLanes(lanes, applications)
+		.sort((a, b) => LIST_ORDER.indexOf(a.category) - LIST_ORDER.indexOf(b.category) || a.position - b.position)
+		.map((lane) => ({
+			status: lane.id,
+			lane,
+			data: applications.filter((application) => resolveLane(lanes, application).id === lane.id).sort(compare),
+		}))
+		.filter((group) => group.data.length > 0);
 }
 
 /** Hidden/collapsed rows never remain selected for destructive bulk actions. */
 export function visibleSelection(
-	groups: { status: ApplicationStatus; data: Application[] }[],
-	collapsed: ReadonlySet<ApplicationStatus>,
+	groups: { status: string; data: Application[] }[],
+	collapsed: ReadonlySet<string>,
 	selected: ReadonlySet<string>,
 ) {
 	return groups.flatMap((group) =>

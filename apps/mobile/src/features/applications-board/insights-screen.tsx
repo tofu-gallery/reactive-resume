@@ -1,23 +1,30 @@
 import type { PipelineStep } from "./insights";
+import type { ApplicationStatus } from "@reactive-resume/schema/applications/data";
 import type { ReactNode } from "react";
-import { plural } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { File, Paths } from "expo-file-system";
+import { useRouter } from "expo-router";
 import * as Sharing from "expo-sharing";
 import { useRef, useState } from "react";
 import { RefreshControl, I18nManager, ScrollView, View } from "react-native";
 import Svg, { Circle, Defs, G, LinearGradient, Path, Rect, Stop, Text as SvgText } from "react-native-svg";
+import { fitLabel } from "@reactive-resume/utils/string";
 import { weekStartsOn } from "./calendar";
 import { computeOutcomes, computePipeline, computeTimeline, countSources } from "./insights";
 import { useApplicationSearch } from "./search";
 import { ApplicationsViewFrame } from "./views";
 import { useDocuments, useNow, useUserTime } from "@/features/application-detail/hooks";
 import { applicationError } from "@/features/applications/error";
+import { useApplicationLanes } from "@/features/applications/lane-queries";
+import { getLaneLabel, resolveLane } from "@/features/applications/lanes";
 import { filterApplications } from "@/features/applications/list";
 import { useApplications } from "@/features/applications/queries";
-import { getStageColor, getStageLabel } from "@/features/applications/stages";
+import { useOfferHints } from "@/features/applications/stage-actions";
+import { getStageColor } from "@/features/applications/stages";
 import { useIsTablet } from "@/shell/use-is-tablet";
-import { Banner, Button, Card, Skeleton, Text, showToast, useTheme } from "@/ui";
+import { Banner, Button, Card, EmptyState, Skeleton, Text, showToast, useTheme } from "@/ui";
 import { usePullRefresh } from "@/ui/use-pull-refresh";
 
 const BAR_HEIGHT = 18;
@@ -35,13 +42,17 @@ export function InsightsScreen() {
 function ApplicationInsights() {
 	const { t, i18n } = useLingui();
 	const { colors, space } = useTheme();
+	const router = useRouter();
 	const tablet = useIsTablet();
 	const query = useApplications();
 	const pull = usePullRefresh(query.refetch);
-	const { search } = useApplicationSearch();
+	const { search, needsYou, clearFilters } = useApplicationSearch();
+	const offers = useOfferHints();
 	const documents = useDocuments();
+	const lanes = useApplicationLanes();
 	const { timeZone } = useUserTime();
 	const now = useNow();
+	const laneLabel = (status: ApplicationStatus) => getLaneLabel(resolveLane(lanes.lanes, { status }));
 
 	if (query.isError) {
 		return (
@@ -60,7 +71,13 @@ function ApplicationInsights() {
 		);
 	}
 
-	const applications = filterApplications(query.data, { search, tag: "", showClosed: true });
+	const applications = filterApplications(
+		query.data,
+		{ search, tag: "", showClosed: true, needsYou },
+		now,
+		timeZone,
+		offers,
+	);
 	// A resume is tailored for an application when it was made for it (Copy for a job).
 	const madeFor = new Map(
 		(documents.data ?? []).flatMap((document) =>
@@ -79,11 +96,36 @@ function ApplicationInsights() {
 	const weekLabel = new Intl.DateTimeFormat(i18n.locale, { timeZone: "UTC", month: "numeric", day: "numeric" });
 	const half = tablet ? { flexBasis: 0, flexGrow: 1 } : null;
 
+	const filtersActive = Boolean(search.trim() || needsYou);
+	if (filtersActive && applications.length === 0) {
+		return (
+			<EmptyState
+				variant="card"
+				title={t`No matching applications`}
+				message={t`Try different words or clear your filters.`}
+				action={{ label: t`Clear filters`, onPress: clearFilters }}
+			/>
+		);
+	}
 	if (outcomes.sent === 0) {
 		return (
-			<Text color="ink2" align="center" style={{ padding: space.s8 }}>
-				{t`Once you've sent a few applications, this shows how far they get and how quickly people reply.`}
-			</Text>
+			<EmptyState
+				variant="card"
+				title={t`No replies to chart yet`}
+				message={
+					filtersActive
+						? t`Try different words or clear your filters.`
+						: t`Once you've sent a few applications, this shows how far they get and how quickly people reply.`
+				}
+				action={
+					filtersActive
+						? { label: t`Clear filters`, onPress: clearFilters }
+						: {
+								label: t`Save job`,
+								onPress: () => router.setParams({ create: "1" }),
+							}
+				}
+			/>
 		);
 	}
 
@@ -101,7 +143,7 @@ function ApplicationInsights() {
 					{outcomes.funnel.map((row) => (
 						<HorizontalBar
 							key={row.status}
-							label={getStageLabel(row.status)}
+							label={laneLabel(row.status)}
 							value={row.reached}
 							fraction={row.reached / widest}
 							colorOf={(colors) => getStageColor(row.status, colors)}
@@ -112,7 +154,7 @@ function ApplicationInsights() {
 
 				<View style={{ flexDirection: tablet ? "row" : "column", gap: space.s4 }}>
 					<Card style={half}>
-						<Text variant="display">{`${Math.round((outcomes.heardBack / outcomes.sent) * 100)}%`}</Text>
+						<Text variant="display">{`${i18n.number(Math.round((outcomes.heardBack / outcomes.sent) * 100))}%`}</Text>
 						<Text color="ink2">{t`heard back`}</Text>
 					</Card>
 					<Card style={half}>
@@ -127,12 +169,19 @@ function ApplicationInsights() {
 
 				{outcomes.tailored.sent + outcomes.base.sent > 0 ? (
 					<Section title={t`Tailored vs. base resume`}>
-						<Text color="ink2">
-							{t`${outcomes.tailored.replied} of ${outcomes.tailored.sent} tailored applications got a reply; ${outcomes.base.replied} of ${outcomes.base.sent} sent with another resume.`}
-						</Text>
-						{outcomes.tailored.sent + outcomes.base.sent < 10 ? (
-							<Text variant="callout" color="ink3">{t`Small numbers, but worth noticing.`}</Text>
-						) : null}
+						{/* A comparison needs a few of each: "0 of 0" compares nothing. */}
+						{outcomes.tailored.sent >= 3 && outcomes.base.sent >= 3 ? (
+							<>
+								<Text color="ink2">
+									{t`${i18n.number(outcomes.tailored.replied)} of ${i18n.number(outcomes.tailored.sent)} tailored applications got a reply; ${i18n.number(outcomes.base.replied)} of ${i18n.number(outcomes.base.sent)} sent with another resume.`}
+								</Text>
+								{outcomes.tailored.sent + outcomes.base.sent < 10 ? (
+									<Text variant="callout" color="ink3">{t`Small numbers, but worth noticing.`}</Text>
+								) : null}
+							</>
+						) : (
+							<Text color="ink2">{t`Not enough applications to compare yet: this needs 3 of each.`}</Text>
+						)}
 					</Section>
 				) : null}
 
@@ -161,7 +210,7 @@ function ApplicationInsights() {
 					</Section>
 				</View>
 
-				<PipelineFlow active={pipeline.active} closed={pipeline.closed} steps={pipeline.steps} />
+				<PipelineFlow active={pipeline.active} closed={pipeline.closed} steps={pipeline.steps} labelOf={laneLabel} />
 			</ScrollView>
 		</>
 	);
@@ -207,7 +256,7 @@ function HorizontalBar({ label, value, fraction, colorOf, dot }: HorizontalBarPr
 	return (
 		<View
 			accessible
-			accessibilityLabel={`${label}: ${value}`}
+			accessibilityLabel={`${label}: ${i18n.number(value)}`}
 			style={{ flexDirection: "row", alignItems: "center", gap: space.s2 }}
 		>
 			<View style={{ width: space.s12 * 2, flexDirection: "row", alignItems: "center", gap: space.s1 }}>
@@ -231,7 +280,7 @@ function HorizontalBar({ label, value, fraction, colorOf, dot }: HorizontalBarPr
 				/>
 			</Svg>
 			<Text variant="label" align="right" style={{ minWidth: space.s6 }}>
-				{value}
+				{i18n.number(value)}
 			</Text>
 		</View>
 	);
@@ -246,13 +295,13 @@ function WeekBars({ counts, labels, max }: WeekBarsProps) {
 	return (
 		<View
 			accessible
-			accessibilityLabel={counts.map((count, i) => `${labels[i]}: ${count}`).join(", ")}
+			accessibilityLabel={counts.map((count, i) => `${labels[i]}: ${i18n.number(count)}`).join(", ")}
 			style={{ gap: space.s1 }}
 		>
 			<View style={{ flexDirection: "row" }}>
 				{counts.map((count, i) => (
 					<Text key={labels[i]} variant="micro" color="ink3" align="center" style={{ flex: 1 }}>
-						{count || ""}
+						{count ? i18n.number(count) : ""}
 					</Text>
 				))}
 			</View>
@@ -288,16 +337,22 @@ function WeekBars({ counts, labels, max }: WeekBarsProps) {
 	);
 }
 
-type PipelineFlowProps = { active: number; closed: number; steps: PipelineStep[] };
+type PipelineFlowProps = {
+	active: number;
+	closed: number;
+	steps: PipelineStep[];
+	/** The owner's name for each stage's default lane. */
+	labelOf: (status: ApplicationStatus) => string;
+};
 
 // The flow chart's drawing units (web PipelineFlow): bars on a mid line, bands joining them.
-const FLOW = { width: 800, height: 340, padX: 40, midY: 190, maxBar: 150, bar: 34 } as const;
+const FLOW = { width: 800, height: 340, padX: 40, midY: 190, maxBar: 150, bar: 34, labelMax: 18 } as const;
 
 /**
  * Where active applications went, as a shareable picture (web "Pipeline flow"), with the stage totals as text for
  * screen readers. Share PNG renders the SVG to an image and opens the system share sheet.
  */
-function PipelineFlow({ active, closed, steps }: PipelineFlowProps) {
+function PipelineFlow({ active, closed, steps, labelOf }: PipelineFlowProps) {
 	const { t } = useLingui();
 	const { colors, fonts, space } = useTheme();
 	const svg = useRef<Svg>(null);
@@ -319,7 +374,7 @@ function PipelineFlow({ active, closed, steps }: PipelineFlowProps) {
 	const transitions = steps.slice(1).map((step, i) => {
 		const from = steps[i];
 		return from
-			? t`${getStageLabel(from.status)} → ${getStageLabel(step.status)}: ${step.reached}${step.conversion === null ? "" : ` (${step.conversion}%)`}`
+			? t`${labelOf(from.status)} → ${labelOf(step.status)}: ${i18n.number(step.reached)}${step.conversion === null ? "" : ` (${i18n.number(step.conversion)}%)`}`
 			: "";
 	});
 
@@ -383,7 +438,7 @@ function PipelineFlow({ active, closed, steps }: PipelineFlowProps) {
 								fontFamily={fonts.ui[400]}
 								fill={colors.ink2}
 							>
-								{t`${closed} closed`}
+								{t`${ph({ closed: i18n.number(closed) })} closed`}
 							</SvgText>
 						</>
 					) : null}
@@ -412,7 +467,7 @@ function PipelineFlow({ active, closed, steps }: PipelineFlowProps) {
 								fontFamily={fonts.ui[700]}
 								fill={colors.ink}
 							>
-								{bar.reached}
+								{i18n.number(bar.reached)}
 							</SvgText>
 							<SvgText
 								x={bar.cx}
@@ -422,7 +477,7 @@ function PipelineFlow({ active, closed, steps }: PipelineFlowProps) {
 								fontFamily={fonts.ui[500]}
 								fill={colors.ink2}
 							>
-								{getStageLabel(bar.status)}
+								{fitLabel(labelOf(bar.status), FLOW.labelMax)}
 							</SvgText>
 							{i > 0 && bar.conversion !== null ? (
 								<SvgText
@@ -433,7 +488,7 @@ function PipelineFlow({ active, closed, steps }: PipelineFlowProps) {
 									fontFamily={fonts.ui[400]}
 									fill={colors.ink3}
 								>
-									{`${bar.conversion}%`}
+									{`${i18n.number(bar.conversion)}%`}
 								</SvgText>
 							) : null}
 						</G>
@@ -448,7 +503,7 @@ function PipelineFlow({ active, closed, steps }: PipelineFlowProps) {
 				))}
 				{closed > 0 ? (
 					<Text variant="callout" color="ink2">
-						{t`Closed: ${closed}`}
+						{t`Closed: ${ph({ closed: i18n.number(closed) })}`}
 					</Text>
 				) : null}
 			</View>

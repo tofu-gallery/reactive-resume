@@ -3,11 +3,13 @@
 import type { Application } from "@/features/applications/types";
 import type { ReminderTarget } from "@/features/reminders";
 import type { InterviewKind, InterviewTimelineEntry } from "@reactive-resume/schema/applications/data";
-import { t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { File } from "expo-file-system";
 import { useEffect, useState } from "react";
+import { followUpInstant } from "@reactive-resume/schema/applications/follow-up";
 import { orpc, rest } from "@/api/client";
 import { useSession } from "@/auth/session";
 import { useInvalidateApplications } from "@/features/applications/queries";
@@ -35,7 +37,6 @@ export function useDetailMutations(applicationId: string) {
 		addInterview: useMutation({ ...orpc.applications.addInterview.mutationOptions(), onSettled }),
 		updateInterview: useMutation({ ...orpc.applications.updateInterview.mutationOptions(), onSettled }),
 		removeDocument: useMutation({ ...orpc.applications.removeDocument.mutationOptions(), onSettled }),
-		createLetter: useMutation({ ...orpc.coverLetters.create.mutationOptions(), onSettled }),
 		/** Uploads a picked PDF (already checked by `attachmentProblem`) through the REST multipart endpoint. */
 		attach: useMutation({
 			mutationFn: async ({ kind, uri }: { kind: AttachmentKind; uri: string }) => {
@@ -53,7 +54,10 @@ export function useDetailMutations(applicationId: string) {
 }
 
 /** The notification for one interview. The body has no time in it, so a timezone change needs no reschedule. */
-export const interviewReminder = (application: Application, entry: InterviewTimelineEntry): ReminderTarget => ({
+export const interviewReminder = (
+	application: Pick<Application, "id" | "company" | "role">,
+	entry: InterviewTimelineEntry,
+): ReminderTarget => ({
 	kind: "interview",
 	applicationId: application.id,
 	entryId: entry.id,
@@ -63,21 +67,30 @@ export const interviewReminder = (application: Application, entry: InterviewTime
 });
 
 /** The notification for the follow-up; it fires at the follow-up itself (09:00 that day). */
-export const followUpReminder = (application: Application): ReminderTarget | null =>
+export const followUpReminder = (
+	application: Pick<Application, "id" | "company" | "role" | "followUpAt" | "followUpDateOnly" | "followUpNote">,
+	timeZone = "UTC",
+): ReminderTarget | null =>
 	application.followUpAt
 		? {
 				kind: "follow-up",
 				applicationId: application.id,
-				start: new Date(application.followUpAt),
+				start: followUpInstant(application, timeZone) ?? new Date(application.followUpAt),
 				title: application.followUpNote || t`Follow up`,
 				body: `${application.role} · ${application.company}`,
 			}
 		: null;
 
 /** Everything that may have a reminder; a closed application has none. */
-export function reminderTargets(application: Application): ReminderTarget[] {
+export function reminderTargets(
+	application: Pick<
+		Application,
+		"id" | "status" | "activity" | "company" | "role" | "followUpAt" | "followUpDateOnly" | "followUpNote"
+	>,
+	timeZone = "UTC",
+): ReminderTarget[] {
 	if (application.status === "closed") return [];
-	const followUp = followUpReminder(application);
+	const followUp = followUpReminder(application, timeZone);
 	return [
 		...application.activity.filter(isInterview).map((entry) => interviewReminder(application, entry)),
 		...(followUp ? [followUp] : []),
@@ -116,8 +129,7 @@ export function useUserTime() {
 	const timeZone = preferred && isTimeZone(preferred) ? preferred : deviceTimeZone();
 	const format = (value: Date | string, options: Intl.DateTimeFormatOptions, zone = timeZone) =>
 		new Intl.DateTimeFormat(i18n.locale, { timeZone: zone, ...options }).format(new Date(value));
-	const time = (value: Date | string, zone?: string) =>
-		format(value, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }, zone);
+	const time = (value: Date | string, zone?: string) => format(value, { hour: "2-digit", minute: "2-digit" }, zone);
 	const day = (value: Date | string, zone?: string) =>
 		format(value, { weekday: "short", day: "numeric", month: "short" }, zone);
 	return {
@@ -137,4 +149,5 @@ export function useUserTime() {
 }
 
 /** "10 min", "1 h", "1 day": how long before the interview the reminder fires. */
-export const leadLabel = (minutes: number) => (minutes >= 1440 ? t`1 day` : minutes >= 60 ? t`1 h` : t`${minutes} min`);
+export const leadLabel = (minutes: number) =>
+	minutes >= 1440 ? t`1 day` : minutes >= 60 ? t`1 h` : t`${ph({ minutes: i18n.number(minutes) })} min`;

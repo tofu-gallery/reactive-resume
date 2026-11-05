@@ -3,6 +3,7 @@ import type { IconName } from "@reactive-resume/ui/components/icon";
 import type { ReactNode } from "react";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { TabsContent } from "@reactive-resume/ui/components/tabs";
 import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
@@ -44,7 +45,7 @@ type EditorFrameProps = {
 	assistant: ReactNode;
 	/** Phones show one view at a time; each editor brings its own. */
 	mobile: ReactNode;
-	/** The share sheet and hotkeys. */
+	/** The Download & history sheet and hotkeys. */
 	children: ReactNode;
 };
 
@@ -129,17 +130,20 @@ function DesktopBody({ mode, panelLabel, panel, page, assistant, column, replace
 				replaced={replace && assistantOpen}
 				assistant={<div className="min-h-0 border-e border-line">{assistant}</div>}
 			>
-				<TabsContent
-					key={mode}
-					value={mode}
-					aria-label={panelLabel}
-					// `relative`: absolutely positioned descendants (sr-only text, say) stay inside this scroller instead of
-					// stretching the document, which would let scrollIntoView shift the whole editor. Keyed by mode so each
-					// mode starts at its top; no scroll anchoring, which yanked the Design panel back while scrolling it.
-					className="relative min-h-0 overflow-y-auto border-e border-line bg-surface [overflow-anchor:none]"
-				>
-					{panel}
-				</TabsContent>
+				{/* A landmark of its own beside the page's <main> (layout-neutral: `contents`). */}
+				<aside aria-label={t`Editor`} className="contents">
+					<TabsContent
+						key={mode}
+						value={mode}
+						aria-label={panelLabel}
+						// `relative`: absolutely positioned descendants (sr-only text, say) stay inside this scroller instead of
+						// stretching the document, which would let scrollIntoView shift the whole editor. Keyed by mode so each
+						// mode starts at its top; no scroll anchoring, which yanked the Design panel back while scrolling it.
+						className="relative min-h-0 overflow-y-auto border-e border-line bg-surface [overflow-anchor:none]"
+					>
+						{panel}
+					</TabsContent>
+				</aside>
 			</AssistantReplace>
 			<main id="main-content" className="min-h-0 min-w-0">
 				{page}
@@ -149,27 +153,54 @@ function DesktopBody({ mode, panelLabel, panel, page, assistant, column, replace
 	);
 }
 
-/** Tablets: the page, with the panel as a 380px drawer over it. */
+/** The drawer and visible canvas share the available width; ResizeObserver refits the page. */
 function TabletBody({ mode, panelLabel, panel, page }: BodyProps) {
 	const drawerOpen = useEditorStore((state) => state.drawerOpen);
+	const panelRef = useRef<HTMLDivElement>(null);
+	useLayoutEffect(() => {
+		// All opening paths (including selecting page text) must refit to the narrower canvas.
+		if (drawerOpen) useEditorStore.getState().setZoom("fit");
+	}, [drawerOpen]);
+	useEffect(() => {
+		if (!drawerOpen) return;
+		const close = (event: KeyboardEvent) => {
+			if (
+				event.key !== "Escape" ||
+				event.defaultPrevented ||
+				document.querySelector('[role="dialog"][aria-modal="true"]')
+			)
+				return;
+			event.preventDefault();
+			const returnFocus = event.target instanceof Node && panelRef.current?.contains(event.target);
+			useEditorStore.setState({ drawerOpen: false });
+			if (returnFocus) document.getElementById("editor-panel-toggle")?.focus();
+		};
+		window.addEventListener("keydown", close);
+		return () => window.removeEventListener("keydown", close);
+	}, [drawerOpen]);
 
 	return (
 		<div className="relative min-h-0">
-			<main id="main-content" className="h-full min-w-0">
+			<main id="main-content" className={cn("h-full min-w-0", drawerOpen && "ps-[380px]")}>
 				{page}
 			</main>
-			<TabsContent
-				key={mode}
-				value={mode}
-				aria-label={panelLabel}
-				inert={!drawerOpen}
-				className={cn(
-					"absolute inset-y-0 start-0 z-20 w-[380px] max-w-[calc(100%-3rem)] overflow-y-auto border-e border-line bg-surface shadow-e3 transition-transform duration-emphasized ease-enter [overflow-anchor:none]",
-					!drawerOpen && "-translate-x-full rtl:translate-x-full",
-				)}
-			>
-				{panel}
-			</TabsContent>
+			{/* Inert with the closed drawer, so the landmark isn't reachable while its contents are. */}
+			<aside aria-label={t`Editor`} className="contents" inert={!drawerOpen}>
+				<TabsContent
+					key={mode}
+					value={mode}
+					aria-label={panelLabel}
+					ref={panelRef}
+					id="editor-panel"
+					inert={!drawerOpen}
+					className={cn(
+						"absolute inset-y-0 start-0 z-20 w-[380px] max-w-[calc(100%-3rem)] overflow-y-auto border-e border-line bg-surface shadow-e3 transition-transform duration-emphasized ease-enter [overflow-anchor:none]",
+						!drawerOpen && "-translate-x-full rtl:translate-x-full",
+					)}
+				>
+					{panel}
+				</TabsContent>
+			</aside>
 		</div>
 	);
 }
@@ -198,7 +229,7 @@ export function MobileTabBar<V extends MobileView>({ tabs, view, onModeChange }:
 							if (tab !== "page") onModeChange(tab as Exclude<V, "page">);
 						}}
 						className={cn(
-							"relative flex min-h-[52px] flex-1 flex-col items-center justify-center gap-0.5 text-[11px] transition-[color,scale] duration-quick ease-enter active:scale-[0.97]",
+							"relative flex min-h-[52px] flex-1 flex-col items-center justify-center gap-0.5 text-center text-xs [overflow-wrap:anywhere] transition-[color,scale] duration-quick ease-enter active:scale-[0.97]",
 							active ? "font-semibold text-ink" : "text-ink-2",
 						)}
 					>

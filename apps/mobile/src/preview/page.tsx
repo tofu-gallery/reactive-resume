@@ -1,11 +1,14 @@
 import type { ResumeDraftStore } from "@/draft/types";
 import type { PageMapNode } from "@reactive-resume/pdf/page-map";
-import { plural } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { useRouter } from "expo-router";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, View, useWindowDimensions } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { measureOverflow } from "@reactive-resume/pdf/page-map";
+import { addPageWith, spillingSections } from "@reactive-resume/resume/spill";
 import { fitResume } from "./fit";
 import { usePageZoom, ZoomViewport } from "./use-page-zoom";
 import { usePreview } from "./usePreview";
@@ -37,6 +40,7 @@ export function ResumePage({ id, draft, focused, previewData }: ResumePageProps)
 	const selection = selected?.data === draft.data ? selected.node : null;
 	const [fitting, setFitting] = useState(false);
 	const [fitFailed, setFitFailed] = useState(false);
+	const [fitError, setFitError] = useState(false);
 	const [fitApplied, setFitApplied] = useState(false);
 	const latestData = useRef(draft.data);
 	useLayoutEffect(() => {
@@ -71,9 +75,15 @@ export function ResumePage({ id, draft, focused, previewData }: ResumePageProps)
 		if (!data || fitting || draft.locked) return;
 		setFitting(true);
 		setFitFailed(false);
+		setFitError(false);
 		try {
 			const fitted = await fitResume(data, () => mounted.current && latestData.current === data);
 			if (!mounted.current || latestData.current !== data) return;
+			// Squeezing that still runs over gains nothing: leave the design as it was and offer a page instead.
+			if (!fitted.fits) {
+				setFitFailed(true);
+				return;
+			}
 			let applied = false;
 			draft.update(
 				(value) => {
@@ -84,18 +94,37 @@ export function ResumePage({ id, draft, focused, previewData }: ResumePageProps)
 				},
 				{ newStep: true },
 			);
-			if (applied) {
-				setFitApplied(true);
-				setFitFailed(!fitted.fits);
-			}
+			if (applied) setFitApplied(true);
 		} catch {
-			if (mounted.current) setFitFailed(true);
+			// A render that failed says nothing about whether the content fits.
+			if (mounted.current) setFitError(true);
 		} finally {
 			if (mounted.current) setFitting(false);
 		}
 	};
 	const authored = Math.max(1, data?.metadata.layout.pages.length ?? 1);
-	const overflow = result && result.pageCount > authored;
+	const overflow = data && result ? measureOverflow(data, result) : null;
+	const firstSpill = overflow?.spills[0];
+	// The sections that spill off the last page go onto a new page: the other way out besides Fit.
+	// Only for the draft itself: with the Assistant's edits marked, the page shown isn't the one a new page would split.
+	const spilling =
+		overflow && data && result && !previewData
+			? spillingSections(data.metadata.layout.pages, result.pageMap.nodes)
+			: null;
+	const addPage = () => {
+		if (!spilling || draft.locked || !data) return;
+		const measured = JSON.stringify(data.metadata.layout.pages);
+		draft.update(
+			(value) => {
+				// The layout changed before this render caught up: the sections measured here may not spill any more.
+				if (JSON.stringify(value.metadata.layout.pages) !== measured) return;
+				addPageWith(value.metadata.layout.pages, spilling);
+			},
+			{ newStep: true },
+		);
+		setFitFailed(false);
+		setFitApplied(false);
+	};
 	const currentPage = Math.min(
 		result?.pageCount ?? 1,
 		Number(Object.entries(rows).find(([, row]) => (row.y + row.height) * (zoom ?? 1) > offset)?.[0] ?? 0) + 1,
@@ -143,8 +172,15 @@ export function ResumePage({ id, draft, focused, previewData }: ResumePageProps)
 					}
 				/>
 			) : null}
+			{fitError ? <Banner tone="danger" message={t`Couldn't run Fit. Try again.`} /> : null}
 			{fitFailed ? (
-				<Banner tone="warn" message={t`Content still runs over. Hide a section or shorten entries.`} />
+				<Banner
+					tone="warn"
+					message={plural(authored, {
+						1: "Couldn't fit on one page, even at 9 pt. Add a page or shorten entries.",
+						other: "Couldn't fit on # pages, even at 9 pt. Add a page or shorten entries.",
+					})}
+				/>
 			) : null}
 			{fitApplied ? (
 				<Button
@@ -165,10 +201,10 @@ export function ResumePage({ id, draft, focused, previewData }: ResumePageProps)
 			) : null}
 			<ZoomViewport controller={zoomController} width={viewport.width} pageWidth={fitWidth} onScroll={setOffset}>
 				<View style={{ gap: space.s8, alignItems: "center" }}>
-					{pageSizes.map((page, index) => {
+					{pageSizes.map((pageSize, index) => {
 						const image = result?.pages.find((entry) => entry.index === index);
-						const width = page.width * displayScale;
-						const height = page.height * displayScale;
+						const width = pageSize.width * displayScale;
+						const height = pageSize.height * displayScale;
 						return (
 							<View
 								key={index}
@@ -183,10 +219,28 @@ export function ResumePage({ id, draft, focused, previewData }: ResumePageProps)
 									);
 								}}
 							>
-								<Text variant="caption" color="ink3" align="center">{t`Page ${index + 1}`}</Text>
+								<Text variant="caption" color="ink3" align="center">{t`Page ${i18n.number(index + 1)}`}</Text>
+								{overflow?.spills.some((spill) => spill.pages.includes(index + 1)) ? (
+									<View style={{ borderTopWidth: 1.5, borderStyle: "dashed", borderColor: colors.warnText }} />
+								) : null}
 								{index === 0 && overflow ? (
 									<View style={{ maxWidth: width, gap: space.s1 }}>
-										<Text variant="callout" color="warnText">{t`Runs onto page ${authored + 1}`}</Text>
+										<Text variant="callout" color="warnText">
+											{firstSpill && firstSpill.pages.length === 1 && firstSpill.lines
+												? plural(firstSpill.lines, {
+														one: `Page ${ph({ page: i18n.number(firstSpill.authoredPage) })} runs over by about # line`,
+														other: `Page ${ph({ page: i18n.number(firstSpill.authoredPage) })} runs over by about # lines`,
+													})
+												: plural(overflow.pageCount, { one: "Runs to # page", other: "Runs to # pages" })}
+										</Text>
+										{spilling ? (
+											<Button
+												variant="secondary"
+												label={t`Add page ${i18n.number(authored + 1)}`}
+												disabled={draft.locked || preview.rendering || fitting}
+												onPress={addPage}
+											/>
+										) : null}
 										<Button
 											variant="secondary"
 											label={plural(authored, { 1: "Fit to one page", other: "Fit to # pages" })}
@@ -208,10 +262,10 @@ export function ResumePage({ id, draft, focused, previewData }: ResumePageProps)
 								>
 									<Pressable
 										accessibilityRole="button"
-										accessibilityLabel={t`Select an entry on page ${index + 1}`}
+										accessibilityLabel={t`Select an entry on page ${i18n.number(index + 1)}`}
 										accessibilityActions={(result?.pageMap.nodes ?? [])
 											.filter((node) => node.page === index && node.kind !== "section")
-											.map((node, entry) => ({ name: node.key, label: t`Select entry ${entry + 1}` }))}
+											.map((node, entry) => ({ name: node.key, label: t`Select entry ${i18n.number(entry + 1)}` }))}
 										onAccessibilityAction={(event) => {
 											const node = result?.pageMap.nodes.find(
 												(value) => value.key === event.nativeEvent.actionName && value.page === index,
@@ -273,7 +327,7 @@ export function ResumePage({ id, draft, focused, previewData }: ResumePageProps)
 				<IconButton icon="minus" label={t`Zoom out`} disabled={(zoom ?? 1) <= 0.6} onPress={() => step(-0.1)} />
 				<Button
 					variant="ghost"
-					label={zoom === null ? t`Fit` : t`${Math.round(zoom * 100)}%`}
+					label={zoom === null ? t`Fit` : t`${i18n.number(Math.round(zoom * 100))}%`}
 					onPress={() => change(1)}
 				/>
 				<IconButton icon="plus" label={t`Zoom in`} disabled={(zoom ?? 1) >= 1.5} onPress={() => step(0.1)} />
@@ -281,7 +335,7 @@ export function ResumePage({ id, draft, focused, previewData }: ResumePageProps)
 					variant="caption"
 					color="ink3"
 					accessibilityLiveRegion="polite"
-				>{t`Page ${currentPage} of ${result?.pageCount ?? 1}`}</Text>
+				>{t`Page ${ph({ currentPage: i18n.number(currentPage) })} of ${i18n.number(result?.pageCount ?? 1)}`}</Text>
 			</View>
 		</View>
 	);

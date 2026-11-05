@@ -56,7 +56,7 @@ export const getExportFormats = (): DownloadFormat[] => [
 		id: "odt",
 		label: "OpenDocument",
 		extension: ".odt",
-		icon: "file-doc",
+		icon: "file-text",
 		description: t`For LibreOffice and other open-source editors. Layout is simplified.`,
 	},
 	{
@@ -71,7 +71,7 @@ export const getExportFormats = (): DownloadFormat[] => [
 		label: "JSON",
 		extension: ".json",
 		icon: "brackets-curly",
-		description: t`Complete data backup. Imports back into Reactive Resume or JSON Resume tools.`,
+		description: t`Complete data backup. Imports back into Reactive Resume.`,
 	},
 ];
 
@@ -98,7 +98,7 @@ export function FormatRadioGroup<Id extends string>({ formats, value, onChange }
 					key={option.id}
 					value={option.id}
 					disabled={option.disabled}
-					className="group/format flex cursor-pointer items-start gap-3 rounded-lg border border-line p-3 text-start transition-colors duration-quick hover:border-line-2 data-checked:border-accent data-checked:bg-accent-soft data-disabled:cursor-not-allowed data-disabled:opacity-45"
+					className="group/format flex cursor-pointer items-start gap-3 rounded-lg border border-line p-3 text-start transition-colors duration-quick hover:border-control-border data-checked:border-accent data-checked:bg-accent-soft data-disabled:cursor-not-allowed data-disabled:opacity-45"
 				>
 					<span className="grid size-9 shrink-0 place-items-center rounded-lg bg-sunken text-ink-2">
 						<Icon name={option.icon} size={22} />
@@ -106,18 +106,18 @@ export function FormatRadioGroup<Id extends string>({ formats, value, onChange }
 					<span className="grid min-w-0 flex-1 gap-0.5">
 						<span className="flex flex-wrap items-center gap-2">
 							<span className="text-sm font-semibold">{option.label}</span>
-							<span className="font-mono text-[11px] font-medium text-ink-3 group-data-checked/format:text-ink-2">
+							<span className="font-mono text-xs font-medium text-ink-3 group-data-checked/format:text-ink-2">
 								{option.extension}
 							</span>
 							{option.id === "pdf" && (
-								<span className="rounded bg-accent-soft px-1.5 text-[11px] leading-[18px] font-semibold text-accent-text">
+								<span className="rounded bg-accent-soft px-1.5 text-xs leading-[18px] font-semibold text-accent-text">
 									<Trans>Best for applying</Trans>
 								</span>
 							)}
 						</span>
 						<span className="text-[13px] leading-[18px] text-ink-2">{option.description}</span>
 					</span>
-					<span className="mt-0.5 grid size-[18px] shrink-0 place-items-center rounded-full border-[1.5px] border-line-2 group-data-checked/format:border-accent">
+					<span className="mt-0.5 grid size-[18px] shrink-0 place-items-center rounded-full border-[1.5px] border-control-border group-data-checked/format:border-accent">
 						<span className="size-2 rounded-full bg-accent opacity-0 group-data-checked/format:opacity-100" />
 					</span>
 				</Radio.Root>
@@ -137,7 +137,7 @@ export function FileNameField({ value, extension, hint, onChange }: FileNameFiel
 			<label htmlFor={id} className="text-xs font-medium text-ink-2">
 				<Trans>File name</Trans>
 			</label>
-			<div className="flex h-[38px] items-center overflow-hidden rounded-lg border border-line-2 bg-raised focus-within:border-accent focus-within:ring-3 focus-within:ring-accent-soft">
+			<div className="flex h-[38px] items-center overflow-hidden rounded-lg border border-control-border bg-raised focus-within:border-accent focus-within:ring-3 focus-within:ring-accent-soft">
 				<input
 					id={id}
 					value={value}

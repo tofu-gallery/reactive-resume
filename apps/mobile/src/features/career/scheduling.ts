@@ -1,4 +1,4 @@
-import type { Application } from "@/features/applications/types";
+import type { ApplicationSummary as Application } from "@/features/applications/types";
 import { fromZonedDateTime } from "@reactive-resume/utils/timezone";
 
 export function toZoned(at: Date, timeZone: string) {
@@ -51,6 +51,13 @@ export function prepareRunAt(start: Date, lead: "24h" | "2h" | "morning", timezo
 	if (lead !== "morning") return new Date(start.getTime() - (lead === "24h" ? 24 : 2) * 3_600_000);
 	const morning = fromZonedDateTime(toZoned(start, timezone).date, "08:00", timezone);
 	return new Date(Math.min(morning?.getTime() ?? start.getTime(), start.getTime() - 2 * 3_600_000));
+}
+
+/** A new briefing's lead: 24 hours before, or 2 hours when that has passed (then it runs now either way). */
+export function firstLeadAhead(start: Date | undefined, timezone: string, now = new Date()): "24h" | "2h" {
+	return start && prepareRunAt(start, "24h", timezone) <= now && prepareRunAt(start, "2h", timezone) > now
+		? "2h"
+		: "24h";
 }
 
 export function collectInterviews(applications: Application[], now = new Date()) {

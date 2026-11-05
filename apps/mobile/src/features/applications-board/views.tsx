@@ -1,28 +1,44 @@
 import type { ApplicationsView } from "@/routes";
 import type { ReactNode } from "react";
 import { useLingui } from "@lingui/react/macro";
-import { useRouter, Stack } from "expo-router";
+import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { useState } from "react";
 import { View } from "react-native";
 import { SafeAreaInsetsContext, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useApplicationSearch } from "./search";
 import { CollectionHeader } from "@/components/collection-header";
 import { AddApplicationSheet } from "@/features/applications/add-sheet";
+import { ImportApplicationsSheet } from "@/features/applications/import-sheet";
+import { LaneNotice } from "@/features/applications/lane-notice";
+import { LaneSettings } from "@/features/applications/lane-settings";
 import { routes } from "@/routes";
-import { Segmented, IconButton, useTheme } from "@/ui";
+import { Chip, Segmented, IconButton, useTheme } from "@/ui";
 
 type ApplicationsViewFrameProps = {
 	current: ApplicationsView;
 	children: ReactNode;
 	search?: { value: string; onChangeText: (value: string) => void; disabled?: boolean };
-	actions?: ReactNode;
+	/** The List view disables Save job while a bulk action is running. */
+	addDisabled?: boolean;
 };
 
-/** The List / Board / Calendar / Insights switch above each Applications view (mockup `viewTabs`). */
-export function ApplicationsViewFrame({ current, children, search, actions }: ApplicationsViewFrameProps) {
+/**
+ * The List / Board / Calendar / Insights switch above each Applications view (mockup `viewTabs`), and the one owner
+ * of the in-place Save job sheet. `?create=1` opens it on every view; closing clears it without leaving the view.
+ */
+export function ApplicationsViewFrame({ current, children, search, addDisabled }: ApplicationsViewFrameProps) {
 	const router = useRouter();
 	const shared = useApplicationSearch();
+	const { create } = useLocalSearchParams<{ create?: string }>();
 	const [adding, setAdding] = useState(false);
+	const [managing, setManaging] = useState(false);
+	const [importing, setImporting] = useState(false);
+	// The one-shot ?create link opens Save job; closing it clears the link so it can't reopen.
+	const addingOpen = adding || create === "1";
+	const closeAdding = () => {
+		setAdding(false);
+		if (create === "1") router.setParams({ create: "" });
+	};
 	const { t } = useLingui();
 	const { colors, motion, space } = useTheme();
 	const insets = useSafeAreaInsets();
@@ -36,10 +52,22 @@ export function ApplicationsViewFrame({ current, children, search, actions }: Ap
 				<CollectionHeader
 					title={t`Applications`}
 					searchLabel={t`Search applications`}
-					placeholder={t`Role, company or contact`}
+					placeholder={t`Search`}
 					{...(search ?? { value: shared.search, onChangeText: shared.setSearch })}
-					actions={actions ?? <IconButton icon="plus" label={t`Save a job`} onPress={() => setAdding(true)} />}
+					actions={
+						<View style={{ flexDirection: "row" }}>
+							<IconButton
+								icon="file-arrow-up"
+								label={t`Import from CSV`}
+								disabled={addDisabled}
+								onPress={() => setImporting(true)}
+							/>
+							<IconButton icon="sliders-horizontal" label={t`Manage lanes`} onPress={() => setManaging(true)} />
+							<IconButton icon="plus" label={t`Save a job`} disabled={addDisabled} onPress={() => setAdding(true)} />
+						</View>
+					}
 				/>
+				<LaneNotice />
 				<Segmented
 					label={t`Application views`}
 					value={current}
@@ -53,11 +81,19 @@ export function ApplicationsViewFrame({ current, children, search, actions }: Ap
 						if (view !== current) router.replace(routes.applications(view));
 					}}
 				/>
+				<Chip
+					label={t`Needs you`}
+					selected={shared.needsYou}
+					icon={shared.needsYou ? "check-square" : "square"}
+					onPress={addDisabled ? undefined : () => shared.setNeedsYou(!shared.needsYou)}
+				/>
 			</View>
 			<SafeAreaInsetsContext value={{ ...insets, top: 0, left: 0, right: 0 }}>
 				<View style={{ flex: 1 }}>{children}</View>
 			</SafeAreaInsetsContext>
-			{adding && <AddApplicationSheet onClose={() => setAdding(false)} />}
+			<LaneSettings open={managing} onClose={() => setManaging(false)} />
+			<ImportApplicationsSheet open={importing} onClose={() => setImporting(false)} />
+			{addingOpen && <AddApplicationSheet onClose={closeAdding} />}
 		</SafeAreaView>
 	);
 }

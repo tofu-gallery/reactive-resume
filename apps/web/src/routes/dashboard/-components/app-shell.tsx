@@ -1,24 +1,29 @@
+import type { NewDocumentContext } from "@/features/documents/new-document-dialog";
 import type { IconName } from "@reactive-resume/ui/components/icon";
 import type { ReactNode } from "react";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
-import { Trans } from "@lingui/react/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { useHotkey } from "@tanstack/react-hotkeys";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useMatchRoute } from "@tanstack/react-router";
+import { Link, useMatchRoute, useNavigate, useRouterState } from "@tanstack/react-router";
+import { useCallback } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@reactive-resume/ui/components/avatar";
 import { BrandIcon } from "@reactive-resume/ui/components/brand-icon";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Icon } from "@reactive-resume/ui/components/icon";
-import { Kbd } from "@reactive-resume/ui/components/kbd";
+import { ariaShortcut, formatShortcut, Kbd } from "@reactive-resume/ui/components/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@reactive-resume/ui/components/tooltip";
 import { useBreakpoint } from "@reactive-resume/ui/hooks/use-breakpoint";
 import { getInitials } from "@reactive-resume/utils/string";
 import { cn } from "@reactive-resume/utils/style";
 import { MobileTabIndicator } from "@/components/layout/mobile-tab-indicator";
 import { useDialogStore } from "@/dialogs/store";
-import { applicationsListQueryOptions } from "@/features/applications/queries";
 import { GuestBanner } from "@/features/auth/components/guest-banner";
 import { useCommandPaletteStore } from "@/features/command-palette/store";
+import { DocumentLibraryProvider } from "@/features/documents/library-session";
+import { shortcutOverlayOpen } from "@/features/keyboard-shortcuts/blocking";
+import { useShortcutSettings } from "@/features/keyboard-shortcuts/settings";
 import { isEditableElementFocused } from "@/features/resume/builder/draft";
 import { UserDropdownMenu } from "@/features/user/dropdown-menu";
 import { orpc } from "@/libs/orpc/client";
@@ -31,8 +36,9 @@ type NavItem = {
 };
 
 function useNavItems() {
+	const matchRoute = useMatchRoute();
 	const { data: counts } = useQuery(orpc.documents.counts.queryOptions());
-	const { data: applications } = useQuery(applicationsListQueryOptions());
+	const { data: applicationStats } = useQuery(orpc.applications.stats.queryOptions({}));
 	const { data: notifications } = useQuery(orpc.career.notifications.queryOptions({ input: {} }));
 
 	const items: NavItem[] = [
@@ -46,16 +52,25 @@ function useNavItems() {
 			to: "/dashboard/applications",
 			icon: "briefcase",
 			label: t`Applications`,
-			...(applications ? { count: applications.filter((application) => application.status !== "closed").length } : {}),
+			...(applicationStats
+				? {
+						count: applicationStats.byStage
+							.filter((row) => row.status !== "closed")
+							.reduce((total, row) => total + row.count, 0),
+					}
+				: {}),
 		},
 	];
 	const unread = notifications?.filter((notification) => !notification.readAt).length ?? 0;
 	// Career counts what's waiting for the user (unread notifications), so nothing shows at zero.
 	items.push({ to: "/dashboard/career", icon: "compass", label: t`Career`, ...(unread ? { count: unread } : {}) });
 	const settings: NavItem = { to: "/dashboard/settings", icon: "gear-six", label: t`Settings` };
-	const trash: NavItem | null = counts?.trash
-		? { to: "/dashboard/trash", icon: "trash", label: t`Trash`, count: counts.trash }
-		: null;
+	// Trash shows while it holds something, and stays while it's open, even once its last document is restored.
+	const inTrash = Boolean(matchRoute({ to: "/dashboard/trash" }));
+	const trash: NavItem | null =
+		counts?.trash || inTrash
+			? { to: "/dashboard/trash", icon: "trash", label: t`Trash`, ...(counts?.trash ? { count: counts.trash } : {}) }
+			: null;
 
 	return { items, settings, trash };
 }
@@ -66,6 +81,47 @@ function useIsCurrent() {
 	return (to: NavItem["to"]) => Boolean(matchRoute({ to, fuzzy: to !== "/dashboard" }));
 }
 
+type ApplicationsSearch = {
+	q: string;
+	view: "list" | "board" | "insights" | "calendar";
+	closed: boolean;
+	create: boolean;
+	applicationId?: string;
+};
+
+/** New follows the section: Applications saves a job, Letters starts a letter, and the rest offers every object. */
+function useNewAction() {
+	const navigate = useNavigate();
+	const matchRoute = useMatchRoute();
+	const location = useRouterState({ select: (state) => state.location });
+	const openDialog = useDialogStore((state) => state.openDialog);
+
+	const context: NewDocumentContext = matchRoute({ to: "/dashboard/applications", fuzzy: true })
+		? "applications"
+		: matchRoute({ to: "/dashboard/career", fuzzy: true })
+			? "career"
+			: new URLSearchParams(location.searchStr).get("type") === "letter"
+				? "letters"
+				: "documents";
+
+	return useCallback(() => {
+		// The application page owns Save job; its one-shot ?create link opens that dialog.
+		if (context === "applications") {
+			if (location.pathname === "/dashboard/applications") {
+				// Keep the current view, search and closed filter when the page is already open.
+				void navigate({
+					to: "/dashboard/applications",
+					search: (previous: ApplicationsSearch) => ({ ...previous, create: true }),
+				});
+			} else {
+				void navigate({ to: "/dashboard/applications", search: { create: true } });
+			}
+			return;
+		}
+		openDialog("document.new", context === "documents" ? undefined : { context });
+	}, [context, location.pathname, navigate, openDialog]);
+}
+
 /**
  * The app shell for Documents, Trash, Applications and Settings: a 240px sidebar at ≥1024, an icon rail at
  * 640–1023 and a bottom tab bar below 640. An application's workspace is full screen on phones, with its own back
@@ -74,16 +130,22 @@ function useIsCurrent() {
 type AppShellProps = { children: ReactNode };
 
 export function AppShell({ children }: AppShellProps) {
+	const { t } = useLingui();
 	const breakpoint = useBreakpoint();
-	const openDialog = useDialogStore((state) => state.openDialog);
+	const openNew = useNewAction();
+	const characterShortcuts = useShortcutSettings((state) => state.characterShortcuts);
 	const matchRoute = useMatchRoute();
 	const tabs =
 		breakpoint === "mobile" && !matchRoute({ to: "/dashboard/applications/$applicationId/{-$tab}", fuzzy: true });
 
-	useHotkey("N", () => {
-		if (isEditableElementFocused() || useDialogStore.getState().open) return;
-		openDialog("document.new", undefined);
-	});
+	useHotkey(
+		"N",
+		() => {
+			if (isEditableElementFocused() || shortcutOverlayOpen()) return;
+			openNew();
+		},
+		{ enabled: characterShortcuts, meta: { name: t`New` } },
+	);
 
 	return (
 		<div
@@ -107,7 +169,7 @@ export function AppShell({ children }: AppShellProps) {
 			{breakpoint !== "mobile" && (breakpoint === "tablet" ? <Rail /> : <Sidebar />)}
 			<main id="main-content" className="min-w-0">
 				<GuestBanner />
-				{children}
+				<DocumentLibraryProvider>{children}</DocumentLibraryProvider>
 			</main>
 			{tabs && <MobileTabs />}
 		</div>
@@ -115,10 +177,11 @@ export function AppShell({ children }: AppShellProps) {
 }
 
 function Sidebar() {
+	const characterShortcuts = useShortcutSettings((state) => state.characterShortcuts);
 	const { items, settings, trash } = useNavItems();
 	const isCurrent = useIsCurrent();
 	const openPalette = useCommandPaletteStore((state) => state.setOpen);
-	const openDialog = useDialogStore((state) => state.openDialog);
+	const openNew = useNewAction();
 
 	return (
 		<aside
@@ -132,16 +195,16 @@ function Sidebar() {
 
 			<button
 				type="button"
-				aria-label={t`Search or run…`}
-				aria-keyshortcuts="Meta+K"
+				aria-label={t`Search or run a command…`}
+				aria-keyshortcuts={ariaShortcut("⌘K")}
 				onClick={() => openPalette(true)}
 				className="flex h-[34px] items-center gap-2 rounded-lg border border-line bg-bg px-2.5 text-sm text-ink-3 transition-colors duration-quick hover:text-ink-2"
 			>
 				<Icon name="magnifying-glass" size={18} />
 				<span className="flex-1 text-start">
-					<Trans>Search or run…</Trans>
+					<Trans>Search or run a command…</Trans>
 				</span>
-				<Kbd>⌘K</Kbd>
+				<Kbd>{formatShortcut("⌘K")}</Kbd>
 			</button>
 
 			<nav aria-label={t`App`} className="grid gap-0.5">
@@ -155,17 +218,20 @@ function Sidebar() {
 
 			<div className="mt-auto grid gap-2">
 				{trash && <NavLink item={trash} current={isCurrent(trash.to)} />}
+				{/* Secondary, so each view's own primary action is the one accent button on screen. */}
 				<Button
+					data-document-new-trigger=""
+					variant="secondary"
 					aria-label={t`New`}
-					aria-keyshortcuts="N"
+					aria-keyshortcuts={characterShortcuts ? "N" : undefined}
 					className="h-9 justify-between"
-					onClick={() => openDialog("document.new", undefined)}
+					onClick={openNew}
 				>
 					<span className="flex items-center gap-1.5">
 						<Icon name="plus" />
 						<Trans>New</Trans>
 					</span>
-					<Kbd className="bg-on-accent/15 text-on-accent">N</Kbd>
+					{characterShortcuts && <Kbd>N</Kbd>}
 				</Button>
 				<UserDropdownMenu>
 					{({ session }) => (
@@ -175,7 +241,7 @@ function Sidebar() {
 						>
 							<Avatar className="size-7">
 								<AvatarImage src={session.user.image ?? undefined} />
-								<AvatarFallback className="text-[11px]">{getInitials(session.user.name)}</AvatarFallback>
+								<AvatarFallback>{getInitials(session.user.name)}</AvatarFallback>
 							</Avatar>
 							<span className="grid min-w-0">
 								<span className="truncate text-sm font-medium">{session.user.name}</span>
@@ -203,7 +269,7 @@ function NavLink({ item, current }: { item: NavItem; current: boolean }) {
 		>
 			<Icon name={item.icon} filled={current} />
 			<span className="flex-1">{item.label}</span>
-			{item.count ? <span className="font-mono text-xs text-ink-3">{item.count}</span> : null}
+			{item.count ? <span className="font-mono text-xs text-ink-3">{i18n.number(item.count)}</span> : null}
 		</Link>
 	);
 }
@@ -213,7 +279,7 @@ function Rail() {
 	const { items, settings, trash } = useNavItems();
 	const isCurrent = useIsCurrent();
 	const openPalette = useCommandPaletteStore((state) => state.setOpen);
-	const openDialog = useDialogStore((state) => state.openDialog);
+	const openNew = useNewAction();
 
 	return (
 		<aside
@@ -226,7 +292,7 @@ function Rail() {
 			<RailTip label={t`Search`} icon="magnifying-glass">
 				<button
 					type="button"
-					aria-label={t`Search or run…`}
+					aria-label={t`Search or run a command…`}
 					onClick={() => openPalette(true)}
 					className="grid size-10 place-items-center rounded-lg text-ink-2 transition-[background-color,scale] duration-quick ease-enter hover:bg-hover active:scale-[0.97]"
 				/>
@@ -257,14 +323,14 @@ function Rail() {
 					</RailTip>
 				)}
 				<RailTip label={t`New`} icon="plus">
-					<Button size="icon" aria-label={t`New`} onClick={() => openDialog("document.new", undefined)} />
+					<Button data-document-new-trigger="" size="icon" aria-label={t`New`} onClick={openNew} />
 				</RailTip>
 				<UserDropdownMenu>
 					{({ session }) => (
 						<button type="button" aria-label={t`Account`} className="rounded-sm">
 							<Avatar className="size-8">
 								<AvatarImage src={session.user.image ?? undefined} />
-								<AvatarFallback className="text-[11px]">{getInitials(session.user.name)}</AvatarFallback>
+								<AvatarFallback>{getInitials(session.user.name)}</AvatarFallback>
 							</Avatar>
 						</button>
 					)}
@@ -299,7 +365,7 @@ function RailTip({
 /** Phones: Documents · Applications · New · Career · Settings, with New as an accent pill in the middle. */
 function MobileTabs() {
 	const isCurrent = useIsCurrent();
-	const openDialog = useDialogStore((state) => state.openDialog);
+	const openNew = useNewAction();
 	const tabs: Pick<NavItem, "to" | "icon" | "label">[] = [
 		{ to: "/dashboard", icon: "file-text", label: t`Documents` },
 		{ to: "/dashboard/applications", icon: "briefcase", label: t`Applications` },
@@ -320,7 +386,14 @@ function MobileTabs() {
 			>
 				{current && <MobileTabIndicator />}
 				<Icon name={icon} size={24} filled={current} />
-				<span className={cn("text-[11px]", current ? "font-semibold text-ink" : "text-ink-2")}>{label}</span>
+				<span
+					className={cn(
+						"text-center text-xs [overflow-wrap:anywhere]",
+						current ? "font-semibold text-ink" : "text-ink-2",
+					)}
+				>
+					{label}
+				</span>
 			</Link>
 		);
 	};
@@ -333,13 +406,14 @@ function MobileTabs() {
 			{tabs.slice(0, 2).map(link)}
 			<button
 				type="button"
-				onClick={() => openDialog("document.new", undefined)}
+				data-document-new-trigger=""
+				onClick={openNew}
 				className="flex min-h-[52px] flex-col items-center justify-center gap-0.5 transition-[scale] duration-quick ease-enter active:scale-[0.97]"
 			>
 				<span className="grid h-[26px] w-[34px] place-items-center rounded-sm bg-accent text-on-accent">
 					<Icon name="plus" size={20} />
 				</span>
-				<span className="text-[11px] text-ink-2">
+				<span className="text-center text-xs [overflow-wrap:anywhere] text-ink-2">
 					<Trans>New</Trans>
 				</span>
 			</button>

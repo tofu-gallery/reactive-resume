@@ -3,7 +3,12 @@ import { useLingui } from "@lingui/react/macro";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useState } from "react";
 import { Platform, View } from "react-native";
-import { getPresentLabel } from "@reactive-resume/schema/resume/dates";
+import {
+	formatResumeDates,
+	getPresentLabel,
+	hasUnreadableDateText,
+	readLegacyDates,
+} from "@reactive-resume/schema/resume/dates";
 import { editDates, fromPickerDate, isReversed, pickerDate, readTypedDate, showYearMonth } from "./dates";
 import { resumeFieldFocus } from "@/draft";
 import { Button, Icon, IconButton, Sheet, Switch, Text, TextField, useTheme } from "@/ui";
@@ -138,72 +143,125 @@ type DatesFieldProps = {
 	format?: DateFormat | undefined;
 	/** Awards, certifications and publications have one date. */
 	single?: boolean | undefined;
+	/** Education: an end date still to come can print as "Expected May 2027". */
+	expectable?: boolean | undefined;
 	disabled?: boolean | undefined;
 	autoFocus?: boolean | undefined;
 	onChange: (dates: ResumeDates) => void;
 };
 
-/**
- * Structured dates: start – end with a Present switch, or a single date. Editing any part clears the "needs a
- * look" note left by text that couldn't be read exactly.
- */
-export function DatesField({ dates, locale, format, single = false, disabled, autoFocus, onChange }: DatesFieldProps) {
+/** Preset date fields or verbatim custom text, using the existing raw date representation. */
+export function DatesField({
+	dates,
+	locale,
+	format,
+	single = false,
+	expectable = false,
+	disabled,
+	autoFocus,
+	onChange,
+}: DatesFieldProps) {
 	const { t } = useLingui();
 	const { space } = useTheme();
 	const [invalid, setInvalid] = useState({ start: false, end: false });
+	const current = editDates(dates, {});
+	const custom = dates.raw !== undefined;
+	const preset = formatResumeDates(current, { locale, format });
+	const parsed = custom && dates.raw !== preset ? readLegacyDates(dates.raw ?? "", { locale, single }) : current;
+	const canUseFields = parsed.raw === undefined;
+	const unreadable = hasUnreadableDateText(dates);
 	const setInvalidFor = (part: "start" | "end") => (value: boolean) =>
 		setInvalid((state) => (state[part] === value ? state : { ...state, [part]: value }));
 
 	return (
 		<View style={{ gap: space.s2 }}>
-			<View style={{ flexDirection: "row", gap: space.s2 }}>
-				<MonthInput
-					label={single ? t`Date` : t`Start`}
-					autoFocus={autoFocus}
-					value={dates.start}
-					locale={locale}
-					format={format}
-					disabled={disabled}
-					onCommit={(start) => onChange(editDates(dates, { start }))}
-					onInvalid={setInvalidFor("start")}
+			<View style={{ flexDirection: "row", alignItems: "center", gap: space.s2 }}>
+				<Switch
+					label={t`Custom date text`}
+					value={custom}
+					disabled={disabled || (custom && !canUseFields)}
+					onValueChange={(checked) => {
+						setInvalid({ start: false, end: false });
+						onChange(checked ? { ...current, raw: preset } : parsed);
+					}}
 				/>
-				{!single ? (
+				<Text>{t`Custom date text`}</Text>
+			</View>
+			{custom ? (
+				<TextField
+					label={single ? t`Date` : t`Dates`}
+					value={dates.raw ?? ""}
+					editable={!disabled}
+					autoFocus={autoFocus && !disabled}
+					onFocus={resumeFieldFocus.onFocus}
+					onBlur={resumeFieldFocus.onBlur}
+					onChangeText={(raw) => onChange({ ...readLegacyDates(raw, { locale, single }), raw })}
+				/>
+			) : (
+				<View style={{ flexDirection: "row", gap: space.s2 }}>
 					<MonthInput
-						label={t`End`}
-						value={dates.end}
+						label={single ? t`Date` : t`Start`}
+						autoFocus={autoFocus}
+						value={dates.start}
 						locale={locale}
 						format={format}
 						disabled={disabled}
-						placeholderValue={dates.present ? getPresentLabel(locale) : undefined}
-						onCommit={(end) => onChange(editDates(dates, { end }))}
-						onInvalid={setInvalidFor("end")}
+						onCommit={(start) => onChange(editDates(dates, { start }))}
+						onInvalid={setInvalidFor("start")}
 					/>
-				) : null}
-			</View>
-			{!single ? (
+					{!single ? (
+						<MonthInput
+							label={t`End`}
+							value={dates.end}
+							locale={locale}
+							format={format}
+							disabled={disabled}
+							placeholderValue={dates.present ? getPresentLabel(locale) : undefined}
+							onCommit={(end) => onChange(editDates(dates, { end }))}
+							onInvalid={setInvalidFor("end")}
+						/>
+					) : null}
+				</View>
+			)}
+			{!custom && !single ? (
 				<View style={{ flexDirection: "row", alignItems: "center", gap: space.s2 }}>
 					<Switch
 						label={t`Present`}
 						value={dates.present}
 						disabled={disabled}
-						onValueChange={(present) => onChange(editDates(dates, { present, end: present ? null : dates.end }))}
+						onValueChange={(present) => onChange(editDates(dates, { present, end: dates.end }))}
 					/>
 					<Text>{t`Present`}</Text>
 				</View>
 			) : null}
-			{invalid.start || invalid.end ? (
-				<Note icon="warning-circle" tone="dangerText">
-					{t`This date hasn't been saved. Use a month and year, like Mar 2022, or just a year. The resume keeps the last valid date.`}
-				</Note>
-			) : dates.raw !== undefined ? (
+			{!custom && !single && expectable && !dates.present ? (
+				<View style={{ flexDirection: "row", alignItems: "center", gap: space.s2 }}>
+					<Switch
+						label={t`Expected`}
+						value={dates.expected === true}
+						disabled={disabled}
+						onValueChange={(expected) => onChange(editDates(dates, { expected }))}
+					/>
+					<Text>{t`Expected`}</Text>
+				</View>
+			) : null}
+			{unreadable ? (
 				<Note icon="warning" tone="warnText">
-					{dates.start
-						? t`We read “${dates.raw}”. Pick a month so it sorts and prints consistently.`
-						: t`Couldn't read “${dates.raw}”. Enter the dates so they sort and print consistently.`}
+					{t`Saved as written. Automated date checks and sorting are unavailable for this text.`}
+				</Note>
+			) : null}
+			{custom && !canUseFields ? (
+				<Text variant="caption" color="ink2">
+					{t`Enter a readable date or clear the text to use date fields.`}
+				</Text>
+			) : null}
+			{!custom && (invalid.start || (!dates.present && invalid.end)) ? (
+				<Note icon="warning-circle" tone="dangerText">
+					{t`This date hasn't been saved. Use a month and year, like Mar 2022, or just a year. The resume keeps the last valid date. Turn on Custom date text to save other wording.`}
 				</Note>
 			) : isReversed(dates) ? (
 				<Note icon="warning" tone="warnText">
-					{t`The end is before the start.`}
+					{t`The end date is before the start date. Check both dates.`}
 				</Note>
 			) : null}
 		</View>
@@ -215,7 +273,7 @@ type NoteProps = { icon: "warning" | "warning-circle"; tone: "dangerText" | "war
 function Note({ icon, tone, children }: NoteProps) {
 	const { colors, space } = useTheme();
 	return (
-		<View accessibilityLiveRegion="polite" style={{ flexDirection: "row", gap: space.s1 }}>
+		<View style={{ flexDirection: "row", gap: space.s1 }}>
 			<Icon name={icon} size={16} color={colors[tone]} />
 			<Text variant="caption" color={tone} style={{ flex: 1 }}>
 				{children}

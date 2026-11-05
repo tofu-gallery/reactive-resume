@@ -99,6 +99,22 @@ it("stores images without ACLs and serves them through the signed application pr
 	expect(requests.at(-1)?.headers.authorization).toMatch(/^AWS4-HMAC-SHA256 /);
 });
 
+it("allows custom-domain pages to embed public pictures, including after cache revalidation", async () => {
+	const key = "uploads/user-1/pictures/photo.png";
+	await storage.write({ key, data: new Uint8Array([137, 80, 78, 71]), contentType: "image/png" });
+	const headers = { Referer: "https://custom.example.cv/", "Sec-Fetch-Site": "cross-site" };
+	const response = await handleUpload(new Request(`${envMock.APP_URL}/api/${key}`, { headers }));
+	expect(response.status).toBe(200);
+	expect(response.headers.get("Cross-Origin-Resource-Policy")).toBe("cross-origin");
+	const cached = await handleUpload(
+		new Request(`${envMock.APP_URL}/api/${key}`, {
+			headers: { ...headers, "If-None-Match": response.headers.get("ETag") ?? "" },
+		}),
+	);
+	expect(cached.status).toBe(304);
+	expect(cached.headers.get("Cross-Origin-Resource-Policy")).toBe("cross-origin");
+});
+
 it("stops serving a banned owner's public pictures", async () => {
 	const key = "uploads/user-1/pictures/photo.png";
 	await storage.write({ key, data: new Uint8Array([137, 80, 78, 71]), contentType: "image/png" });
@@ -106,6 +122,7 @@ it("stops serving a banned owner's public pictures", async () => {
 	const response = await handleUpload(new Request(`${envMock.APP_URL}/api/${key}`));
 	expect(response.status).toBe(404);
 	expect(isPublicUploadOwner).toHaveBeenCalledWith("user-1");
+	expect(requests.map((request) => request.method)).toEqual(["PUT"]);
 });
 
 it("stores private attachments without ACLs while keeping them outside the public proxy", async () => {
@@ -123,13 +140,14 @@ it("stores private attachments without ACLs while keeping them outside the publi
 });
 
 it.each(["text/html", "image/svg+xml"])("downloads stored %s uploads instead of rendering them", async (type) => {
-	const key = "uploads/user-1/pictures/upload.bin";
+	const key = "uploads/user-1/pictures/upload.png";
 	await storage.write({ key, data: new TextEncoder().encode("<script>alert(1)</script>"), contentType: type });
 	resolveAuthentication.mockResolvedValue({ user: { id: "user-1" }, permissions: ["read"] });
 	const response = await handleUpload(new Request(`${envMock.APP_URL}/api/${key}`));
 	expect(response.status).toBe(200);
 	expect(response.headers.get("Content-Type")).toBe("application/octet-stream");
-	expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="upload.bin"');
+	expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="upload.png"');
+	expect(response.headers.get("Cross-Origin-Resource-Policy")).toBe("same-site");
 });
 
 it("requires the upload owner before serving application PDFs, including conditional requests", async () => {
@@ -150,10 +168,12 @@ it("requires the upload owner before serving application PDFs, including conditi
 		);
 		expect(response.status).toBe(404);
 		expect(await response.text()).not.toContain("private application PDF");
+		expect(requests.map((request) => request.method)).toEqual(["PUT"]);
 	}
 	resolveAuthentication.mockResolvedValue({ user: { id: "user-1" }, permissions: ["read"] });
 	const response = await handleUpload(new Request(`${envMock.APP_URL}/api/${key}`));
 	expect(response.status).toBe(200);
 	expect(await response.text()).toBe("private application PDF");
 	expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+	expect(response.headers.get("Cross-Origin-Resource-Policy")).toBe("same-site");
 });

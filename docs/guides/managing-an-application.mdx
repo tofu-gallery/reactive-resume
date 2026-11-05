@@ -8,33 +8,50 @@ Use the details sheet to manage one application, and its workspace to work on fi
 <Frame caption="An application's details sheet">
   <img
     src="/images/guides/career/application-detail.png"
-    alt="Details sheet for Senior Product Manager at Northstar Labs, showing the Interview stage, next interview, sent documents and Open workspace button"
+    alt="Details for a Saved Platform Engineer application at fictional Lumen Labs, with a linked Lumen letter, Notes, Log an update and Open workspace"
   />
 </Frame>
 
 At the top you see the role, the company and location, and **View posting** when a posting was saved. **View posting** shows the saved posting text and what the job asks for, or opens the job link if only a link was saved.
 
+On short landscape browser windows, the application header and stage controls scroll with the details. The footer actions stay at the bottom. When a newly saved job opens, focus moves to its title; closing the sheet returns focus to its row. A sheet opened from a row or follow-up nudge returns to that control while it remains visible. If the control is gone or filtered out, focus moves to the application's visible row, another visible row or the Applications heading.
+
+<Frame caption="Short landscape browser: details scroll while footer actions stay visible">
+  <img
+    src="/images/guides/managing-an-application/application-landscape.png"
+    alt="Fictional Lumen Workshop application after scrolling its header away, with document and fact controls above the visible Mark as closed and Open workspace footer"
+  />
+</Frame>
+
+Attached resume and cover-letter PDFs must be at most **10 MB each**. Oversized files are rejected before upload with guidance to compress or export a smaller PDF. The list's **Sent** column includes attached files as well as linked documents; the native list names the available files too.
+
+Application Notes keep an unsaved local draft before their autosave delay. After interruption, review recovered notes before retrying the save. A **Remind me** schedule and an application's follow-up refer to one date and note: editing either updates the other. Deleting the reminder clears the follow-up; Undo keeps both until deletion commits. Pausing stops delivery but retains the follow-up date. Times use the account/schedule timezone.
+
+**Prepare application** in Apply generates a combined review of pending tailoring proposals, a letter draft and answers for pasted form questions after one context disclosure. Each section needs approval; existing version guards and account-scoped draft recovery apply. See [Prepare the application together](/guides/writing-application-answers#prepare-the-application-together). Nothing is submitted to an employer.
+
 ## Open the application workspace
 
-Select **Open workspace** at the bottom of the details sheet. Each application has its own **Fit**, **Apply**, **Prepare**, **Practice**, **Debrief**, **Messages** and **Saved** tabs. **Ask the coach** opens a conversation beside the current tab.
+Select **Open workspace** at the bottom of the details sheet. From the workspace, **Stage, details and timeline** opens this record again. Each application has its own **Fit**, **Apply**, **Interview prep**, **Practice**, **Debrief**, **Messages** and **Library** tabs. **Ask the coach** opens a conversation beside the current tab.
+
+Saved applications open on **Apply**, where the preparation card names the current step through the posting, base resume, reviewed tailoring, optional cover letter, form answers and readiness review. Select the documents for this job in its rows, open their editors with **Edit**, and download their PDFs from each row's options menu. Preparing, editing and downloading never marks the job applied. After submission is recorded, **What you sent** lists the sent versions, each row's options menu edits or downloads the current draft, and **View recorded answers** opens the saved answers.
 
 Start with [Career and Application Workspaces](/guides/career-overview), or [prepare your first application](/guides/first-career-application). Your shared facts and stories live in **Career → Knowledge**; answers, interview preparation and messages stay with the job.
 
 ## Moving to another stage
 
-The row of bars under the title is the stage stepper: **Saved**, **Applied**, **Screening**, **Interview** and **Offer**. Below it you see the current stage and how long the application has been there.
+The row of bars under the title is the stage stepper: **Saved**, **Applied**, **Screening**, **Interview** and **Offer**, or your own stages in your order (see [Customizing application stages](/guides/customizing-application-stages)). With many stages, the stepper scrolls sideways. Below it you see the current stage and how long the application has been there.
 
 - To move one stage forward, select **Move to _next stage_** (for example **Move to Offer**).
 - To jump to any stage, forwards or back, select its name in the stepper.
 
-For a **Saved** job, select **Mark as applied** after submitting. Confirm the **Application date**, choose the resume and cover letter you actually sent (or **None**), and check only the attached PDFs you submitted. Unchecking an attached PDF removes it from the application. Confirming saves the selected documents' current versions and moves the job to **Applied**.
+For a **Saved** job, select **Mark as applied** after submitting. If you applied to the same company before and never heard back, the dialog lists those applications. It's only advice; you can still confirm. Confirm the **Application date**, choose the resume and cover letter you actually sent (or **No resume selected** / **No cover letter selected**), and check only the attached PDFs you submitted. Unchecking an attached PDF removes it from the application. Confirming saves the selected documents' current versions and moves the job to **Applied**.
 
-**Open application** opens the original job link in another tab. Opening it or preparing documents keeps the job at its current stage.
+On the web, **View posting** opens the saved posting, or the original job link when only a link was saved. In the native app, **Open application** opens that job link in your browser. Opening a posting or preparing documents keeps the job at its current stage.
 
-<Frame caption="The stage stepper and Move to button">
+<Frame caption="Review next steps and sent documents in the detail sheet">
   <img
     src="/images/guides/managing-an-application/detail-sheet-stage-stepper.webp"
-    alt="Header of the details sheet with the stage stepper filled up to Interview, the text Interview for 8 days, and a Move to Offer button"
+    alt="Fictional Northwind Games application detail sheet with stages, next technical interview, sent resume, Write a letter, salary, contact, notes and activity"
   />
 </Frame>
 
@@ -46,18 +63,48 @@ Each move is added to the activity history. **Mark as applied** uses the date yo
 
 1. The next interview that hasn't finished yet.
 2. Otherwise, the follow-up you set.
-3. Otherwise, for **Applied**, how long ago you applied, turning into "No reply in _n_ days" after 10 days; for later stages, how long you've been waiting to hear back.
+3. Otherwise, what the stage is waiting on. For **Applied**, how long ago you applied, turning into "No reply in _n_ days" after 10 days. For **Screening**, how long you've been waiting to hear back. For **Interview**, "Waiting for interview feedback" once every interview is behind you, or "No interview scheduled" before you've added one. For **Offer**, "Decide on the offer".
 
-A **Saved** application shows "Not applied yet", and a closed one shows its reason. Overdue follow-ups and long waits are highlighted in amber.
+At **Offer**, the offer leads instead: **Reply to the offer** by the deadline saved with its terms (amber once it has passed), **Decide on the offer** with **Compare offers** when terms are saved without a deadline, or **Add the offer's terms** when none are saved yet. When no deadline is saved, a follow-up you set comes first. Interviews booked before the offer stay in **Activity** and the calendar.
 
-<Frame caption="Next step showing an upcoming interview">
+A **Saved** application shows "Not applied yet". For a closed application, **Outcome** replaces **Next step** and shows its reason, without an **Edit** action. Overdue follow-ups and long waits are highlighted in amber.
+
+<Frame caption="A closed application shows its recorded outcome on web and native. This image shows the web card.">
   <img
-    src="/images/guides/managing-an-application/detail-sheet-next-step.webp"
-    alt="Next step card showing a Technical interview on Fri, Oct 2 at 4:00 PM with a video link, an Edit button and Add to calendar"
+    src="/images/guides/managing-an-application/closed-outcome.png"
+    alt="Outcome card showing Accepted offer with a check mark and no Edit action"
   />
 </Frame>
 
-Select **Edit** to **Schedule an interview…**, **Edit this interview…**, or **Set a follow-up…** (**Change the follow-up…** when one is set). When the next step has a date, **Add to calendar** downloads it as an `.ics` file. See [Scheduling interviews](/guides/scheduling-interviews).
+After you contact the employer, choose **Followed up** below **Next step** in application details, on web or in the native app. This records contact now in **Activity** (**Timeline** in the native app) and restarts the ten-day no-reply clock for the current stage. For interviews, silence starts from the later of your contact and the last interview's end. Moving between lanes of the same stage keeps this contact; entering another stage starts a separate wait.
+
+The stage's elapsed time and Insights' first-reply figures stay unchanged. Scheduled follow-ups and **Remind me** delivery are kept, even when already due; edit or remove those separately. Logging contact sends no message to the employer. A plain note saying “Followed up” does not restart the clock. In List, <kbd>f</kbd> runs the same action for the focused open application beyond Saved; see [Keyboard triage](/guides/tracking-job-applications#keyboard-triage-in-list). Older self-hosted servers need an update to support this action.
+
+Each click records another contact. If the request was saved but its response was lost, retrying creates a duplicate. After an error, check **Activity** or **Timeline** before trying again; delete an accidental duplicate there.
+
+Completed interviews use their recorded dates. If you return to **Interview** and backdate the stage to overlap an earlier round, that round can still affect the no-reply clock. Review the stage and interview dates when interpreting that alert.
+
+<Frame caption="Followed up records contact while the Applied stage keeps its original date.">
+  <img
+    src="/images/guides/managing-an-application/followed-up.png"
+    alt="Fictional Harbor Labs application with Followed up below Next step and a timestamped Followed up activity entry"
+  />
+</Frame>
+
+<Frame caption="Review next steps and sent documents in the detail sheet">
+  <img
+    src="/images/guides/managing-an-application/detail-sheet-next-step.webp"
+    alt="Fictional Northwind Games application detail sheet with stages, next technical interview, sent resume, Write a letter, salary, contact, notes and activity"
+  />
+</Frame>
+
+Select **Edit** to **Schedule an interview…**, **Edit this interview…**, or **Set a follow-up…** (**Change the follow-up…** when one is set). When the next step has a date, including an offer's reply deadline, **Add to calendar** downloads it as an `.ics` file. See [Scheduling interviews](/guides/scheduling-interviews).
+
+After editing an interview, the save notice offers **Update your calendar**. A completed deletion offers **Download cancellation** for the same event. Import the file into your calendar app and check its result; external calendars do not update automatically. Undoing a deletion keeps the interview and does not offer a cancellation.
+
+Moving an application to **Offer** shows **Moved to Offer** with **Add the offer's terms**, which opens the offer form on the workspace's **Messages** tab. See [Comparing job offers](/guides/comparing-job-offers).
+
+The mobile app's stage-change notice offers **Undo**. If restoring the stage fails, an error notice says so; check the current stage before trying again. Notice text and actions wrap when space is narrow or text is enlarged.
 
 ## Seeing what you sent
 
@@ -67,25 +114,47 @@ For a **Saved** job, **Documents for this job** shows the resume and cover lette
 - When you confirm submission, Reactive Resume saves the current version of each selected document. The row then reads "Version sent _date_", plus the resume's Check score at that moment. Choose the actual submitted documents even if you prepared a different copy.
 - **Open** opens that sent version, read-only, in the document's history. Select **Back to now** there to return to the latest version.
 
-<Frame caption="What you sent, with a linked resume">
+<Frame caption="Review next steps and sent documents in the detail sheet">
   <img
     src="/images/guides/managing-an-application/detail-sheet-what-you-sent.webp"
-    alt="What you sent section with Game Developer Resume — Northwind Games, Version sent Sep 8 · Check 86, an Open button, a Write a letter button and the Attach a file instead link"
+    alt="Fictional Northwind Games application detail sheet with stages, next technical interview, sent resume, Write a letter, salary, contact, notes and activity"
   />
 </Frame>
 
-If nothing is linked yet, **Prepare a resume** and **Write a letter** create one for this job. You can copy, import or create a resume and edit it manually without AI. See [Tailoring a resume for a job](/guides/tailoring-a-resume-for-a-job). To link a resume you already have, open **⋯** > **Edit details…** and pick it under **Resume**.
+If nothing is linked yet, **Prepare a resume** and **Write a letter** create one for this job; these preparation actions appear for active jobs, not closed applications. You can copy, import or create a resume and edit it manually without AI. See [Tailoring a resume for a job](/guides/tailoring-a-resume-for-a-job). To link a resume you already have, open **⋯** > **Edit details…** and pick it under **Resume**.
+
+For saved jobs, **Use an existing letter** links a letter from Documents. A letter recorded as sent keeps its application link, and application pickers explain unavailable targets with **Letter already sent**.
+
+In the web and native apps, a missing document can also show **Use _document name_ · Resume** or **Use _document name_ · Cover letter** above the preparation actions. These suggestions use the most recently edited eligible document of each kind whose name contains the company name. Locked documents, Trash and documents linked to another job are excluded. Suggestions stop at Offer or Closed and never replace a selected document or a recorded sent version. Selecting one links the existing document; it creates no copy and does not record submission.
+
+<Frame caption="Reuse company-named documents already in your library">
+  <img
+    src="/images/guides/career/application-document-suggestions.png"
+    alt="Fictional Cedar application with Use Fictional Cedar — Portfolio · Resume and Use Fictional Cedar — Introduction · Cover letter above the preparation actions"
+  />
+</Frame>
 
 Sent snapshots stay accessible while a linked document is in Trash. In the workspace, **Apply → Mark as applied** records the current written answers, document versions and stage together.
 
+Recording submission here also updates **Apply**: **Review checks** keeps a read-only record of relevant manual checks at the first recorded submission, without an unfinished count or instruction to submit. Later stage, document or draft changes cannot replace it. **View recorded answers** opens the answers linked to that first submission when available, with the latest recorded answers as the fallback for older history. Those first-submission answers show the same recorded checks; unrelated saved answer versions do not inherit them. Older and imported submissions without review history say **Historical review checks unavailable.**
+
 ### Attaching a PDF instead
 
-If you sent a file made elsewhere, select **Attach a file instead**, then **Attach a resume file (PDF)** or **Attach a cover letter file (PDF)**. Only PDF files are accepted. Select the file name to open it, or **×** to remove it.
+If you sent a file made elsewhere, select **Attach a file instead**, then **Attach a resume file (PDF, up to 10 MB)** or **Attach a cover letter file (PDF, up to 10 MB)**. Only PDF files are accepted. Both web and native show the first page and the size read from the file. Attaching a resume makes **Prepare a resume** a secondary action; attaching only a cover letter keeps resume preparation prominent.
 
-<Frame caption="Attaching PDF files">
+On the web, select the file name to access the original PDF; on native, choose **Save or share file**. A preview that cannot be read keeps the original file action, and keeps its size when the bytes were downloaded. **Try again** retries the preview. Select **×** to remove the attachment. Private files still require their owning account; the preview does not publish them.
+
+<Frame caption="Attach the files you sent">
   <img
     src="/images/guides/managing-an-application/what-you-sent-attach-files.webp"
-    alt="What you sent section with Tailor a resume and Write a letter buttons above two dashed fields: Attach a resume file (PDF) and Attach a cover letter file (PDF)"
+    alt="What you sent section with controls to attach a resume or cover-letter PDF"
+  />
+</Frame>
+
+<Frame caption="First page and actual file size of a fictional two-page attachment on the web. Prepare a resume is secondary.">
+  <img
+    src="/images/guides/managing-an-application/private-attachment-preview-desktop.png"
+    alt="What you sent shows two-page-resume.pdf, a blue first-page preview labeled FIRST PAGE - Maya Example, 1 kB, Remove file and secondary Prepare a resume beside Write a letter"
   />
 </Frame>
 
@@ -101,16 +170,36 @@ Below **What you sent** are four facts:
 
 Select the **Contact** value to see every contact. Select **Add contact**, then enter a **Name** and, if you like, a role, a label (such as Recruiter, Hiring manager, Referral or Interviewer), an email and a phone number. Emails and phone numbers become links you can select. Select **×** next to a contact to remove it.
 
-<Frame caption="The contacts list">
+Select the pencil beside a contact to correct its details. **Label** accepts your own wording as well as the suggested labels.
+
+<Frame caption="A custom contact label in the phone web interface">
+  <img
+    src="/images/guides/managing-an-application/contact-label-phone.png"
+    alt="Fictional Birch contact form with Maya Example and the custom label Liaison beside a caret"
+  />
+</Frame>
+
+Removal offers **Undo** once the pending request is ready. Undo cancels that removal and reads the current application; it never writes a captured contact back. Reloading, closing the tab or putting the native app in the background sends an acknowledged pending removal. If another session changes the contacts before removal finishes, refresh and review them before trying again. Other edits, such as notes, are kept. Self-hosted servers need an update to support reviewed contact removal.
+
+If the current application cannot be read, the removed contact stays hidden. **Retry** reads the application again without repeating the deletion or restoring erased text.
+
+<Frame caption="Retry reads the current contacts without recreating erased text">
+  <img
+    src="/images/guides/managing-an-application/contacts-readback-retry.png"
+    alt="Fictional Cedar application with no contacts visible and a Couldn’t load. Try again. notice offering Retry"
+  />
+</Frame>
+
+<Frame caption="Contacts for one application">
   <img
     src="/images/guides/managing-an-application/detail-sheet-contacts.webp"
-    alt="Contacts popover listing Priya Shah, Recruiter, Talent Partner with an email link, and Marcus Lee, Hiring manager, Lead Gameplay Engineer, with an Add contact button"
+    alt="Application contact popover showing fictional recruiter Priya Shah and Add contact"
   />
 </Frame>
 
 ### Tags
 
-Type in **Add a tag** and press <kbd>Enter</kbd> to add a tag. Select **×** on a tag to remove it. Tags are searchable from the Applications page.
+Type in **Add a tag** and press <kbd>Enter</kbd> to add a tag. Select **×** on a tag to remove it. Tags are searchable from the Applications page: select a tag on a row or board card to filter by it, or type it in **Search applications**. Clear the search to see every application again.
 
 ## Keeping notes and history
 
@@ -118,22 +207,24 @@ Type in **Add a tag** and press <kbd>Enter</kbd> to add a tag. Select **×** on 
 
 **Activity** is the dated history of the application: stage changes, notes and interviews, newest first.
 
-- To add a dated note, type in **Add a note…** and select **Add**.
+- To add a dated update, type in **Log an update…** and select **Log**. Use **Notes** for things to remember and share with the coach.
 - To change an entry, hover over it, open its **⋯** menu and select **Edit…** (for a note, you can change the text and the date; for a stage change, the date). For an interview, the menu has **Edit interview…** instead, or select the interview itself.
 - To remove an entry, select **Delete…** in the same menu and confirm. The entry that marks when the application entered its current stage can't be deleted.
 
-Dates matter: Insights uses stage dates to work out how quickly people reply. If you add an application after the fact, adjust the dates so they match what happened.
+Imported stages without dates read **Imported · _stage_** and **Not recorded**, with no elapsed stage time. Use **Edit…** to record a known date; the date field starts empty. Known submission dates stay separate in Applied history.
+
+Dates matter: Insights needs separate known sending and reply dates to work out how quickly people reply. If you add an application after the fact, adjust the dates so they match what happened.
 
 ## Editing all details
 
-Open **⋯** at the top of the sheet and select **Edit details…** to edit everything in one form: **Company**, **Role / title**, **Location**, **Salary range**, **Source**, **Stage**, **Job posting link**, the linked **Resume** or an uploaded resume PDF, a **Cover letter** PDF, **Tags**, **Follow-up date**, **Follow-up note** and **Notes**. Select **Save changes** when you're done.
+Open **⋯** at the top of the sheet and select **Edit details…** to edit everything in one form: **Company**, **Role / title**, **Location**, **Salary range**, **Source**, **Stage**, **Job posting link**, the linked **Resume** or an uploaded resume PDF, a linked **Cover letter** or an uploaded letter PDF, **Tags**, **Follow-up date**, **Time**, **Follow-up note** and **Notes**. Follow-up times use your account timezone. Select **Save changes** when you're done.
 
 If you've [connected an AI provider](/guides/using-ai), the form also has a **Job description** section at the top. Select it to expand it, then paste the full posting there and Reactive Resume fills in the company, role, location and salary; select **Fill fields** to run it again.
 
-<Frame caption="The Edit application form">
+<Frame caption="Edit saved application details">
   <img
     src="/images/guides/managing-an-application/edit-application-sheet.webp"
-    alt="Edit application sheet with a Job description section, Company, Role / title, Location, Salary range, Source, Stage, Job posting link, Resume with Game Developer Resume linked, Cover letter and Tags fields"
+    alt="Edit application sheet with job description, company, role, location, salary, source, posting link, resume and document attachments"
   />
 </Frame>
 
@@ -142,28 +233,41 @@ If you've [connected an AI provider](/guides/using-ai), the form also has a **Jo
 When an application ends, close it rather than deleting it, so its history still counts in Insights.
 
 <Steps>
-  <Step title="Select Close application…">It's at the bottom of the details sheet.</Step>
+  <Step title="Select Mark as closed…">It's at the bottom of the details sheet.</Step>
   <Step title="Choose a reason">
-    Pick **Not selected**, **I withdrew**, **Accepted another offer** or **No response**.
+    Pick **Accepted offer**, **Not selected**, **I withdrew**, **Accepted another offer** or **No response**. From
+    **Offer**, **Accepted offer** is chosen for you; earlier stages start on **Not selected**. If you've added your own
+    Closed stages, choose one under **Stage**; a stage with a preset outcome, such as **Ghosted**, doesn't ask for a
+    reason.
   </Step>
-  <Step title="Confirm">Select **Close application**. Linked documents aren't changed.</Step>
+  <Step title="Confirm">Select **Mark as closed**. Linked documents aren't changed.</Step>
 </Steps>
 
-<Frame caption="Choosing why the application closed">
+<Frame caption="Record why an application ended">
   <img
     src="/images/guides/managing-an-application/close-this-application-dialog.webp"
-    alt="Close this application dialog with the reasons Not selected, I withdrew, Accepted another offer and No response, and Cancel and Close application buttons"
+    alt="Mark as closed dialog for an application at Offer, with the reasons Accepted offer, Not selected, I withdrew, Accepted another offer and No response, Accepted offer chosen, and Cancel and Mark as closed buttons"
   />
 </Frame>
 
-You can also close applications from a board card's **⋯** menu, or several at once from the List view. To bring a closed application back, turn on **Show closed**, open it and select **Reopen**. It returns to **Applied**.
+An accepted offer reads as a win: the sheet keeps the stepper filled through **Offer** and shows **Accepted offer** with a check in the Offer color. When you have other open applications, a message asks whether to close them as **Accepted another offer**. Nothing else closes unless you choose **Close all _n_**, and that close has **Undo**.
+
+You can also close applications from a board card's **⋯** menu, or several at once from the List view. To bring a closed application back, turn on **Show closed applications**, open it and select **Reopen**. It returns to **Applied** (your standard Applied stage, whatever you've named it).
 
 ## Deleting an application
 
-Open **⋯** at the top of the sheet, select **Delete…** and confirm. The application, its history and any PDF files you attached to it are deleted permanently; there is no Trash for applications. Your resumes and letters are not deleted.
+Open **⋯** at the top of the sheet, select **Move to Trash** and confirm. The application leaves active views, but its timeline, prepared and submitted document links, workspace, application-specific Knowledge, coach conversations and attached files stay saved. You can restore it after reloading or reopening the app.
+
+Open **Applications → More → Trash** on web, or **Trash** on the native Applications screen. The existing Trash page also links to its **Applications** view. Select **Restore** beside the application to bring it back. Applications remain in Trash until you explicitly choose **Delete permanently…** and hold **Hold to delete**. Unlike documents, they have no automatic 30-day expiry. Linked resumes, letters and their saved versions are kept even after permanent application deletion.
+
+Scheduled application work is hidden and queued work is canceled while the application is in Trash. Restore does not replay canceled work; review upcoming schedules and re-enable any device reminders you need. A stale Restore or permanent-delete action fails if another session has restored or re-trashed the application. Refresh Trash before trying again. See [Using the Trash](/guides/using-the-trash#restore-an-application).
 
 ## Related guides
 
 - [Scheduling interviews](/guides/scheduling-interviews): add interviews and follow-ups, and put them in your calendar.
 - [Tailoring a resume for a job](/guides/tailoring-a-resume-for-a-job): tailor a resume, write a letter, and prepare for the next step.
 - [Undoing changes and version history](/guides/undoing-changes-and-version-history): how sent versions appear in a document's history.
+
+Reviewed answers saved through **Apply → Save for other applications** live in a separate library. Editing or deleting a library entry never rewrites your recorded answers. See [saving and reusing answers](/guides/writing-application-answers#save-and-reuse-a-reviewed-answer).
+
+Date-only follow-ups from earlier app versions stay on the selected day at 09:00 in your current account timezone. Changing **Settings → Preferences → Timezone** moves pending date-only reminders with that clock. Reminders with an exact time keep their instant. Editing a note or changing timezone does not send an already delivered follow-up again.

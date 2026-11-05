@@ -1,8 +1,8 @@
 {
 	"name": "reactive-resume",
 	"displayName": "Reactive Resume",
-	"version": "1.0.0",
-	"description": "Job-search skills for building, auditing and tailoring resumes, writing impact bullets, tracking applications, preparing for and practising interviews, and negotiating offers, plus the Reactive Resume MCP server for reading and editing your resumes, cover letters and applications.",
+	"version": "1.1.0",
+	"description": "32 resume and job-search skills: complete drafts, fourteen profession-specific guides, academic and career-change resumes, proofreading, cover letters, LinkedIn, portfolios, applications, interviews and offers, plus the Reactive Resume MCP server for authorized account edits.",
 	"author": { "name": "Amruth Pillai", "email": "amruth@rxresu.me", "url": "https://amruthpillai.com" },
 	"homepage": "https://docs.rxresu.me/guides/using-agent-skills",
 	"repository": "https://github.com/reactive-resume/reactive-resume",

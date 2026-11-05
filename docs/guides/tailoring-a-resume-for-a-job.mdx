@@ -16,11 +16,14 @@ A resume written for one job usually does better than a general one. From any ap
 <Steps>
   <Step title="Open the application">In **Applications**, select the application to open its details.</Step>
   <Step title="Select Prepare a resume">
-    **Prepare a resume** appears under **Documents for this job** when no resume is linked. **Save and prepare resume**
-    when saving a job opens the same preparation flow.
+    **Prepare a resume** appears under **Documents for this job** when no resume is linked. When you save a job with a
+    resume chosen, **Save and prepare resume** skips these steps: it makes the copy with the suggested name and opens
+    it.
   </Step>
   <Step title="Choose the resume to start from">
-    Under **Start from**, pick the resume to copy. Usually that's your main, general resume.
+    Under **Start from**, pick the resume to copy. Usually that's your main, general resume, and it's picked for you:
+    the most recently edited resume that isn't a copy for another job. Each resume shows **Copy for _company_** or **Not
+    linked to a job**, so you can see which is which.
   </Step>
   <Step title="Check the job and the name">
     Under **For which job?**, the application is already picked. **Name** is suggested from the resume and the company,
@@ -29,35 +32,31 @@ A resume written for one job usually does better than a general one. From any ap
   <Step title="Create the copy">Select **Create and open**.</Step>
 </Steps>
 
-<Frame caption="Copy a resume for a job">
+<Frame caption="Choose the resume and job for a tailored copy">
   <img
     src="/images/guides/tailoring-a-resume-for-a-job/copy-a-resume-for-a-job-dialog.webp"
-    alt="Copy a resume for a job dialog with Game Developer Resume selected under Start from, Maple & Moss selected under For which job?, and the suggested name Game Developer Resume — Maple & Moss, with a Create and open button"
+    alt="Copy a resume for a job dialog with source resume choices, job selection, name and Create and open"
   />
 </Frame>
 
 Reactive Resume makes the copy, links it to the job, and opens it in the editor. For a saved job, the copy becomes its prepared resume. Your original resume stays unchanged. The assistant opens automatically only when you already have a usable AI connection.
+
+Android and iPhone also offer **Save and prepare resume** in **Applications → Save job** after reviewing a posting. Choose the source under **More details → Resume**. The new copy opens in **Write**, with unsent preparation suggestions when AI is available. Saving or copying never requests an AI rewrite. A copy failure continues in the existing copy step for the job that was already saved.
 
 If you have no resume yet, select **Import or create a resume**, then import a file or select **Start blank**. The imported or blank resume stays linked to this saved job, so you can continue editing it without re-entering the posting.
 
 To tailor the copy:
 
 - Edit the resume manually to emphasize experience relevant to the saved posting, then review and download it.
-- With a usable AI connection, pick **Tailor to the _company_ posting** in the assistant. It reads the resume and posting, and suggests edits you accept or reject one at a time. See [Using the assistant](/guides/using-the-assistant).
+- With a usable AI connection, pick **Tailor to the _company_ posting** in the assistant. It reads the resume and posting, and suggests edits you review before accepting or rejecting. The set lists the posting requirements the assistant found, with what addresses each or that nothing does, and each edit shows what the assistant cites and anything nothing checked backs. See [Using the assistant](/guides/using-the-assistant#tailoring-to-a-posting).
+- In a saved job's preparation, **Tailor the resume** opens the job's copy with the assistant ready. If the selected resume wasn't copied for this job, the step shows **Copy this resume for the job** instead, so the resume your other applications use stays unchanged. The assistant also offers **Copy for this job** when you open it on a resume other jobs share.
 - Switch to **Check** mode to see how well the resume matches the posting. See [Checking your resume](/guides/checking-your-resume).
 
 <Tip>
   You can also start a copy from **Documents**: open a resume's **⋯** menu and select **Copy for a job…**, or select
-  **New** and then **Copy a resume for a job**. Pick the application under **For which job?**, or **No job yet** for a
-  plain copy.
+  **New** and then **Copy a resume for a job**. Pick the application under **For which job?**, **Add a job** to save one
+  there and then, or **No job yet** for a plain copy.
 </Tip>
-
-<Frame caption="Tailor a resume and Write a letter, shown when nothing is linked yet">
-  <img
-    src="/images/guides/tailoring-a-resume-for-a-job/what-you-sent-tailor-and-write-buttons.webp"
-    alt="What you sent section with a Tailor a resume button, a Write a letter button and an Attach a file instead link"
-  />
-</Frame>
 
 ## Write a cover letter for the job
 
@@ -65,7 +64,18 @@ In the application's details, under **Documents for this job** (or **What you se
 
 To link a letter you already have, go to **Documents**, open the letter's **⋯** menu and select **Link to application…**. See [Writing a cover letter](/guides/writing-a-cover-letter).
 
+## Record what you sent
+
 Use **Open application** to visit the original link and submit. Preparing documents or opening the link leaves the job **Saved**. After submitting, select **Mark as applied**, confirm the date and the documents or attached PDFs you actually sent. The selected document versions are kept for later. See [Managing an application](/guides/managing-an-application#seeing-what-you-sent).
+
+After submission, **What you sent** shows the documents you recorded. This example has reached **Interview**, with a technical interview as its next step.
+
+<Frame caption="After submission, review recorded documents and the next interview">
+  <img
+    src="/images/guides/tailoring-a-resume-for-a-job/what-you-sent-tailor-and-write-buttons.webp"
+    alt="Fictional Northwind Games application detail sheet with stages, next technical interview, sent resume, Write a letter, salary, contact, notes and activity"
+  />
+</Frame>
 
 ## Continue in the application workspace
 
@@ -73,7 +83,7 @@ Open the application's details and select **Open workspace**. Your linked docume
 
 - [Fit](/guides/checking-job-fit) shows which requirements have evidence and which need clarification.
 - [Apply](/guides/writing-application-answers) helps you reuse experience in form answers.
-- [Prepare and Practice](/guides/preparing-for-interview-day) help you plan the next round and rehearse out loud.
+- [Interview prep and Practice](/guides/preparing-for-interview-day) help you plan the next round and rehearse out loud.
 - [Messages](/guides/replying-to-recruiters) helps you read and reply to recruiter messages.
 
 For further resume edits, open the linked resume in its editor and use the document assistant. Review each proposed edit before accepting it.
@@ -83,3 +93,5 @@ For further resume edits, open the linked resume in its editor and use the docum
 - [Using the assistant](/guides/using-the-assistant): how suggestions, accepting and rejecting work.
 - [Checking your resume](/guides/checking-your-resume): see how your resume matches a job.
 - [Viewing application insights](/guides/viewing-application-insights): compare replies for tailored and general resumes.
+
+Before accepting assistant edits, check **Page fit** beside the batch controls. It compares the current resume with the edits eligible for batch acceptance, using the actual PDF layout. A positive **Estimated overflow change** means more spill lines; a negative number means fewer. Nothing is saved by measuring. See [Review proposed edits](/guides/using-the-assistant) for individual checks and Undo.

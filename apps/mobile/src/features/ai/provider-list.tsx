@@ -1,21 +1,37 @@
 import type { SavedProvider } from "./catalog";
+import { i18n } from "@lingui/core";
+import { ph } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { ORPCError } from "@orpc/client";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { View } from "react-native";
 import { keyEnding, providerLabel } from "./catalog";
-import { aiSettingsError } from "./error";
+import { aiSettingsError, providerTestError } from "./error";
+import { NextSteps } from "./next-steps";
 import { ProviderEditorSheet } from "./provider-editor";
 import { AIProviderSetupSheet, useHasAIProvider } from "./providers";
 import { client, orpc } from "@/api/client";
-import { Banner, Button, Card, EmptyState, Skeleton, Text, useTheme } from "@/ui";
+import {
+	Banner,
+	Button,
+	Card,
+	ConfirmDialog,
+	EmptyState,
+	IconButton,
+	ListRow,
+	Sheet,
+	Skeleton,
+	Text,
+	useTheme,
+} from "@/ui";
 
 export function ProviderList() {
 	const { t } = useLingui();
 	const state = useHasAIProvider();
 	const { space } = useTheme();
 	const [adding, setAdding] = useState(false);
+	const [connectedId, setConnectedId] = useState<string | null>(null);
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const editing = state.providers.find((provider) => provider.id === editingId);
 	if (state.error)
@@ -43,6 +59,9 @@ export function ProviderList() {
 	const managed = state.providers.some((provider) => provider.managed);
 	return (
 		<>
+			{state.usableProviders.some((provider) => provider.id === connectedId) && (
+				<NextSteps onDismiss={() => setConnectedId(null)} />
+			)}
 			{state.providers.length === 0 && (
 				<EmptyState
 					icon="sparkle"
@@ -54,14 +73,25 @@ export function ProviderList() {
 				<ProviderRow
 					key={provider.id}
 					provider={provider}
-					isDefault={state.defaultProvider?.id === provider.id}
+					isDefault={provider.isDefault}
 					onEdit={() => setEditingId(provider.id)}
 				/>
 			))}
 			{!managed && (
-				<Button label={t`Add AI provider`} icon="plus" variant="secondary" onPress={() => setAdding(true)} />
+				<>
+					<Text color="ink3">{t`Your provider may charge your account for requests made with your API key.`}</Text>
+					<Text variant="caption" color="ink3">{t`OpenAI, Anthropic, Gemini, Ollama and more`}</Text>
+					<Button label={t`Add AI provider`} icon="plus" variant="secondary" onPress={() => setAdding(true)} />
+				</>
 			)}
-			<AIProviderSetupSheet open={adding} onClose={() => setAdding(false)} />
+			<AIProviderSetupSheet
+				open={adding}
+				onClose={() => setAdding(false)}
+				onReady={(provider) => {
+					if (!state.providers.some((other) => other.id !== provider.id && other.testStatus === "success"))
+						setConnectedId(provider.id);
+				}}
+			/>
 			{editing && !editing.managed && (
 				<ProviderEditorSheet open provider={editing} onClose={() => setEditingId(null)} />
 			)}
@@ -79,7 +109,10 @@ function ProviderRow({ provider, isDefault, onEdit }: ProviderRowProps) {
 	const [pending, setPending] = useState(false);
 	const [result, setResult] = useState<string | null>(null);
 	const [failure, setFailure] = useState<string | null>(null);
-	const testError = failure ?? (result ? null : provider.testStatus === "failure" ? provider.testError : null);
+	const [menu, setMenu] = useState(false);
+	const [confirmDelete, setConfirmDelete] = useState(false);
+	const testError =
+		failure ?? (result ? null : provider.testStatus === "failure" ? providerTestError(provider.testErrorKind) : null);
 	const run = async (action: "test" | "default") => {
 		if (busy.current) return;
 		busy.current = true;
@@ -92,13 +125,30 @@ function ProviderRow({ provider, isDefault, onEdit }: ProviderRowProps) {
 			else {
 				const tested = await client.aiProviders.test({ id: provider.id });
 				const milliseconds = Math.round(performance.now() - start);
-				if (tested.testStatus === "success") setResult(t`Connected · ${milliseconds} ms`);
-				else setFailure(tested.testError || t`The provider didn't answer. Check the key, the model and the base URL.`);
+				if (tested.testStatus === "success")
+					setResult(t`Connected · ${ph({ milliseconds: i18n.number(milliseconds) })} ms`);
+				else setFailure(providerTestError(tested.testErrorKind));
 			}
 		} catch (error) {
 			setFailure(aiSettingsError(error, action === "test"));
 		} finally {
 			void queryClient.invalidateQueries({ queryKey: orpc.aiProviders.list.key() });
+			busy.current = false;
+			setPending(false);
+		}
+	};
+	const remove = async () => {
+		if (busy.current) return;
+		setConfirmDelete(false);
+		busy.current = true;
+		setPending(true);
+		setFailure(null);
+		try {
+			await client.aiProviders.delete({ id: provider.id });
+			await queryClient.invalidateQueries({ queryKey: orpc.aiProviders.list.key() });
+		} catch (error) {
+			setFailure(aiSettingsError(error));
+		} finally {
 			busy.current = false;
 			setPending(false);
 		}
@@ -110,6 +160,11 @@ function ProviderRow({ provider, isDefault, onEdit }: ProviderRowProps) {
 			<Text variant="callout" selectable>
 				{provider.model}
 			</Text>
+			{(provider.fastModel || provider.capableModel) && (
+				<Text variant="callout" color="ink3" selectable>
+					{t`Fast: ${provider.fastModel ?? provider.model} · Capable: ${provider.capableModel ?? provider.model}`}
+				</Text>
+			)}
 			{provider.apiKeyPreview && (
 				<Text variant="mono" color="ink3">
 					{keyEnding(provider.apiKeyPreview)}
@@ -136,8 +191,19 @@ function ProviderRow({ provider, isDefault, onEdit }: ProviderRowProps) {
 						/>
 						<Button label={t`Edit`} variant="ghost" disabled={pending} onPress={onEdit} />
 						{!isDefault && provider.enabled && provider.testStatus === "success" && (
-							<Button label={t`Make default`} variant="ghost" disabled={pending} onPress={() => void run("default")} />
+							<Button
+								label={t`Make default`}
+								variant="secondary"
+								disabled={pending}
+								onPress={() => void run("default")}
+							/>
 						)}
+						<IconButton
+							icon="dots-three"
+							label={t`Provider options`}
+							disabled={pending}
+							onPress={() => setMenu(true)}
+						/>
 					</View>
 					{result && (
 						<Text accessibilityLiveRegion="polite" color="accentText">
@@ -149,6 +215,30 @@ function ProviderRow({ provider, isDefault, onEdit }: ProviderRowProps) {
 							{t`Failed`} · {testError}
 						</Text>
 					)}
+					<Sheet open={menu} onClose={() => setMenu(false)} title={provider.label} detents={[0.35]}>
+						<View style={{ paddingHorizontal: space.s4, gap: space.s2 }}>
+							<ListRow
+								title={t`Delete provider`}
+								leading="trash"
+								destructive
+								disabled={pending}
+								onPress={() => {
+									setMenu(false);
+									setConfirmDelete(true);
+								}}
+							/>
+						</View>
+					</Sheet>
+					<ConfirmDialog
+						open={confirmDelete}
+						title={t`Delete this provider?`}
+						message={t`Its saved key is deleted. Conversations using it need another provider.`}
+						confirmLabel={t`Delete provider`}
+						cancelLabel={t`Keep provider`}
+						destructive
+						onConfirm={() => void remove()}
+						onCancel={() => setConfirmDelete(false)}
+					/>
 				</>
 			)}
 		</Card>

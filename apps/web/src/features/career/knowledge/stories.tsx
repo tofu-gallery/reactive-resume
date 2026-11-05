@@ -1,25 +1,40 @@
 import type { Fact, Story } from "../hooks";
-import { plural, t } from "@lingui/core/macro";
+import type { CareerStoryData } from "@reactive-resume/schema/career";
+import { i18n } from "@lingui/core";
+import { ph, plural, t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { AnimatePresence } from "motion/react";
-import { memo, useState } from "react";
+import { memo, useId, useState } from "react";
 import * as z from "zod";
+import { storyDraftFactIds } from "@reactive-resume/schema/career-practice";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Checkbox } from "@reactive-resume/ui/components/checkbox";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuGroup,
+	DropdownMenuItem,
+	DropdownMenuLabel,
+	DropdownMenuTrigger,
+} from "@reactive-resume/ui/components/dropdown-menu";
+import { EmptyState } from "@reactive-resume/ui/components/empty-state";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
 import { Textarea } from "@reactive-resume/ui/components/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@reactive-resume/ui/components/tooltip";
 import { cn } from "@reactive-resume/utils/style";
+import { useCoachKnowledge } from "../coach-thread";
 import { useSessionDraft } from "../hooks";
 import { CareerLoadError, CareerLoading } from "../load-state";
-import { CollapseRow, Eyebrow, Swap, useNow, withUndo } from "../shared";
+import { useRemoving } from "../removing";
+import { CollapseRow, Eyebrow, Swap, useCareerTime, useNow, withQueryUndo } from "../shared";
+import { StoryPractice } from "../workspace/practise";
 import { collectInterviews, upcomingInterviews } from "@/features/applications/interviews";
 import { applicationsListQueryOptions } from "@/features/applications/queries";
 import { toastError } from "@/libs/error-message";
-import { client, orpc } from "@/libs/orpc/client";
+import { client, orpc, prepareRpc } from "@/libs/orpc/client";
 
 type PartKey = "situation" | "task" | "action" | "result" | "reflection";
 
@@ -47,16 +62,25 @@ const factChanged = (story: Story, facts: Map<string, Fact>) =>
 		return at !== undefined && new Date(at) > new Date(story.updatedAt);
 	});
 
-type StoriesPageProps = { storyId: string | undefined; edit: boolean };
+/** A new story started from an interview plan's step: its title, and the step's detail shown as a note. */
+type StoryStart = { title: string; note: string; plan: string; factIds?: string[] | undefined };
 
-export function StoriesPage({ storyId, edit }: StoriesPageProps) {
+type StoriesPageProps = {
+	storyId: string | undefined;
+	edit: boolean;
+	practice?: boolean;
+	start?: StoryStart | undefined;
+};
+
+export function StoriesPage({ storyId, edit, practice = false, start: planStart }: StoriesPageProps) {
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
 	const storyQuery = useQuery(orpc.career.stories.queryOptions({ input: { applicationId: null } }));
 	const factQuery = useQuery(orpc.career.facts.queryOptions({ input: { applicationId: null, all: true } }));
 	const stories = storyQuery.data;
 	const facts = factQuery.data;
-	const [hidden, setHidden] = useState<string[]>([]);
+	const removing = useRemoving((state) => state.ids);
+	const { add: hide, drop: unhide } = useRemoving.getState();
 
 	if ((!stories && storyQuery.isError) || (!facts && factQuery.isError))
 		return (
@@ -70,7 +94,7 @@ export function StoriesPage({ storyId, edit }: StoriesPageProps) {
 	if (!stories || !facts) return <CareerLoading />;
 
 	const factsById = new Map((facts ?? []).map((fact) => [fact.id, fact]));
-	const list = stories.filter((story) => !hidden.includes(story.id));
+	const list = stories.filter((story) => !removing.has(story.id));
 	const selected = storyId ? list.find((story) => story.id === storyId) : edit ? undefined : list[0];
 	const editing = edit && (selected !== undefined || !storyId);
 
@@ -82,24 +106,32 @@ export function StoriesPage({ storyId, edit }: StoriesPageProps) {
 		});
 
 	const remove = (story: Story) => {
-		setHidden((current) => [...current, story.id]);
-		open(undefined);
-		withUndo({
+		withQueryUndo({
+			queryClient,
+			queryKey: orpc.career.stories.key(),
 			description: t`Story deleted`,
-			onUndo: () => setHidden((current) => current.filter((id) => id !== story.id)),
-			commit: () =>
-				client.career
-					.deleteStory({ id: story.id })
-					.catch((error: unknown) => {
-						setHidden((current) => current.filter((id) => id !== story.id));
-						toastError(error, t`Couldn't delete that story. Try again.`);
-					})
-					.finally(() => {
-						void queryClient.invalidateQueries({ queryKey: orpc.career.stories.key() });
-						void queryClient.invalidateQueries({ queryKey: orpc.career.facts.key() });
-					}),
+			errorMessage: t`Couldn't delete that story. Try again.`,
+			prepare: () => prepareRpc(client.career.deleteStory, { id: story.id }),
+			hide: () => {
+				hide(story.id);
+				open(undefined);
+			},
+			restore: () => {
+				unhide(story.id);
+			},
 		});
 	};
+
+	if (practice && storyId)
+		return (
+			<div className="grid gap-4">
+				<Button variant="ghost" className="justify-self-start" onClick={() => open(storyId)}>
+					<Icon name="arrow-left" />
+					<Trans>Back to stories</Trans>
+				</Button>
+				<StoryPractice key={storyId} storyId={storyId} />
+			</div>
+		);
 
 	return (
 		<div className="grid items-start gap-5 lg:grid-cols-[300px_minmax(0,1fr)]">
@@ -157,6 +189,7 @@ export function StoriesPage({ storyId, edit }: StoriesPageProps) {
 								onSaved={(id) => open(id)}
 								onCancel={() => open(selected?.id)}
 								onDelete={selected ? () => remove(selected) : undefined}
+								start={selected ? undefined : planStart}
 							/>
 						) : (
 							selected && <StoryReader story={selected} facts={factsById} onEdit={() => open(selected.id, true)} />
@@ -164,16 +197,20 @@ export function StoriesPage({ storyId, edit }: StoriesPageProps) {
 					</Swap>
 				</div>
 			) : (
-				<div className="grid justify-items-center gap-2 rounded-xl border border-dashed border-line-2 p-7 text-center">
-					<h2 className="font-display text-[22px] leading-7 font-medium">
-						<Trans>No stories yet</Trans>
-					</h2>
-					<p className="max-w-[300px] text-sm text-ink-2">
+				<EmptyState
+					title={<Trans>No stories yet</Trans>}
+					action={
+						<Button onClick={() => open(undefined, true)}>
+							<Trans>Add a story</Trans>
+						</Button>
+					}
+					description={
 						<Trans>
-							Write one about something you did, in five parts. Leave a part blank until you can support it.
+							Write one about something you did, in five parts. Leave Result and Reflection blank until you can support
+							them.
 						</Trans>
-					</p>
-				</div>
+					}
+				/>
 			)}
 		</div>
 	);
@@ -201,7 +238,10 @@ const StoryCard = memo(function StoryCard({ story, selected, changed }: StoryCar
 			>
 				<span className="text-sm leading-5 font-semibold">{story.data.title}</span>
 				<span className="text-xs text-ink-3">
-					<Trans>{filled} of 5 parts</Trans> · {plural(factCount, { one: "# fact", other: "# facts" })}
+					<Trans>{ph({ filled: i18n.number(filled) })} of 5 parts</Trans> ·{" "}
+					<span className={cn(factCount === 0 && "text-warn-text")}>
+						{plural(factCount, { one: "# fact", other: "# facts" })}
+					</span>
 				</span>
 				<PartTiles story={story} />
 				{changed && (
@@ -223,7 +263,7 @@ function PartTiles({ story }: { story: Story }) {
 					key={part.key}
 					title={part.label}
 					className={cn(
-						"h-5 w-[22px] rounded-md text-center font-mono text-[11px] leading-5 font-semibold",
+						"h-5 w-[22px] rounded-md text-center font-mono text-xs leading-5 font-semibold",
 						story.data[part.key].trim() ? "bg-accent-soft text-accent-text" : "bg-sunken text-ink-3",
 					)}
 				>
@@ -251,7 +291,7 @@ function StoryReader({ story, facts, onEdit }: StoryReaderProps) {
 		<div className="grid gap-[18px]">
 			<header className="flex flex-wrap items-start gap-3">
 				<div className="grid min-w-0 flex-1 basis-60 gap-1">
-					<h2 className="font-display text-[22px] leading-7 font-medium text-pretty">{story.data.title}</h2>
+					<h2 className="font-display text-[22px] leading-7 text-pretty">{story.data.title}</h2>
 					<p className="text-[13px] text-ink-3">{story.data.tags.join(" · ") || t`No tags yet`}</p>
 				</div>
 				<div className="flex gap-1.5">
@@ -276,7 +316,7 @@ function StoryReader({ story, facts, onEdit }: StoryReaderProps) {
 								{text ? (
 									<p className="text-[15px] leading-[23px] text-pretty whitespace-pre-line">{text}</p>
 								) : (
-									<p className="text-sm leading-[21px] text-ink-3 italic">
+									<p className="text-sm leading-[21px] text-ink-3">
 										<Trans>Not recorded yet. Leave it blank until you can support it.</Trans>
 									</p>
 								)}
@@ -315,33 +355,55 @@ function StoryReader({ story, facts, onEdit }: StoryReaderProps) {
 /** Practise this story aloud in the workspace of the next upcoming interview. */
 type PractiseButtonProps = { storyId: string };
 
+/**
+ * Practice a story out loud, in the workspace of an upcoming interview: the next one says which, several open a menu.
+ * Only a story the coach can use (every backing fact switched on and unchanged since) can be practised; otherwise
+ * the button says what to fix.
+ */
 function PractiseButton({ storyId }: PractiseButtonProps) {
 	const navigate = useNavigate();
 	const now = useNow();
+	const { when } = useCareerTime();
+	const knowledge = useCoachKnowledge(null);
 	const { data: applications, isPending, isError, refetch } = useQuery(applicationsListQueryOptions());
-	const next = upcomingInterviews(collectInterviews(applications ?? []), now)[0];
+	const open = (applications ?? []).filter((application) => application.status !== "closed");
+	const upcoming = upcomingInterviews(collectInterviews(open), now).slice(0, 5);
+	const story = knowledge.allStories.find((item) => item.id === storyId);
+	const usable = knowledge.stories.some((item) => item.id === storyId);
 	const label = (
 		<>
 			<Icon name="microphone" size={18} />
 			<Trans context="Button: rehearse interview answers">Practice</Trans>
 		</>
 	);
-	if (isError)
+	if (isError || knowledge.isError)
 		return (
 			<div role="alert">
-				<Button variant="secondary" size="sm" onClick={() => void refetch()}>
+				<Button
+					variant="secondary"
+					size="sm"
+					onClick={() => {
+						void refetch();
+						knowledge.retry();
+					}}
+				>
 					<Trans>Couldn't load interviews. Retry</Trans>
 				</Button>
 			</div>
 		);
-	if (isPending)
+	if (isPending || !knowledge.loaded)
 		return (
 			<Button variant="ghost" size="sm" disabled>
 				<Trans>Loading interviews…</Trans>
 			</Button>
 		);
 
-	if (!next)
+	const reason = !usable
+		? story?.data.factIds.length
+			? t`A fact this story uses is switched off or changed since. Edit the story to check it.`
+			: t`Link a fact to practice this story`
+		: null;
+	if (reason)
 		return (
 			<Tooltip>
 				{/* Focusable while disabled (aria-disabled), so hover and keyboard still reach the tooltip. */}
@@ -357,26 +419,63 @@ function PractiseButton({ storyId }: PractiseButtonProps) {
 				>
 					{label}
 				</TooltipTrigger>
-				<TooltipContent>
-					<Trans>Add an interview first</Trans>
-				</TooltipContent>
+				<TooltipContent>{reason}</TooltipContent>
 			</Tooltip>
 		);
 
+	const practise = (item: (typeof upcoming)[number]) =>
+		void navigate({
+			to: "/dashboard/applications/$applicationId/{-$tab}",
+			params: { applicationId: item.application.id, tab: "practise" },
+			search: { speak: true, story: storyId, round: item.interview.id },
+		});
+	if (upcoming.length === 0)
+		return (
+			<Button
+				variant="ghost"
+				className="h-8 px-2.5 text-[13px] text-ink-2"
+				onClick={() =>
+					void navigate({
+						to: "/dashboard/career/knowledge/stories/{-$storyId}",
+						params: { storyId },
+						search: { practice: true },
+					})
+				}
+			>
+				{label}
+			</Button>
+		);
+	const [next] = upcoming;
+	if (upcoming.length === 1 && next)
+		return (
+			<Button variant="ghost" className="h-8 px-2.5 text-[13px] text-ink-2" onClick={() => practise(next)}>
+				<Icon name="microphone" size={18} />
+				<Trans context="Button: rehearse interview answers">Practice for {next.application.company}</Trans>
+			</Button>
+		);
+
 	return (
-		<Button
-			variant="ghost"
-			className="h-8 px-2.5 text-[13px] text-ink-2"
-			onClick={() =>
-				void navigate({
-					to: "/dashboard/applications/$applicationId/{-$tab}",
-					params: { applicationId: next.application.id, tab: "practise" },
-					search: { speak: true, story: storyId },
-				})
-			}
-		>
-			{label}
-		</Button>
+		<DropdownMenu>
+			<DropdownMenuTrigger render={<Button variant="ghost" className="h-8 px-2.5 text-[13px] text-ink-2" />}>
+				{label}
+				<Icon name="caret-down" size={16} />
+			</DropdownMenuTrigger>
+			<DropdownMenuContent align="end" className="w-72">
+				<DropdownMenuGroup>
+					<DropdownMenuLabel>
+						<Trans>Practice for which interview?</Trans>
+					</DropdownMenuLabel>
+					{upcoming.map((item) => (
+						<DropdownMenuItem key={item.interview.id} onClick={() => practise(item)}>
+							<span className="grid min-w-0">
+								<span className="truncate">{item.application.company}</span>
+								<span className="text-xs text-ink-3">{when(item.start)}</span>
+							</span>
+						</DropdownMenuItem>
+					))}
+				</DropdownMenuGroup>
+			</DropdownMenuContent>
+		</DropdownMenu>
 	);
 }
 
@@ -399,25 +498,40 @@ type StoryEditorProps = {
 	onSaved: (id: string) => void;
 	onCancel: () => void;
 	onDelete: (() => void) | undefined;
+	/**
+	 * A coach's proposal opened with Edit first: its parts start the draft, which lives under the proposal's key and is
+	 * kept on Cancel, so the review card can be reopened with the edits. Saved in the proposal's scope.
+	 */
+	proposal?: { key: string; story: Omit<CareerStoryData, "applicationId">; applicationId: string | null };
+	/** A new story from an interview plan's "Draft story" step. */
+	start?: StoryStart | undefined;
 };
 
-function StoryEditor({ story, facts, onSaved, onCancel, onDelete }: StoryEditorProps) {
+export function StoryEditor({ story, facts, onSaved, onCancel, onDelete, proposal, start: plan }: StoryEditorProps) {
 	const queryClient = useQueryClient();
+	const start = proposal?.story ?? story?.data;
+	const applicationId = proposal ? proposal.applicationId : null;
 	const {
 		value: draft,
 		setValue: setDraft,
 		clear,
 	} = useSessionDraft(
-		`story:${story?.id ?? "new"}`,
+		proposal
+			? `story:proposal:${proposal.key}`
+			: story
+				? `story:${story.id}`
+				: plan
+					? `story:new:plan:${plan.plan}:${plan.title}`
+					: "story:new",
 		{
-			title: story?.data.title ?? "",
-			situation: story?.data.situation ?? "",
-			task: story?.data.task ?? "",
-			action: story?.data.action ?? "",
-			result: story?.data.result ?? "",
-			reflection: story?.data.reflection ?? "",
-			tags: story?.data.tags.join(", ") ?? "",
-			factIds: story?.data.factIds ?? [],
+			title: start?.title ?? plan?.title ?? "",
+			situation: start?.situation ?? "",
+			task: start?.task ?? "",
+			action: start?.action ?? "",
+			result: start?.result ?? "",
+			reflection: start?.reflection ?? "",
+			tags: start?.tags.join(", ") ?? "",
+			factIds: start?.factIds ?? (plan ? storyDraftFactIds({ detail: plan.note, factIds: plan.factIds }, facts) : []),
 		},
 		(value) => {
 			const result = storyDraftSchema.safeParse(value);
@@ -425,8 +539,11 @@ function StoryEditor({ story, facts, onSaved, onCancel, onDelete }: StoryEditorP
 		},
 	);
 	const [tried, setTried] = useState(false);
-	// A shared story can only rest on shared facts; switched-off ones are listed but can't be ticked.
-	const shared = facts.filter((fact) => fact.applicationId === null);
+	const errorId = useId();
+	// A story rests on facts in its own scope: shared ones, plus the application's own for a story kept with one
+	// application. Switched-off ones are listed but can't be ticked; the server checks all of this again on save.
+	const shared = facts.filter((fact) => fact.applicationId === null || fact.applicationId === applicationId);
+	const unavailable = draft.factIds.filter((id) => !shared.some((fact) => fact.id === id && fact.status === "active"));
 	const usable = new Set(shared.filter((fact) => fact.status === "active").map((fact) => fact.id));
 
 	const save = useMutation({
@@ -434,7 +551,7 @@ function StoryEditor({ story, facts, onSaved, onCancel, onDelete }: StoryEditorP
 		onSuccess: (row) => {
 			clear();
 			// Newest first, as the server orders them, so the reader opens on it before the refetch lands.
-			queryClient.setQueryData<Story[]>(orpc.career.stories.queryKey({ input: { applicationId: null } }), (list) => [
+			queryClient.setQueryData<Story[]>(orpc.career.stories.queryKey({ input: { applicationId } }), (list) => [
 				row,
 				...(list ?? []).filter((item) => item.id !== row.id),
 			]);
@@ -445,20 +562,18 @@ function StoryEditor({ story, facts, onSaved, onCancel, onDelete }: StoryEditorP
 		onError: (error) => toastError(error, t`Couldn't save the story. Try again.`),
 	});
 
-	const missingPart = REQUIRED.some((key) => !draft[key].trim());
+	const missingParts = REQUIRED.filter((key) => !draft[key].trim());
 	const missingTitle = !draft.title.trim();
-	const problem = missingPart
-		? t`Add what happened before you can save.`
-		: missingTitle
-			? t`Give the story a title before you can save.`
-			: null;
 
-	const submit = () => {
+	const submit = (form: HTMLFormElement) => {
 		setTried(true);
-		if (problem) return;
+		if (missingTitle || missingParts.length) {
+			requestAnimationFrame(() => form.querySelector<HTMLTextAreaElement>('[aria-invalid="true"]')?.focus());
+			return;
+		}
 		save.mutate({
 			...(story ? { id: story.id } : {}),
-			applicationId: null,
+			applicationId,
 			title: draft.title.trim(),
 			situation: draft.situation.trim(),
 			task: draft.task.trim(),
@@ -481,9 +596,14 @@ function StoryEditor({ story, facts, onSaved, onCancel, onDelete }: StoryEditorP
 			className="grid gap-[18px]"
 			onSubmit={(event) => {
 				event.preventDefault();
-				submit();
+				submit(event.currentTarget);
 			}}
 		>
+			{plan?.note && (
+				<p className="rounded-lg bg-info-soft px-3 py-2 text-sm text-info-text">
+					<Trans>From your interview plan: {plan.note}</Trans>
+				</p>
+			)}
 			<div className="grid gap-2">
 				{/* A textarea so a long title wraps as it does in the reader; Enter doesn't add a line. */}
 				<Textarea
@@ -492,13 +612,21 @@ function StoryEditor({ story, facts, onSaved, onCancel, onDelete }: StoryEditorP
 					maxLength={200}
 					placeholder={t`Name the story`}
 					aria-label={t`Title`}
+					aria-required
+					aria-describedby={tried && missingTitle ? `${errorId}-title` : undefined}
 					aria-invalid={tried && missingTitle ? true : undefined}
 					onChange={(event) => setDraft({ ...draft, title: event.target.value.replace(/\n/g, " ") })}
 					onKeyDown={(event) => {
 						if (event.key === "Enter") event.preventDefault();
 					}}
-					className="min-h-0 resize-none py-1 font-display text-[22px] leading-7 font-medium"
+					className="min-h-0 resize-none py-1 font-display text-[22px] leading-7"
 				/>
+				{tried && missingTitle && (
+					<p id={`${errorId}-title`} role="alert" className="flex items-center gap-1.5 text-[13px] text-danger-text">
+						<Icon name="warning-circle" size={16} className="shrink-0" aria-hidden="true" />
+						<Trans>Give the story a title before you can save.</Trans>
+					</p>
+				)}
 				<Input
 					value={draft.tags}
 					placeholder={t`Tags, separated by commas`}
@@ -508,25 +636,49 @@ function StoryEditor({ story, facts, onSaved, onCancel, onDelete }: StoryEditorP
 				/>
 			</div>
 
+			<p className="text-sm text-ink-3">
+				<Trans>
+					Give the story a title, then fill in Situation, Task and Action. Leave Result and Reflection blank until you
+					can support them.
+				</Trans>
+			</p>
 			<div className="grid">
 				{parts().map((part) => {
 					const text = draft[part.key];
+					const required = REQUIRED.includes(part.key);
+					const invalid = tried && missingParts.includes(part.key);
 					return (
 						<label key={part.key} className="grid grid-cols-[32px_minmax(0,1fr)] gap-3.5 border-t border-line py-3">
 							<span aria-hidden="true" className={partTile(Boolean(text.trim()))}>
 								{part.letter}
 							</span>
 							<span className="grid min-w-0 gap-1.5">
-								<span className="text-[13px] font-semibold text-ink-2">{part.label}</span>
+								<span id={`${errorId}-label-${part.key}`} className="text-[13px] font-semibold text-ink-2">
+									{/* One rule, said once above: only the parts that may stay blank are marked. */}
+									{required ? part.label : `${part.label} ${t`(optional)`}`}
+								</span>
 								<Textarea
 									rows={2}
 									value={text}
 									maxLength={part.key === "action" ? 6000 : 4000}
 									placeholder={part.placeholder}
-									aria-invalid={tried && REQUIRED.includes(part.key) && !text.trim() ? true : undefined}
+									aria-labelledby={`${errorId}-label-${part.key}`}
+									aria-required={required}
+									aria-invalid={invalid || undefined}
+									aria-describedby={invalid ? `${errorId}-${part.key}` : undefined}
 									onChange={(event) => setDraft({ ...draft, [part.key]: event.target.value })}
 									className="min-h-[60px] py-[9px] text-sm leading-[21px]"
 								/>
+								{invalid && (
+									<span
+										id={`${errorId}-${part.key}`}
+										role="alert"
+										className="flex items-center gap-1.5 text-[13px] text-danger-text"
+									>
+										<Icon name="warning-circle" size={16} className="shrink-0" aria-hidden="true" />
+										{t`Complete ${part.label} before saving.`}
+									</span>
+								)}
 							</span>
 						</label>
 					);
@@ -571,15 +723,25 @@ function StoryEditor({ story, facts, onSaved, onCancel, onDelete }: StoryEditorP
 						<Trans>No facts to link yet. Add them in Facts.</Trans>
 					</p>
 				)}
+				{/* The coach and Practice send only backed stories: say so before saving one without a fact. */}
+				{!draft.factIds.some((id) => shared.some((fact) => fact.id === id && fact.status === "active")) && (
+					<p role="status" className="flex items-start gap-1.5 text-[13px] text-warn-text">
+						<Icon name="warning" size={16} className="mt-px shrink-0" />
+						<Trans>Without a fact, the coach and practice can't use this story.</Trans>
+					</p>
+				)}
+				{unavailable.length > 0 && (
+					<p role="status" className="flex items-start gap-1.5 text-[13px] text-warn-text">
+						<Icon name="warning" size={16} className="mt-px shrink-0" />
+						{plural(unavailable.length, {
+							one: "# proposed fact isn't available here and won't back the story.",
+							other: "# proposed facts aren't available here and won't back the story.",
+						})}
+					</p>
+				)}
 			</fieldset>
 
 			<div className="grid gap-2 border-t border-line pt-3.5">
-				{tried && problem && (
-					<p role="alert" className="flex items-center gap-1.5 text-[13px] text-danger-text">
-						<Icon name="warning-circle" size={16} />
-						{problem}
-					</p>
-				)}
 				<div className="flex flex-wrap items-center gap-2">
 					{onDelete && (
 						<Button
@@ -599,7 +761,7 @@ function StoryEditor({ story, facts, onSaved, onCancel, onDelete }: StoryEditorP
 							variant="ghost"
 							className="text-ink-2"
 							onClick={() => {
-								clear();
+								if (!proposal) clear();
 								onCancel();
 							}}
 						>

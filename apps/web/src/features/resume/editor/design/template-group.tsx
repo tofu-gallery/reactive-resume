@@ -3,6 +3,7 @@ import type { Template } from "@reactive-resume/schema/templates";
 import type { FocusEvent, KeyboardEvent, PointerEvent } from "react";
 import { Radio } from "@base-ui/react/radio";
 import { RadioGroup } from "@base-ui/react/radio-group";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useInView } from "motion/react";
@@ -11,13 +12,13 @@ import { templateLayouts } from "@reactive-resume/schema/templates";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { SegmentedControl, SegmentedControlItem } from "@reactive-resume/ui/components/segmented-control";
 import { Slider } from "@reactive-resume/ui/components/slider";
-import { toast } from "@reactive-resume/ui/components/toast";
 import { isRTL } from "@reactive-resume/utils/locale";
 import { cn } from "@reactive-resume/utils/style";
 import { useEditorStore } from "../store";
 import { useTemplateThumbnail } from "./thumbnails";
 import { templates } from "@/dialogs/resume/template/data";
 import { useResumeData, useResumeStore, useUpdateResumeData } from "@/features/resume/builder/draft";
+import { undoToast } from "@/features/resume/builder/undo-toast";
 
 type Filter = "all" | "one" | "two" | "ats";
 
@@ -40,7 +41,7 @@ const layoutTags = (id: Template) => {
 
 /** Applies a template with the page's cross-fade and an Undo toast. Font, size and colour carry across. */
 function applyTemplate(template: Template) {
-	const { resume, updateResumeData, undo } = useResumeStore.getState();
+	const { resume, updateResumeData } = useResumeStore.getState();
 	useEditorStore.setState({ previewTemplate: null });
 	if (!resume || resume.data.metadata.template === template) return;
 
@@ -50,10 +51,7 @@ function applyTemplate(template: Template) {
 		},
 		{ newStep: true },
 	);
-	toast.add({
-		description: t`Template changed to ${templates[template].name}`,
-		actionProps: { children: t`Undo`, onClick: undo },
-	});
+	undoToast(t`Template changed to ${templates[template].name}`);
 }
 
 // Touch has no hover: holding a card this long previews it instead.
@@ -68,11 +66,35 @@ type TemplateGroupProps = {
  * Template: filter chips, then thumbnails drawn from the user's own content. Hovering or focusing one (holding
  * it, on touch) previews it on the page; leaving the cards or pressing Esc restores the page; a click applies it.
  */
+// Where the pointer was at the last scroll. A pointer "entering" a card from that same spot is the card sliding under a
+// still pointer; one that has moved since entered it on purpose, whenever the scroll was.
+let pointer: { x: number; y: number } | null = null;
+let pointerAtScroll: { x: number; y: number } | null = null;
+const stillSinceScroll = (event: PointerEvent) =>
+	pointerAtScroll !== null && event.screenX === pointerAtScroll.x && event.screenY === pointerAtScroll.y;
+
 export function TemplateGroup({ layout = "grid" }: TemplateGroupProps) {
 	const data = useResumeData();
 	const [filter, setFilter] = useState<Filter>("all");
 	// Leaving Design (by shortcut, say) never leaves a preview on the page.
 	useEffect(() => () => useEditorStore.setState({ previewTemplate: null }), []);
+	useEffect(() => {
+		const onScroll = () => {
+			pointerAtScroll = pointer;
+		};
+		const onMove = (event: globalThis.PointerEvent) => {
+			pointer = { x: event.screenX, y: event.screenY };
+			// Moved since the scroll: later entries are the pointer's own, even back at the same spot.
+			if (pointerAtScroll && (pointerAtScroll.x !== pointer.x || pointerAtScroll.y !== pointer.y))
+				pointerAtScroll = null;
+		};
+		document.addEventListener("scroll", onScroll, { capture: true, passive: true });
+		document.addEventListener("pointermove", onMove, { capture: true, passive: true });
+		return () => {
+			document.removeEventListener("scroll", onScroll, { capture: true });
+			document.removeEventListener("pointermove", onMove, { capture: true });
+		};
+	}, []);
 	if (!data) return null;
 
 	const current = data.metadata.template;
@@ -113,7 +135,7 @@ export function TemplateGroup({ layout = "grid" }: TemplateGroupProps) {
 				))}
 				<span className="ms-auto text-xs text-ink-3">
 					<Trans>
-						{shown.length} of {TEMPLATE_IDS.length} shown
+						{i18n.number(shown.length)} of {i18n.number(TEMPLATE_IDS.length)} shown
 					</Trans>
 				</span>
 			</RadioGroup>
@@ -151,9 +173,18 @@ function TemplateCard({ id, data, selected, onPreview }: TemplateCardProps) {
 	const ref = useRef<HTMLButtonElement>(null);
 	// Only cards on or near the screen render, so a font or colour change doesn't re-render every template.
 	const isInView = useInView(ref, { margin: "240px" });
-	const { data: thumbnail } = useTemplateThumbnail(id, data, isInView);
+	const resumeId = useResumeStore((state) => state.resume?.id ?? "");
+	const { data: thumbnail } = useTemplateThumbnail(id, data, isInView, resumeId);
 	const metadata = templates[id];
 	const hold = useRef<{ timer?: number; previewing: boolean }>({ previewing: false });
+	// Where the pointer was when a scroll slid the card under it: that previews only once the pointer moves. A
+	// pointer moved onto the card previews at once, even if it then stops.
+	const entered = useRef<{ x: number; y: number } | null>(null);
+	// The picker opens on the template in use, not at the top of the list.
+	const initiallySelected = useRef(selected);
+	useEffect(() => {
+		if (initiallySelected.current) ref.current?.scrollIntoView({ block: "center", inline: "center" });
+	}, []);
 
 	const endHold = () => {
 		window.clearTimeout(hold.current.timer);
@@ -166,7 +197,21 @@ function TemplateCard({ id, data, selected, onPreview }: TemplateCardProps) {
 			type="button"
 			aria-pressed={selected}
 			onPointerEnter={(event: PointerEvent) => {
-				if (event.pointerType !== "touch") onPreview();
+				if (event.pointerType === "touch") return;
+				if (stillSinceScroll(event)) {
+					entered.current = { x: event.screenX, y: event.screenY };
+					return;
+				}
+				// Entered on purpose: nothing is left waiting to restore a preview Esc dismisses later.
+				entered.current = null;
+				onPreview();
+			}}
+			onPointerMove={(event: PointerEvent) => {
+				const from = entered.current;
+				if (event.pointerType === "touch" || !from) return;
+				if (event.screenX === from.x && event.screenY === from.y) return;
+				entered.current = null;
+				onPreview();
 			}}
 			onPointerDown={(event: PointerEvent) => {
 				if (event.pointerType !== "touch") return;
@@ -252,7 +297,7 @@ function SidebarPanel({ data, template }: SidebarPanelProps) {
 					<span id={widthId}>
 						<Trans>Width</Trans>
 					</span>
-					<span className="font-mono text-xs text-ink-2">{width}%</span>
+					<span className="font-mono text-xs text-ink-2">{i18n.number(width)}%</span>
 				</div>
 				<Slider
 					aria-labelledby={`${titleId} ${widthId}`}

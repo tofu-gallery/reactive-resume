@@ -18,17 +18,25 @@ export async function handleUpload(request: Request) {
 	if (![userId, ...segments].every(isValidPath)) return new Response("Forbidden", { status: 403 });
 	if (segments[0] === "agent") return new Response("Not Found", { status: 404 });
 
+	const filename = filePath.split("/").pop() ?? filePath;
+	const publicPicturePath = filePath.startsWith("pictures/") && INLINE_CONTENT_TYPES.has(inferContentType(filename));
+	let privateAccess = false;
+	if (!publicPicturePath) {
+		const { resolveAuthenticationFromRequestHeaders } = await import("@reactive-resume/api/context");
+		const authentication = await resolveAuthenticationFromRequestHeaders(request.headers).catch(() => null);
+		privateAccess = authentication?.user.id === userId && authentication.permissions.includes("read");
+		if (!privateAccess) return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
+	}
+	if (publicPicturePath && !(await isPublicUploadOwner(userId)))
+		return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
 	const storageService = getStorageService();
 	const key = `uploads/${userId}/${filePath}`;
 	const storedFile = await storageService.read(key);
 	if (!storedFile) return new Response("Not Found", { status: 404 });
 
-	const filename = filePath.split("/").pop() ?? filePath;
 	const contentType = storedFile.contentType ?? inferContentType(filename);
-	const isPublicPicture = filePath.startsWith("pictures/") && INLINE_CONTENT_TYPES.has(contentType);
-	if (isPublicPicture && !(await isPublicUploadOwner(userId)))
-		return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
-	if (!isPublicPicture) {
+	const isPublicPicture = publicPicturePath && INLINE_CONTENT_TYPES.has(contentType);
+	if (!isPublicPicture && !privateAccess) {
 		const { resolveAuthenticationFromRequestHeaders } = await import("@reactive-resume/api/context");
 		const authentication = await resolveAuthenticationFromRequestHeaders(request.headers).catch(() => null);
 		if (authentication?.user.id !== userId || !authentication.permissions.includes("read"))
@@ -37,7 +45,14 @@ export async function handleUpload(request: Request) {
 	const etag = createEtag(storedFile);
 
 	if (isPublicPicture && matchesIfNoneMatch(request.headers.get("If-None-Match"), etag))
-		return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": PUBLIC_PICTURE_CACHE_CONTROL } });
+		return new Response(null, {
+			status: 304,
+			headers: {
+				ETag: etag,
+				"Cache-Control": PUBLIC_PICTURE_CACHE_CONTROL,
+				"Cross-Origin-Resource-Policy": "cross-origin",
+			},
+		});
 
 	const shouldForceDownload = !INLINE_CONTENT_TYPES.has(contentType);
 
@@ -53,7 +68,8 @@ export async function handleUpload(request: Request) {
 	headers.set("ETag", etag);
 	headers.set("X-Content-Type-Options", "nosniff");
 	headers.set("X-Robots-Tag", "noindex, nofollow");
-	headers.set("Cross-Origin-Resource-Policy", "same-site");
+	// Public pictures load from the app origin even on custom-domain resume pages.
+	headers.set("Cross-Origin-Resource-Policy", isPublicPicture ? "cross-origin" : "same-site");
 	headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
 	headers.set("X-Frame-Options", "DENY");
 	headers.set("X-Download-Options", "noopen");

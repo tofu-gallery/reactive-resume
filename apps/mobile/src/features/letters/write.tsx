@@ -1,31 +1,53 @@
 import type { RelinkResult } from "./save";
 import type { LetterDocument } from "@/draft/types";
-import type { Application } from "@/features/applications/types";
+import type { ApplicationSummary as Application } from "@/features/applications/types";
 import type { WritableDraft } from "immer";
 import type { ReactNode } from "react";
+import { i18n } from "@lingui/core";
 import { plural, t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { ORPCError } from "@orpc/client";
+import { Image } from "expo-image";
 import { useRouter } from "expo-router";
-import { useState } from "react";
-import { Keyboard, ScrollView, View } from "react-native";
+import { useEffect, useState } from "react";
+import { Keyboard, View, useWindowDimensions } from "react-native";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
+import { aiModelForTask } from "@reactive-resume/ai/task-models";
 import { coverLetterTextToHtml, defaultCoverLetterSignOff, greetingName } from "@reactive-resume/resume/cover-letter";
 import { useLetterWords } from "./compose";
+import { LetterLanguageField } from "./design";
 import { designSummary } from "./design-presets";
-import { discardLetterDraft, startLetterDraft, useLetterDrafting } from "./drafting";
+import {
+	discardLetterDraft,
+	dismissLetterDraftFailure,
+	letterDraftOwner,
+	restoreLetterDraft,
+	startLetterDraft,
+	stopLetterDraftKeepingText,
+	useLetterDraftFor,
+	useLetterDraftLastFor,
+	useLetterDrafting,
+} from "./drafting";
 import { LETTER_LENGTH, countWords, letterLength } from "./length";
 import { useResumes } from "./queries";
 import { LetterRichText, LetterRichTextToolbar } from "./rich-text-field";
 import { relinkLetter } from "./save";
+import { useSession } from "@/auth/session";
 import { letterFieldFocus, useLetterStore } from "@/draft";
 import { AIProviderSetupSheet, useHasAIProvider } from "@/features/ai/providers";
+import { AiResultUsage } from "@/features/ai/usage";
 import { WallClockField } from "@/features/application-detail/date-field";
+import { useApplicationLanes } from "@/features/applications/lane-queries";
+import { getLaneLabel, resolveLane } from "@/features/applications/lanes";
 import { useApplications } from "@/features/applications/queries";
-import { getStageColor, getStageLabel } from "@/features/applications/stages";
+import { CustomFields } from "@/features/write/basics-screen";
+import { BoundText, LinkField, useValidators } from "@/features/write/entry-fields";
+import { resolvePictureUrl } from "@/features/write/picture-screen";
 import { routes } from "@/routes";
 import {
 	Banner,
 	Button,
+	IconButton,
 	ListRow,
 	SelectSheet,
 	Sheet,
@@ -38,13 +60,18 @@ import {
 	useReducedMotion,
 	useTheme,
 } from "@/ui";
+import { useKeyboardScrollSpace } from "@/ui/keyboard";
 
 type Recipe = (letter: WritableDraft<LetterDocument>) => void;
 
 /** Typing: one undo step per field while typing pauses under a second. */
-const edit = (key: string, recipe: Recipe) => useLetterStore.getState().update(recipe, { coalesceKey: key });
+const edit = (key: string, recipe: Recipe, options?: { newStep?: boolean }) =>
+	useLetterStore.getState().update(recipe, { coalesceKey: key, ...options });
 
 /** Tells the user how a link change went: confirmed, waiting for a connection, or refused over unsaved edits. */
+
+/** Today's date in the person's own time zone, as `YYYY-MM-DD`. */
+const todayDate = () => new Date().toLocaleDateString("en-CA");
 export function relinked(result: RelinkResult, done?: string) {
 	if (result === "unsaved") showToast({ message: t`Couldn't save your changes. Try again before continuing.` });
 	else if (result === "linked" && done) showToast({ message: done });
@@ -75,9 +102,17 @@ export function LetterWrite({ id }: { id: string }) {
 	const { t } = useLingui();
 	const letter = useLetterStore((state) => (state.document?.id === id ? state.document : null));
 	const status = useLetterStore((state) => state.status);
-	const draft = useLetterDrafting((state) => state.draft);
+	const draft = useLetterDraftFor(id);
 	const applications = useApplications();
 	const { size, space } = useTheme();
+	const keyboardSpace = useKeyboardScrollSpace();
+
+	// A draft left unkept before closing the editor shows again, with Keep and Discard.
+	useEffect(() => {
+		void restoreLetterDraft(id);
+		// The document opens asynchronously: retry once the owned document and its revision are available. This only
+		// reads local/account storage and never starts a paid generation.
+	}, [id, letter?.id, letter?.revision]);
 
 	if (!letter) {
 		return status === "error" ? (
@@ -103,7 +138,12 @@ export function LetterWrite({ id }: { id: string }) {
 
 	return (
 		<View style={{ flex: 1 }}>
-			<ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive">
+			<KeyboardAwareScrollView
+				extraKeyboardSpace={keyboardSpace}
+				bottomOffset={size.hit + space.s4}
+				keyboardShouldPersistTaps="handled"
+				keyboardDismissMode="interactive"
+			>
 				{disabled ? (
 					<Banner icon="lock" tone="info" message={t`This letter is locked. Unlock it in Documents to edit.`} />
 				) : null}
@@ -117,7 +157,7 @@ export function LetterWrite({ id }: { id: string }) {
 				/>
 				<DesignNote letter={letter} />
 				<View style={{ height: size.hit + space.s5 }} />
-			</ScrollView>
+			</KeyboardAwareScrollView>
 			<LetterRichTextToolbar />
 		</View>
 	);
@@ -141,11 +181,16 @@ type ForSectionProps = {
 
 /** FOR: the application the letter is for. Linking one fills the recipient; without one, drafting uses the resume. */
 function ForSection({ application, applications, disabled }: ForSectionProps) {
+	const lanes = useApplicationLanes();
 	const { t } = useLingui();
 	const { colors, radius, size, space } = useTheme();
+	const { fontScale } = useWindowDimensions();
+	const stacked = fontScale > 1.3;
 	const [open, setOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	const search = query.trim().toLocaleLowerCase();
+	const letterId = useLetterStore((state) => state.document?.id);
+	const submitted = Boolean(application?.sentCoverLetterVersionId && application.coverLetterId === letterId);
 	const choices = applications
 		.filter((item) => item.status !== "closed" || item.id === application?.id)
 		.filter((item) => !search || `${item.role} ${item.company}`.toLocaleLowerCase().includes(search));
@@ -167,8 +212,8 @@ function ForSection({ application, applications, disabled }: ForSectionProps) {
 			{application ? (
 				<View
 					style={{
-						flexDirection: "row",
-						alignItems: "center",
+						flexDirection: stacked ? "column" : "row",
+						alignItems: stacked ? "flex-start" : "center",
 						gap: space.s3,
 						padding: space.s3,
 						borderWidth: 1,
@@ -190,28 +235,47 @@ function ForSection({ application, applications, disabled }: ForSectionProps) {
 							{application.company.charAt(0).toLocaleUpperCase()}
 						</Text>
 					</View>
-					<View style={{ flex: 1, minWidth: 0 }}>
-						<Text weight={500} numberOfLines={1}>
+					<View style={stacked ? { alignSelf: "stretch" } : { flex: 1, minWidth: 0 }}>
+						<Text weight={500} numberOfLines={stacked ? undefined : 2}>
 							{application.role}
 						</Text>
-						<View style={{ flexDirection: "row", alignItems: "center", gap: space.s1 }}>
-							<Text variant="caption" color="ink3" numberOfLines={1} style={{ flexShrink: 1 }}>
-								{application.company} ·
+						<View
+							style={{
+								flexDirection: stacked ? "column" : "row",
+								alignItems: stacked ? "flex-start" : "center",
+								gap: space.s1,
+							}}
+						>
+							<Text
+								variant="caption"
+								color="ink3"
+								numberOfLines={stacked ? undefined : 1}
+								style={stacked ? { alignSelf: "stretch" } : { flexShrink: 1 }}
+							>
+								{application.company}
 							</Text>
-							<View
-								style={{
-									width: space.s2 - space.s0,
-									height: space.s2 - space.s0,
-									borderRadius: radius.rLg,
-									backgroundColor: getStageColor(application.status, colors),
-								}}
-							/>
-							<Text variant="caption" color="ink3">
-								{getStageLabel(application.status)}
-							</Text>
+							<View style={{ flexDirection: "row", alignItems: "center", gap: space.s1 }}>
+								<View
+									style={{
+										width: space.s2 - space.s0,
+										height: space.s2 - space.s0,
+										borderRadius: radius.rLg,
+										backgroundColor: resolveLane(lanes.lanes, application).color,
+									}}
+								/>
+								<Text variant="caption" color="ink3">
+									{getLaneLabel(resolveLane(lanes.lanes, application))}
+								</Text>
+							</View>
 						</View>
 					</View>
-					<Button size="sm" variant="secondary" label={t`Change`} disabled={disabled} onPress={() => setOpen(true)} />
+					<Button
+						size="sm"
+						variant="secondary"
+						label={t`Change`}
+						disabled={disabled || submitted}
+						onPress={() => setOpen(true)}
+					/>
 				</View>
 			) : (
 				<>
@@ -219,7 +283,7 @@ function ForSection({ application, applications, disabled }: ForSectionProps) {
 						variant="secondary"
 						icon="briefcase"
 						label={t`Link an application`}
-						disabled={disabled}
+						disabled={disabled || submitted}
 						onPress={() => setOpen(true)}
 					/>
 					<Text variant="caption" color="ink3">
@@ -250,9 +314,14 @@ function ForSection({ application, applications, disabled }: ForSectionProps) {
 							<ListRow
 								key={item.id}
 								title={item.role}
-								subtitle={`${item.company} · ${getStageLabel(item.status)}`}
+								subtitle={
+									item.sentCoverLetterVersionId && item.coverLetterId !== letterId
+										? `${item.company} · ${t`Letter already sent`}`
+										: `${item.company} · ${getLaneLabel(resolveLane(lanes.lanes, item))}`
+								}
 								leading="briefcase"
 								selected={item.id === application?.id}
+								disabled={Boolean(item.sentCoverLetterVersionId && item.coverLetterId !== letterId)}
 								onPress={() => choose(item)}
 							/>
 						))}
@@ -276,6 +345,7 @@ function ToSection({ letter, application, disabled }: LetterSectionProps) {
 				<LetterRichText
 					key={letter.id}
 					label={t`Recipient`}
+					improve={false}
 					value={letter.recipient}
 					disabled={disabled}
 					minLines={3}
@@ -315,6 +385,15 @@ function ToSection({ letter, application, disabled }: LetterSectionProps) {
 						onChange={(value) => edit("letterDate", (draft) => void (draft.letterDate = value))}
 					/>
 				</View>
+				{/* A letter reused later should carry the day it's sent. */}
+				{letter.letterDate !== todayDate() && !disabled ? (
+					<Button
+						size="sm"
+						variant="ghost"
+						label={t`Today`}
+						onPress={() => edit("letterDate", (draft) => void (draft.letterDate = todayDate()))}
+					/>
+				) : null}
 				{letter.letterDate && !disabled ? (
 					<Button
 						size="sm"
@@ -334,7 +413,16 @@ function ToSection({ letter, application, disabled }: LetterSectionProps) {
 }
 
 /** FROM: the resume the sender's details come from, and whether they stay live or are copied into the letter. */
-function FromSection({ letter, disabled }: { letter: LetterDocument; disabled: boolean }) {
+type FromSectionProps = { letter: LetterDocument; disabled: boolean };
+
+function FromSection({ letter, disabled }: FromSectionProps) {
+	const validate = useValidators();
+	const text = (key: "name" | "headline" | "email" | "phone" | "location") => ({
+		value: letter.style.basics[key],
+		disabled,
+		focus: letterFieldFocus,
+		onChange: (value: string) => edit(`sender.${key}`, (draft) => void (draft.style.basics[key] = value)),
+	});
 	const { t } = useLingui();
 	const resumes = useResumes();
 	const resume = resumes.data?.find((item) => item.id === letter.sourceResumeId);
@@ -385,17 +473,93 @@ function FromSection({ letter, disabled }: { letter: LetterDocument; disabled: b
 					title={useDetailsLabel}
 					subtitle={
 						letter.senderLinked
-							? t`Linked. Name, email, phone and city update when the resume does.`
-							: t`Off. The letter keeps its own copy of your details.`
+							? t`Linked. The header (name, contact details, links and photo) updates when the resume does.`
+							: t`Off. Edit this letter’s details below. Turning this on replaces them with the resume’s current details.`
 					}
 					trailing={
 						<Switch label={useDetailsLabel} value={letter.senderLinked} disabled={disabled} onValueChange={setLinked} />
 					}
 				/>
 			) : (
-				<Text variant="caption" color="ink3">{t`Your name and contact details come from a resume.`}</Text>
+				<Text
+					variant="caption"
+					color="ink3"
+				>{t`Enter your details below. Choosing a resume replaces them and links its design.`}</Text>
 			)}
+			{!letter.sourceResumeId || !letter.senderLinked ? (
+				<>
+					<SenderPhoto picture={letter.style.picture} disabled={disabled} />
+					<BoundText label={t`Full name`} autoComplete="name" {...text("name")} />
+					<BoundText label={t`Headline`} {...text("headline")} />
+					<BoundText
+						label={t`Email`}
+						keyboardType="email-address"
+						autoComplete="email"
+						validate={validate.email}
+						{...text("email")}
+					/>
+					<BoundText label={t`Phone`} keyboardType="phone-pad" autoComplete="tel" {...text("phone")} />
+					<BoundText label={t`Location`} {...text("location")} />
+					<LinkField
+						label={t`Website`}
+						value={letter.style.basics.website}
+						allowInlineLink={false}
+						disabled={disabled}
+						onChange={(website) =>
+							edit("sender.website", (draft) => {
+								draft.style.basics.website = { url: website.url, label: website.label };
+							})
+						}
+					/>
+					<CustomFields
+						fields={letter.style.basics.customFields}
+						locked={disabled}
+						update={(mutate, options) => {
+							const store = useLetterStore.getState();
+							if (store.document?.id === letter.id)
+								store.update((draft) => mutate(draft.style.basics.customFields), options);
+						}}
+					/>
+				</>
+			) : null}
 		</Section>
+	);
+}
+
+type SenderPhotoProps = { picture: LetterDocument["style"]["picture"]; disabled: boolean };
+
+/** The photo the letter copied from its resume, which it can leave off. Uploading one is the resume's job. */
+function SenderPhoto({ picture, disabled }: SenderPhotoProps) {
+	const { t } = useLingui();
+	const { colors, radius, space } = useTheme();
+	const { server } = useSession();
+	const url = resolvePictureUrl(picture.url, server);
+	if (!url) return null;
+
+	return (
+		<View
+			style={{
+				flexDirection: "row",
+				alignItems: "center",
+				gap: space.s3,
+				padding: space.s3,
+				borderRadius: radius.rLg,
+				backgroundColor: colors.surface,
+				borderWidth: 1,
+				borderColor: colors.line,
+			}}
+		>
+			<Image source={{ uri: url }} style={{ width: space.s10, height: space.s10, borderRadius: radius.rMd }} />
+			<Text variant="caption" color="ink2" style={{ flex: 1 }}>
+				{picture.hidden ? t`Photo hidden from the page.` : t`Photo on the page.`}
+			</Text>
+			<Switch
+				label={t`Show photo`}
+				value={!picture.hidden}
+				disabled={disabled}
+				onValueChange={(shown) => edit("sender.picture", (draft) => void (draft.style.picture.hidden = !shown))}
+			/>
+		</View>
 	);
 }
 
@@ -407,7 +571,8 @@ function BodySection({ letter, application, disabled }: LetterSectionProps) {
 	const { t } = useLingui();
 	const { space } = useTheme();
 	const words = useLetterWords(letter.style.metadata.page.locale);
-	const draft = useLetterDrafting((state) => state.draft);
+	const owner = letterDraftOwner(letter.id);
+	const draft = useLetterDraftFor(letter.id);
 	// Once the editor shows it stays, so clearing the text while typing never swaps it for the draft offer.
 	const [writing, setWriting] = useState(() => countWords(letter.content) > 0);
 	const structured = letter.layout === "structured";
@@ -419,10 +584,30 @@ function BodySection({ letter, application, disabled }: LetterSectionProps) {
 			<DraftBox
 				letter={letter}
 				application={application}
-				onKeep={(text) => {
-					useLetterStore.getState().update((value) => void (value.content = coverLetterTextToHtml(text)), {
-						newStep: true,
-					});
+				onKeep={(text, aiOperationIds) => {
+					// A captured callback may run after another letter/account opened: it may only write its own letter,
+					// at the revision this ready draft came from.
+					const current = useLetterStore.getState().document;
+					const owned = useLetterDrafting.getState();
+					if (
+						!current ||
+						current.id !== letter.id ||
+						draft.phase !== "ready" ||
+						typeof draft.operation !== "string" ||
+						current.revision !== draft.revision ||
+						letterDraftOwner(letter.id) !== owner ||
+						owned.owner !== owner ||
+						owned.draft.phase !== "ready" ||
+						owned.draft.operation !== draft.operation
+					)
+						return;
+					useLetterStore.getState().update(
+						(value) => {
+							value.content = coverLetterTextToHtml(text);
+							value.aiOperationIds = aiOperationIds;
+						},
+						{ newStep: true },
+					);
 					discardLetterDraft();
 					setWriting(true);
 					showToast({ message: t`Draft kept. Edit anything you like.` });
@@ -432,10 +617,23 @@ function BodySection({ letter, application, disabled }: LetterSectionProps) {
 			<LetterRichText
 				key={letter.id}
 				label={t`Letter body`}
+				applicationId={application?.id}
 				value={letter.content}
 				disabled={disabled}
 				autoFocus={writing && countWords(letter.content) === 0}
-				onChange={(content) => edit("content", (value) => void (value.content = content))}
+				onChange={(content, options) =>
+					edit(
+						"content",
+						(value) => {
+							value.content = content;
+							if (options?.aiOperationIds?.length) {
+								value.aiOperationIds = [...new Set([...(value.aiOperationIds ?? []), ...options.aiOperationIds])];
+								value.aiUsage = null;
+							}
+						},
+						options,
+					)
+				}
 			/>
 		) : (
 			<EmptyBody letter={letter} application={application} disabled={disabled} onWrite={() => setWriting(true)} />
@@ -443,6 +641,8 @@ function BodySection({ letter, application, disabled }: LetterSectionProps) {
 
 	return (
 		<Section title={t`Letter`}>
+			{/* The greeting and sign-off are written in the letter's language, so it's chosen with the words. */}
+			<LetterLanguageField letter={letter} disabled={disabled} />
 			{structured && words ? (
 				<FramingField
 					letter={letter}
@@ -452,6 +652,7 @@ function BodySection({ letter, application, disabled }: LetterSectionProps) {
 				/>
 			) : null}
 			{body}
+			{(letter.aiOperationIds?.length ?? 0) > 0 && <AiResultUsage usage={letter.aiUsage} />}
 			{structured && words ? (
 				<View style={{ gap: space.s2 }}>
 					<FramingField
@@ -515,6 +716,9 @@ function EmptyBody({ letter, application, disabled, onWrite }: EmptyBodyProps) {
 	const { t } = useLingui();
 	const { colors, radius, space } = useTheme();
 	const ai = useHasAIProvider();
+	const draftProvider = ai.defaultProvider
+		? { label: ai.defaultProvider.label, model: aiModelForTask(ai.defaultProvider, "capable") }
+		: undefined;
 	const [setup, setSetup] = useState(false);
 	const hasResume = !!letter.sourceResumeId;
 	const company = application?.company;
@@ -532,13 +736,20 @@ function EmptyBody({ letter, application, disabled, onWrite }: EmptyBodyProps) {
 			}}
 		>
 			<Text color="ink2">
-				{company && hasResume
-					? t`Start typing, or draft from what we know: the ${company} posting and your resume.`
-					: company
-						? t`Start typing, or draft from what we know: the ${company} posting.`
-						: hasResume
-							? t`Start typing, or draft from what we know: your resume.`
-							: t`Start typing. To draft one, link a resume or an application first.`}
+				{/* Without a provider, drafting isn't on offer yet: say what would make it so (web write-panel). */}
+				{canDraft && !ai.isUnavailable && !ai.hasAIProvider
+					? company && hasResume
+						? t`Start typing, or connect an AI provider to draft from the ${company} posting and your resume.`
+						: company
+							? t`Start typing, or connect an AI provider to draft from the ${company} posting.`
+							: t`Start typing, or connect an AI provider to draft from your resume.`
+					: company && hasResume
+						? t`Start typing, or draft from what we know: the ${company} posting and your resume.`
+						: company
+							? t`Start typing, or draft from what we know: the ${company} posting.`
+							: hasResume
+								? t`Start typing, or draft from what we know: your resume.`
+								: t`Start typing. To draft one, link a resume or an application first.`}
 			</Text>
 			<View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.s2 }}>
 				{canDraft && ai.hasAIProvider ? (
@@ -555,6 +766,15 @@ function EmptyBody({ letter, application, disabled, onWrite }: EmptyBodyProps) {
 				) : null}
 				<Button size="sm" variant="secondary" label={t`Write it myself`} disabled={disabled} onPress={onWrite} />
 			</View>
+			{canDraft && draftProvider ? (
+				<Text variant="caption" color="ink3">
+					{application && hasResume
+						? t`Sends this letter's resume and the ${application.company} posting to ${draftProvider.label} · ${draftProvider.model} to draft the body. Your provider may charge.`
+						: application
+							? t`Sends the ${application.company} posting to ${draftProvider.label} · ${draftProvider.model} to draft the body. Your provider may charge.`
+							: t`Sends this letter's resume to ${draftProvider.label} · ${draftProvider.model} to draft the body. Your provider may charge.`}
+				</Text>
+			) : null}
 			{canDraft && ai.error ? (
 				<Banner
 					tone="warn"
@@ -565,7 +785,7 @@ function EmptyBody({ letter, application, disabled, onWrite }: EmptyBodyProps) {
 			{canDraft && !ai.isUnavailable && !ai.hasAIProvider ? (
 				<View style={{ gap: space.s1 }}>
 					<Text variant="caption" color="ink3">{t`Drafting needs an AI provider.`}</Text>
-					<Button size="sm" variant="link" label={t`Open AI settings`} onPress={() => setSetup(true)} />
+					<Button size="sm" variant="link" label={t`Set up AI`} onPress={() => setSetup(true)} />
 				</View>
 			) : null}
 			<AIProviderSetupSheet open={setup} onClose={() => setSetup(false)} />
@@ -573,15 +793,20 @@ function EmptyBody({ letter, application, disabled, onWrite }: EmptyBodyProps) {
 	);
 }
 
-type DraftBoxProps = { letter: LetterDocument; application: Application | null; onKeep: (text: string) => void };
+type DraftBoxProps = {
+	letter: LetterDocument;
+	application: Application | null;
+	onKeep: (text: string, aiOperationIds: string[]) => void;
+};
 
 /** The draft on its green wash, then Keep, Shorter, More personal or Discard. */
 function DraftBox({ letter, application, onKeep }: DraftBoxProps) {
 	const { t } = useLingui();
 	const { colors, radius, size, space } = useTheme();
 	const reducedMotion = useReducedMotion();
-	const draft = useLetterDrafting((state) => state.draft);
-	const last = useLetterDrafting((state) => state.last);
+	const draft = useLetterDraftFor(letter.id);
+	const last = useLetterDraftLastFor(letter.id);
+	const [pick, setPick] = useState<{ operation: string; index: number } | null>(null);
 
 	if (draft.phase === "idle") return null;
 	if (draft.phase === "unsaved") {
@@ -596,7 +821,7 @@ function DraftBox({ letter, application, onKeep }: DraftBoxProps) {
 						size="sm"
 						variant="secondary"
 						label={t`Try again`}
-						onPress={() => void startLetterDraft(last.variant, last.previous)}
+						onPress={() => void startLetterDraft(last.variant, last.previous, last.previousAiOperationIds)}
 					/>
 					<Button size="sm" variant="ghost" label={t`Dismiss`} onPress={discardLetterDraft} />
 				</View>
@@ -620,15 +845,20 @@ function DraftBox({ letter, application, onKeep }: DraftBoxProps) {
 						size="sm"
 						variant="secondary"
 						label={t`Try again`}
-						onPress={() => void startLetterDraft(last.variant, last.previous)}
+						onPress={() => void startLetterDraft(last.variant, last.previous, last.previousAiOperationIds)}
 					/>
-					<Button size="sm" variant="ghost" label={t`Dismiss`} onPress={discardLetterDraft} />
+					<Button size="sm" variant="ghost" label={t`Dismiss`} onPress={dismissLetterDraftFailure} />
 				</View>
 			</View>
 		);
 	}
 
 	const streaming = draft.phase === "streaming";
+	// Earlier versions stay side by side with the newest: "2 of 3", and Accept or a revision uses the one shown.
+	const currentVersion = { text: draft.text, aiOperationIds: draft.aiOperationIds ?? [] };
+	const all = streaming ? [currentVersion] : [...draft.versions, currentVersion];
+	const index = pick?.operation === draft.operation ? Math.min(pick.index, all.length - 1) : all.length - 1;
+	const shown = all[index] ?? currentVersion;
 	const sources =
 		letter.sourceResumeId && application
 			? t`Draft · uses only your resume and the posting`
@@ -654,29 +884,53 @@ function DraftBox({ letter, application, onKeep }: DraftBoxProps) {
 			>
 				<Text>
 					{/* Reduced motion shows the whole draft at once. */}
-					{streaming && reducedMotion ? "" : draft.text}
+					{streaming && reducedMotion ? "" : shown.text}
 					{streaming ? <Text color="ink3">{reducedMotion ? t`Drafting…` : "▍"}</Text> : null}
 				</Text>
 			</View>
+			{!streaming && draft.stopped && index === all.length - 1 ? (
+				<Text variant="caption" color="ink3">
+					{t`Stopped before the end. Accept it and finish it yourself, or reject it.`}
+				</Text>
+			) : null}
+			{!streaming && all.length > 1 ? (
+				<View style={{ flexDirection: "row", alignItems: "center", gap: space.s1 }}>
+					<IconButton
+						icon="caret-left"
+						label={t`Previous version`}
+						disabled={index === 0}
+						onPress={() => setPick({ operation: draft.operation, index: index - 1 })}
+					/>
+					<Text variant="mono" color="ink2">
+						{t`${i18n.number(index + 1)} of ${i18n.number(all.length)}`}
+					</Text>
+					<IconButton
+						icon="caret-right"
+						label={t`Next version`}
+						disabled={index === all.length - 1}
+						onPress={() => setPick({ operation: draft.operation, index: index + 1 })}
+					/>
+				</View>
+			) : null}
 			{streaming ? (
-				<Button size="sm" variant="secondary" icon="stop" label={t`Stop`} onPress={discardLetterDraft} />
+				<Button size="sm" variant="secondary" icon="stop" label={t`Stop`} onPress={stopLetterDraftKeepingText} />
 			) : (
 				<View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.s2 }}>
-					<ReportAiContent source="letter" text={draft.text} />
-					<Button size="sm" label={t`Keep`} onPress={() => onKeep(draft.text)} />
+					<ReportAiContent source="letter" text={shown.text} />
+					<Button size="sm" label={t`Accept`} onPress={() => onKeep(shown.text, shown.aiOperationIds)} />
 					<Button
 						size="sm"
 						variant="secondary"
 						label={t`Shorter`}
-						onPress={() => void startLetterDraft("shorter", draft.text)}
+						onPress={() => void startLetterDraft("shorter", shown.text, shown.aiOperationIds)}
 					/>
 					<Button
 						size="sm"
 						variant="secondary"
 						label={t`More personal`}
-						onPress={() => void startLetterDraft("personal", draft.text)}
+						onPress={() => void startLetterDraft("personal", shown.text, shown.aiOperationIds)}
 					/>
-					<Button size="sm" variant="dangerOutline" label={t`Discard`} onPress={discardLetterDraft} />
+					<Button size="sm" variant="dangerOutline" label={t`Reject`} onPress={discardLetterDraft} />
 				</View>
 			)}
 		</View>

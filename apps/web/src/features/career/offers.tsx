@@ -1,12 +1,15 @@
 import type { SavedData, SavedItem } from "./hooks";
+import type { ApplicationSummary } from "@/features/applications/types";
 import type { CareerProfileData } from "@reactive-resume/schema/career";
 import type { IconName } from "@reactive-resume/ui/components/icon";
 import type { ReactNode } from "react";
+import { i18n } from "@lingui/core";
 import { plural, t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
+import { annualBaseHint, selectOfferPair } from "@reactive-resume/schema/career-offer";
 import { Button } from "@reactive-resume/ui/components/button";
 import {
 	DropdownMenu,
@@ -14,17 +17,23 @@ import {
 	DropdownMenuGroup,
 	DropdownMenuItem,
 	DropdownMenuLabel,
+	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@reactive-resume/ui/components/dropdown-menu";
+import { EmptyState } from "@reactive-resume/ui/components/empty-state";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Skeleton } from "@reactive-resume/ui/components/skeleton";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { formatList } from "@reactive-resume/utils/locale";
 import { cn } from "@reactive-resume/utils/style";
+import { formatDateOnly } from "@reactive-resume/utils/timezone";
 import { CareerLoadError } from "./load-state";
-import { defaultPair, formatMoney, matchingPlace, meetsMinimum, moneyDifference, sameTerms } from "./offer-compare";
-import { useCareerTime, useNow } from "./shared";
-import { orpc } from "@/libs/orpc/client";
+import { formatBonus, formatMoney, matchingPlace, meetsMinimum, moneyDifference, sameTerms } from "./offer-compare";
+import { OfferEntry, OfferForm } from "./offer-entry";
+import { flash, useCareerTime, useNow, withQueryUndo } from "./shared";
+import { Combobox } from "@/components/ui/combobox";
+import { applicationsListQueryOptions } from "@/features/applications/queries";
+import { client, orpc, prepareRpc } from "@/libs/orpc/client";
 
 type Offer = SavedItem & { data: SavedData<"offer"> };
 type Side = "a" | "b";
@@ -48,16 +57,117 @@ const writePair = (a: string | undefined, b: string | undefined) => {
 };
 
 const companyOf = (offer: Offer) => offer.application?.company ?? t`Deleted application`;
+const applicationLabel = (offer: Offer) => [companyOf(offer), offer.application?.role].filter(Boolean).join(" · ");
+const outcomeLabel = (offer: Offer) =>
+	offer.application?.closedReason === "accepted"
+		? t`Accepted`
+		: offer.application?.status === "closed"
+			? t`Closed`
+			: offer.application?.status === "offer"
+				? t`Offer`
+				: t`In progress`;
+const isDeciding = (offer: Offer) => offer.application?.status !== "closed";
 const versionLabel = (offer: Offer) => (offer.data.version === "verbal" ? t`Verbal offer` : t`Written offer`);
 
-type OffersPageProps = { a: string | undefined; b: string | undefined };
+type OfferStageApplicationsProps = { offers: Offer[]; applications: ApplicationSummary[] };
+
+/**
+ * Applications in the Offer stage that have no saved terms yet. They're listed so none is missed, each with its own
+ * Add offer form; nothing is compared until the user enters the terms.
+ */
+function OfferStageApplications({ offers, applications }: OfferStageApplicationsProps) {
+	const withTerms = new Set(offers.map((offer) => offer.applicationId));
+	const pending = applications.filter(
+		(application) => application.status === "offer" && !withTerms.has(application.id),
+	);
+	if (pending.length === 0) return null;
+
+	return (
+		<section aria-labelledby="offer-stage" className="grid gap-2.5">
+			<div className="grid gap-0.5">
+				<h2 id="offer-stage" className="text-[17px] font-semibold">
+					<Trans>In the Offer stage, terms not added</Trans>
+				</h2>
+				<p className="text-sm text-ink-2">
+					<Trans>Add each offer's terms to compare it. Nothing is filled in for you.</Trans>
+				</p>
+			</div>
+			<ul className="grid gap-2">
+				{pending.map((application) => (
+					<li
+						key={application.id}
+						className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface p-4"
+					>
+						<div className="grid min-w-0 gap-0.5">
+							<p className="truncate text-sm font-semibold">{application.company}</p>
+							<p className="truncate text-[13px] text-ink-2">{application.role}</p>
+						</div>
+						<OfferEntry application={{ id: application.id, company: application.company, role: application.role }} />
+					</li>
+				))}
+			</ul>
+		</section>
+	);
+}
+
+type OffersPageProps = { a: string | undefined; b: string | undefined; highlight?: string | undefined };
+
+type OfferMessagesProps = { applications: ApplicationSummary[] };
+
+function OfferMessages({ applications }: OfferMessagesProps) {
+	const navigate = useNavigate();
+	if (!applications.length) return null;
+	return (
+		<Combobox
+			render={<Button variant="secondary" aria-label={t`Messages`} />}
+			value={null}
+			placeholder={t`Messages`}
+			options={applications.map((application) => ({
+				value: application.id,
+				label: `${application.company} · ${application.role}`,
+			}))}
+			onValueChange={(applicationId) => {
+				if (applicationId)
+					void navigate({
+						to: "/dashboard/applications/$applicationId/{-$tab}",
+						params: { applicationId, tab: "messages" },
+					});
+			}}
+		/>
+	);
+}
 
 /** C20: two saved offers side by side, in their own currency and pay period, against the user's requirements. */
-export function OffersPage({ a, b }: OffersPageProps) {
+export function OffersPage({ a, b, highlight }: OffersPageProps) {
 	const navigate = useNavigate();
+	const queryClient = useQueryClient();
 	const query = useQuery(orpc.career.savedItems.queryOptions({ input: { kind: "offer" } }));
 	const profileQuery = useQuery(orpc.career.profile.queryOptions());
-	const offers = query.data?.filter((item): item is Offer => item.data.kind === "offer");
+	const applications = useQuery(applicationsListQueryOptions());
+	const flashed = useRef<string | null>(null);
+	useEffect(() => {
+		if (!highlight || !query.data?.some((offer) => offer.id === highlight) || flashed.current === highlight) return;
+		const element = document.querySelector(`[data-offer="${CSS.escape(highlight)}"]`);
+		if (!element) return;
+		flashed.current = highlight;
+		flash(element);
+	}, [highlight, query.data]);
+	const [hidden, setHidden] = useState<string[]>([]);
+	const [editing, setEditing] = useState<string | null>(null);
+	const offers = query.data?.filter((item): item is Offer => item.data.kind === "offer" && !hidden.includes(item.id));
+
+	// Deleting waits out its Undo toast, as everywhere else saved work is deleted.
+	const remove = (offer: Offer) => {
+		withQueryUndo({
+			queryClient,
+			queryKey: orpc.career.savedItems.key(),
+			description: t`Offer deleted`,
+			errorMessage: t`Couldn't delete that offer. Try again.`,
+			prepare: () => prepareRpc(client.career.deleteSavedItem, { id: offer.id }),
+			hide: () => setHidden((ids) => [...ids, offer.id]),
+			restore: () => setHidden((ids) => ids.filter((id) => id !== offer.id)),
+		});
+	};
 
 	const setPair = (next: { a: string | undefined; b: string | undefined }) =>
 		void navigate({ to: "/dashboard/career/offers", search: next });
@@ -71,12 +181,7 @@ export function OffersPage({ a, b }: OffersPageProps) {
 			writePair(a, b);
 			return;
 		}
-		const stored = readPair();
-		const [first, second] =
-			exists(stored.a) && exists(stored.b) && stored.a !== stored.b ? [stored.a, stored.b] : defaultPair(offers);
-		// No distinct second offer leaves the right column empty, never a copy of the left.
-		const nextA = exists(a) ? a : first;
-		const next = { a: nextA, b: exists(b) && b !== nextA ? b : nextA === second ? first : second };
+		const next = selectOfferPair(offers, { a, b }, readPair());
 		if (next.a !== a || next.b !== b)
 			void navigate({ to: "/dashboard/career/offers", search: { a: next.a, b: next.b }, replace: true });
 	}, [query.data, a, b, navigate]);
@@ -98,24 +203,84 @@ export function OffersPage({ a, b }: OffersPageProps) {
 			</div>
 		);
 
+	const applicationOffers = (
+		<>
+			{applications.isError && (
+				<CareerLoadError
+					onRetry={() => {
+						void applications.refetch();
+					}}
+				/>
+			)}
+			{applications.isPending ? (
+				<Skeleton className="h-20 rounded-xl" />
+			) : (
+				applications.data && <OfferStageApplications offers={offers ?? []} applications={applications.data} />
+			)}
+		</>
+	);
+
 	if (!offers?.length)
 		return (
-			<div className="grid justify-items-center gap-2 rounded-xl border border-dashed border-line-2 p-7 text-center">
-				<h2 className="font-display text-[22px] leading-7 font-medium">
-					<Trans>No offers to compare yet</Trans>
-				</h2>
-				<p className="max-w-[340px] text-sm text-ink-2">
-					<Trans>Paste an offer into an application's Messages tab.</Trans>
-				</p>
+			<div className="grid gap-5">
+				{applicationOffers}
+				{applications.data && (
+					<OfferEntry
+						primary
+						frame={(action) =>
+							applications.isError ? (
+								action
+							) : (
+								<EmptyState
+									title={<Trans>No offers to compare yet</Trans>}
+									description={
+										<Trans>
+											Add offer terms manually, including accepted offers, or paste the offer email in an application's
+											Messages tab and choose Read it for me to use AI. Closing as accepted does not record terms.
+										</Trans>
+									}
+									action={action}
+									secondary={<OfferMessages applications={applications.data ?? []} />}
+								/>
+							)
+						}
+					/>
+				)}
 			</div>
 		);
 
 	const left = offers.find((offer) => offer.id === a);
 	const right = offers.find((offer) => offer.id === b);
 	const pair = [left, right].filter((offer): offer is Offer => offer !== undefined);
+	const sameApplication = !!left?.applicationId && left.applicationId === right?.applicationId;
+	const earlier = sameApplication
+		? offers.filter((offer) => pair.some((item) => item.id === offer.id)).at(-1)
+		: undefined;
+
+	const edited = offers.find((offer) => offer.id === editing);
 
 	return (
 		<div className="grid gap-5">
+			{applicationOffers}
+			{earlier && <h2 className="text-base font-semibold">{t`Changes since ${versionLabel(earlier)}`}</h2>}
+			{edited ? (
+				<OfferForm
+					key={edited.id}
+					offer={edited}
+					{...(edited.applicationId && edited.application
+						? {
+								application: {
+									id: edited.applicationId,
+									company: edited.application.company,
+									role: edited.application.role,
+								},
+							}
+						: {})}
+					onClose={() => setEditing(null)}
+				/>
+			) : applications.data ? (
+				<OfferEntry />
+			) : null}
 			<div className="flex flex-wrap items-center justify-between gap-3">
 				<p className="text-sm text-ink-2">
 					<Trans>
@@ -143,21 +308,32 @@ export function OffersPage({ a, b }: OffersPageProps) {
 			</div>
 
 			<ComparisonTable
+				applications={applications.data ?? []}
 				offers={offers}
 				left={left}
 				right={right}
 				onChoose={(side, id) => setPair(side === "a" ? { a: id, b } : { a, b: id })}
+				onEdit={(offer) => {
+					setEditing(offer.id);
+					window.scrollTo({ top: 0, behavior: "smooth" });
+				}}
+				onDelete={remove}
 			/>
 
 			<div className="grid items-start gap-5 md:grid-cols-2">
-				<OpenQuestions offers={pair} />
+				<OpenQuestions
+					offers={
+						sameApplication
+							? offers.filter((offer) => pair.some((selected) => selected.id === offer.id)).slice(0, 1)
+							: pair
+					}
+				/>
 				<p className="flex gap-3 rounded-xl bg-warn-soft p-4 text-[13px] leading-[19px] text-warn-text">
 					<Icon name="info" size={18} className="mt-px shrink-0" />
 					<span>
 						<Trans>
 							<strong className="font-semibold">Totals aren't added up on purpose.</strong> Bonus and equity depend on
-							conditions, and equity value is uncertain for both. Read the original offer documents before comparing
-							totals.
+							conditions, and equity value is uncertain. Read the original offer documents before comparing totals.
 						</Trans>
 					</span>
 				</p>
@@ -176,13 +352,16 @@ const rowGrid =
 const phoneCard = "max-md:rounded-xl max-md:border max-md:border-line max-md:bg-surface";
 
 type ComparisonTableProps = {
+	applications: ApplicationSummary[];
 	offers: Offer[];
 	left: Offer | undefined;
 	right: Offer | undefined;
 	onChoose: (side: Side, id: string) => void;
+	onEdit: (offer: Offer) => void;
+	onDelete: (offer: Offer) => void;
 };
 
-function ComparisonTable({ offers, left, right, onChoose }: ComparisonTableProps) {
+function ComparisonTable({ applications, offers, left, right, onChoose, onEdit, onDelete }: ComparisonTableProps) {
 	const cells = useCells();
 	const { data: profile } = useQuery(orpc.career.profile.queryOptions());
 	const rows = [
@@ -193,6 +372,7 @@ function ComparisonTable({ offers, left, right, onChoose }: ComparisonTableProps
 		{ key: "leave", label: t`Leave` },
 		{ key: "learning", label: t`Learning budget` },
 		{ key: "other", label: t`Other benefits` },
+		{ key: "startDate", label: t`Starts` },
 		{ key: "respondBy", label: t`Respond by` },
 	] as const;
 	const columns = [left, right].map((offer, index) => (offer ? cells(offer, index === 0 ? right : left) : undefined));
@@ -210,15 +390,26 @@ function ComparisonTable({ offers, left, right, onChoose }: ComparisonTableProps
 					return (
 						<div key={side} className="border-line max-md:not-first:border-t md:border-s">
 							{offer || side === "a" ? (
-								<OfferHeader offer={offer} offers={offers} otherId={other?.id} onChoose={(id) => onChoose(side, id)} />
+								<OfferHeader
+									offer={offer}
+									offers={offers}
+									otherId={other?.id}
+									onChoose={(id) => onChoose(side, id)}
+									onEdit={onEdit}
+									onDelete={onDelete}
+								/>
 							) : (
 								<div className="m-3 grid gap-1 rounded-lg border border-dashed border-line-2 p-4">
 									<p className="text-sm font-semibold">
 										<Trans>Save another offer to compare</Trans>
 									</p>
 									<p className="text-[13px] text-ink-3">
-										<Trans>Paste an offer into an application's Messages tab.</Trans>
+										<Trans>
+											Add offer terms manually, including accepted offers, or paste the offer email in an application's
+											Messages tab and choose Read it for me to use AI. Closing as accepted does not record terms.
+										</Trans>
 									</p>
+									<OfferMessages applications={applications} />
 									{offers.length > 1 && (
 										<OfferHeader
 											offer={undefined}
@@ -246,7 +437,7 @@ function ComparisonTable({ offers, left, right, onChoose }: ComparisonTableProps
 							<div key={index} className={cn("border-line px-[18px] py-3 md:border-s", !offer && "max-md:hidden")}>
 								{offer && cell && (
 									<>
-										<p className="text-xs text-ink-3 md:hidden">{companyOf(offer)}</p>
+										<p className="text-xs text-ink-3 md:hidden">{applicationLabel(offer)}</p>
 										<p className={cn("text-sm leading-[21px]", cell.strong && "font-semibold")}>{cell.value}</p>
 										{cell.notes.map((note) => (
 											<p
@@ -285,7 +476,7 @@ function ComparisonTable({ offers, left, right, onChoose }: ComparisonTableProps
 									!offer && "max-md:hidden",
 								)}
 							>
-								{offer && <li className="text-xs text-ink-3 md:hidden">{companyOf(offer)}</li>}
+								{offer && <li className="text-xs text-ink-3 md:hidden">{applicationLabel(offer)}</li>}
 								{list.map((item) => (
 									<li
 										key={item.text}
@@ -318,10 +509,25 @@ type OfferHeaderProps = {
 	offers: Offer[];
 	otherId: string | undefined;
 	onChoose: (id: string) => void;
+	onEdit?: (offer: Offer) => void;
+	onDelete?: (offer: Offer) => void;
 };
 
-/** The column header is the picker: every application with a saved offer, and each version of it. */
-function OfferHeader({ offer, offers, otherId, onChoose }: OfferHeaderProps) {
+/** Where the terms came from, so a blank reads as what it is. */
+const originLabel = (offer: Offer) =>
+	offer.data.origin === "message"
+		? offer.data.editedAt
+			? t`Read from a message, edited by you`
+			: t`Read from a message`
+		: offer.data.origin === "manual"
+			? t`Entered by you`
+			: null;
+
+/**
+ * The column header is the picker: every application with a saved offer, and each version of it, and where the open
+ * offer is corrected or deleted.
+ */
+function OfferHeader({ offer, offers, otherId, onChoose, onEdit, onDelete }: OfferHeaderProps) {
 	const { when } = useCareerTime();
 	const groups = new Map<string, Offer[]>();
 	for (const item of offers) {
@@ -336,6 +542,7 @@ function OfferHeader({ offer, offers, otherId, onChoose }: OfferHeaderProps) {
 					offer ? (
 						<button
 							type="button"
+							data-offer={offer.id}
 							className="flex w-full items-center gap-3 px-[18px] py-4 text-start transition-colors duration-quick hover:bg-hover aria-expanded:bg-hover"
 						/>
 					) : (
@@ -354,8 +561,14 @@ function OfferHeader({ offer, offers, otherId, onChoose }: OfferHeaderProps) {
 								<span className="truncate text-[13px] text-ink-2">{offer.application.role}</span>
 							)}
 							<span className="text-xs text-ink-3">
-								{versionLabel(offer)} · {t`saved ${when(offer.createdAt)}`}
+								{versionLabel(offer)} · {t`saved ${when(offer.createdAt)}`} · {outcomeLabel(offer)} ·{" "}
+								{i18n.number(
+									offers
+										.filter((item) => item.applicationId === offer.applicationId)
+										.findIndex((item) => item.id === offer.id) + 1,
+								)}
 							</span>
+							{originLabel(offer) && <span className="text-xs text-ink-3">{originLabel(offer)}</span>}
 						</span>
 						<Icon name="caret-down" size={18} className="shrink-0 text-ink-3" />
 					</>
@@ -371,12 +584,13 @@ function OfferHeader({ offer, offers, otherId, onChoose }: OfferHeaderProps) {
 						<DropdownMenuGroup key={first.id}>
 							<DropdownMenuLabel>
 								{companyOf(first)}
-								{first.application?.role ? ` · ${first.application.role}` : ""}
+								{first.application?.role ? ` · ${first.application.role}` : ""} · {outcomeLabel(first)}
 							</DropdownMenuLabel>
 							{versions.map((item) => (
 								<DropdownMenuItem key={item.id} disabled={item.id === otherId} onClick={() => onChoose(item.id)}>
 									<span className="flex-1">
-										{versionLabel(item)} · {when(item.createdAt)}
+										{versionLabel(item)} · {when(item.createdAt)} · {i18n.number(versions.indexOf(item) + 1)}
+										{item.id === first.id ? ` · ${t`Latest`}` : ""}
 									</span>
 									{item.id === offer?.id && <Icon name="check" size={16} />}
 								</DropdownMenuItem>
@@ -384,6 +598,19 @@ function OfferHeader({ offer, offers, otherId, onChoose }: OfferHeaderProps) {
 						</DropdownMenuGroup>
 					);
 				})}
+				{offer && onEdit && onDelete && (
+					<>
+						<DropdownMenuSeparator />
+						<DropdownMenuItem onClick={() => onEdit(offer)}>
+							<Icon name="pencil-simple" size={18} />
+							<Trans>Edit terms</Trans>
+						</DropdownMenuItem>
+						<DropdownMenuItem variant="destructive" onClick={() => onDelete(offer)}>
+							<Icon name="trash" size={18} />
+							<Trans>Delete offer</Trans>
+						</DropdownMenuItem>
+					</>
+				)}
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);
@@ -397,20 +624,41 @@ function useCells() {
 	return (offer: Offer, other: Offer | undefined): Record<string, Cell> => {
 		const terms = offer.data;
 		const company = companyOf(offer);
+		// A blank is only "not in the message" if nobody checked it by hand; typed-in blanks were left blank.
+		const blank =
+			terms.origin === "message" && !terms.editedAt
+				? t`Not found in the message`
+				: terms.origin
+					? t`Left blank`
+					: t`Not recorded`;
 		const unknown: Cell = {
-			value: <span className="text-ink-3">{t`Unknown`}</span>,
-			notes: [{ icon: "question", tone: "warn", text: t`Not in the offer · ask ${company}` }],
+			value: <span className="text-ink-3">{isDeciding(offer) ? blank : t`Not recorded`}</span>,
+			notes: isDeciding(offer) ? [{ icon: "question", tone: "warn", text: t`Ask ${company}` }] : [],
 		};
 		const money = (amount: number) => {
 			const value = formatMoney(locale, terms.currency, amount);
 			return { hour: t`${value} an hour`, month: t`${value} a month`, year: t`${value} a year` }[terms.period];
 		};
 		const better = (key: "base" | "variable" | "learning"): Note[] => {
+			const annual = other ? annualBaseHint(terms, other.data) : null;
+			const months = new Intl.NumberFormat(locale).format(12);
+			const yearly = annual === null ? "" : formatMoney(locale, terms.currency, annual);
+			const monthly = terms.base === null ? "" : formatMoney(locale, terms.currency, terms.base);
 			if (!other) return [];
 			const difference = moneyDifference(terms, other.data, key);
+			if (
+				offer.applicationId &&
+				offer.applicationId === other.applicationId &&
+				difference !== null &&
+				difference !== 0
+			) {
+				const delta = `${difference > 0 ? "+" : "−"}${formatMoney(locale, terms.currency, Math.abs(difference))}`;
+				const version = versionLabel(other);
+				return [{ icon: "info", tone: "muted", text: t`${delta} vs ${version}` }];
+			}
 			if (difference !== null && difference > 0)
 				return [{ icon: "arrow-up", tone: "better", text: t`${formatMoney(locale, terms.currency, difference)} more` }];
-			if (key === "base" && difference === null && other.data.base !== null && terms.base !== null)
+			if (key === "base" && difference === null && terms.base !== null && (other.data.base !== null || annual !== null))
 				return [
 					{
 						icon: "info",
@@ -420,6 +668,9 @@ function useCells() {
 								? t`Different pay period, not compared`
 								: t`Different currency, not compared`,
 					},
+					...(annual === null
+						? []
+						: [{ icon: "info", tone: "muted", text: t`≈ ${yearly} a year (${months} × ${monthly})` } as const]),
 				];
 			return [];
 		};
@@ -442,17 +693,33 @@ function useCells() {
 		return {
 			base: terms.base === null ? unknown : { value: money(terms.base), strong: true, notes: better("base") },
 			variable:
-				terms.variable === null
-					? unknown
-					: {
-							value: money(terms.variable),
+				terms.variablePercent != null
+					? {
+							value: formatBonus(locale, terms),
 							notes: [
 								...better("variable"),
-								...(terms.variableConditions.trim()
+								...(terms.variableConditions
 									? [{ icon: "question", tone: "warn", text: terms.variableConditions } as const]
 									: []),
 							],
-						},
+						}
+					: terms.variable === null
+						? terms.variableConditions.trim()
+							? // A percentage or a condition without an amount: shown as written, never turned into money.
+								{
+									value: terms.variableConditions,
+									notes: [{ icon: "question", tone: "warn", text: t`No amount stated · value uncertain` }],
+								}
+							: unknown
+						: {
+								value: money(terms.variable),
+								notes: [
+									...better("variable"),
+									...(terms.variableConditions.trim()
+										? [{ icon: "question", tone: "warn", text: terms.variableConditions } as const]
+										: []),
+								],
+							},
 			equity: terms.equity.trim()
 				? {
 						value: terms.equity,
@@ -470,11 +737,14 @@ function useCells() {
 			leave: text(terms.leave),
 			learning: terms.learning === null ? unknown : { value: money(terms.learning), notes: better("learning") },
 			other: text(terms.other),
+			startDate: terms.startDate ? { value: formatDateOnly(terms.startDate, locale), notes: [] } : unknown,
 			respondBy:
 				respondBy && hoursLeft !== null
 					? {
 							value: when(respondBy),
-							notes: [{ icon: "clock", tone: hoursLeft < 48 ? "warn" : "muted", text: relative(respondBy, now) }],
+							notes: isDeciding(offer)
+								? [{ icon: "clock", tone: hoursLeft < 48 ? "warn" : "muted", text: relative(respondBy, now) }]
+								: [],
 						}
 					: unknown,
 		};
@@ -520,6 +790,8 @@ function requirementsFor(offer: Offer, profile: CareerProfileData, locale: strin
 
 type OpenQuestionsProps = { offers: Offer[] };
 
+const sentence = (text: string) => (/[.!?…。！？]$/u.test(text.trim()) ? text.trim() : `${text.trim()}.`);
+
 /** What neither offer says yet, as questions to ask, led by what the user said matters. */
 function OpenQuestions({ offers }: OpenQuestionsProps) {
 	const { locale } = useCareerTime();
@@ -528,10 +800,13 @@ function OpenQuestions({ offers }: OpenQuestionsProps) {
 
 	const checks: [string, (terms: Offer["data"]) => boolean][] = [
 		[t`What is the base salary, and is it negotiable?`, (terms) => terms.base === null],
-		[t`Is there a bonus, and what does it depend on?`, (terms) => terms.variable === null],
+		[
+			t`Is there a bonus, and what does it depend on?`,
+			(terms) => terms.variable === null && !terms.variableConditions.trim(),
+		],
 		[
 			t`How is the bonus decided, and how much of it was paid out last year?`,
-			(terms) => terms.variable !== null && terms.variableConditions.trim() !== "",
+			(terms) => terms.variableConditions.trim() !== "",
 		],
 		[t`Is equity part of the offer?`, (terms) => !terms.equity.trim()],
 		[
@@ -542,10 +817,11 @@ function OpenQuestions({ offers }: OpenQuestionsProps) {
 		[t`How many days of leave come with it?`, (terms) => !terms.leave.trim()],
 		[t`Is there a learning budget?`, (terms) => terms.learning === null],
 		[t`Which other benefits come with it, like pension or allowances?`, (terms) => !terms.other.trim()],
+		[t`When would you start?`, (terms) => terms.startDate === null],
 		[t`When do they need your answer?`, (terms) => terms.respondBy === null],
 	];
 	const questions = checks.flatMap(([question, open]) => {
-		const who = offers.filter((offer) => open(offer.data));
+		const who = offers.filter((offer) => isDeciding(offer) && open(offer.data));
 		return who.length
 			? [{ question, ask: who.length === offers.length && offers.length > 1 ? t`Ask both` : t`Ask ${names(who)}` }]
 			: [];
@@ -553,7 +829,9 @@ function OpenQuestions({ offers }: OpenQuestionsProps) {
 
 	const priorities = profile?.priorities.trim() ?? "";
 	// The first sentence keeps the lead-in short; the full text is in Preferences.
-	const said = priorities.length > 160 ? (priorities.split(/(?<=[.!?])\s/)[0] ?? priorities) : priorities;
+	const firstPriority = priorities.length > 160 ? (priorities.split(/(?<=[.!?])\s/)[0] ?? priorities) : priorities;
+	// The quote ends its own sentence: a full stop inside it unless it already has one. Named `said` for translators.
+	const said = firstPriority ? sentence(firstPriority) : "";
 
 	const copy = async () => {
 		try {
@@ -569,17 +847,17 @@ function OpenQuestions({ offers }: OpenQuestionsProps) {
 	return (
 		<section className="grid gap-3 rounded-xl border border-line bg-surface p-4">
 			<h2 className="text-sm font-semibold">
-				<Trans>Not in either offer yet</Trans>
+				{offers.length > 1 ? <Trans>Not in either offer yet</Trans> : <Trans>Open questions</Trans>}
 			</h2>
 			{questions.length === 0 ? (
 				<p className="text-[13px] text-ink-2">
-					<Trans>Both offers cover everything compared here.</Trans>
+					<Trans>No questions to ask before deciding.</Trans>
 				</p>
 			) : (
 				<>
 					<p className="text-[13px] leading-[19px] text-ink-2">
 						{said
-							? offers.length > 1
+							? offers.filter(isDeciding).length > 1
 								? t`You said: “${said}” Ask both companies before deciding.`
 								: t`You said: “${said}” Ask before deciding.`
 							: t`Ask before deciding.`}
@@ -587,7 +865,7 @@ function OpenQuestions({ offers }: OpenQuestionsProps) {
 					<ol className="grid gap-2">
 						{questions.map((item, index) => (
 							<li key={item.question} className="grid grid-cols-[20px_minmax(0,1fr)] text-sm leading-[21px]">
-								<span className="font-mono text-xs leading-[21px] text-ink-3">{index + 1}.</span>
+								<span className="font-mono text-xs leading-[21px] text-ink-3">{i18n.number(index + 1)}.</span>
 								<span>
 									{item.question} <span className="text-xs text-ink-3">· {item.ask}</span>
 								</span>

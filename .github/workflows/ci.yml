@@ -1,0 +1,403 @@
+name: CI
+run-name: ${{ inputs.live_smoke && 'Deployment smoke test' || 'CI' }} · ${{ github.head_ref || github.ref_name }}
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      live_smoke:
+        description: Run only the smoke test against the dedicated Vercel test deployment
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test:
+    name: Run ${{ matrix.suite == 'Unit' && 'unit' || 'browser' }} tests
+    if: ${{ !inputs.live_smoke }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [Unit, Browser]
+    env:
+      APP_URL: http://localhost:3000
+      PORT: "3000"
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      # Public fixtures for disposable CI services. Random values invalidate every Turbo test key.
+      AUTH_SECRET: isolated-ci-auth-secret-32-characters
+      ENCRYPTION_SECRET: isolated-ci-encryption-secret-32-characters
+      FLAG_DISABLE_SIGNUPS: "false"
+      FLAG_DISABLE_EMAIL_AUTH: "false"
+      FLAG_ENABLE_GUEST_LOGIN: "true"
+      FLAG_DISABLE_API_RATE_LIMIT: "true"
+      LOCAL_STORAGE_PATH: /tmp/reactive-resume-e2e-storage
+      # The assistant spec talks to a scripted provider on 127.0.0.1.
+      FLAG_ALLOW_UNSAFE_AI_BASE_URL: "true"
+      # Real-database unit suites. The cover-letter suite works in its own schema; the OAuth flow suite writes
+      # signing keys under its own secret, so it gets a database the e2e server never reads.
+      COVER_LETTER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      INTEGRATIONS_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      OAUTH_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/oauth_test
+    runs-on: ${{ vars.USE_BLACKSMITH == 'true' && 'blacksmith-32vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out source
+        if: ${{ vars.USE_BLACKSMITH != 'true' }}
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: ${{ matrix.suite == 'Unit' && '0' || '1' }}
+
+      - name: Check out source (Blacksmith)
+        if: ${{ vars.USE_BLACKSMITH == 'true' }}
+        uses: useblacksmith/checkout@v1
+        with:
+          persist-credentials: false
+          fetch-depth: ${{ matrix.suite == 'Unit' && '0' || '1' }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+
+      # Short-lived Vercel Remote Cache token from GitHub OIDC; without TURBO_TEAM or a matching policy, the local cache serves.
+      # Only main pushes get one, so pull requests can't write artifacts that Docker builds reuse.
+      - name: Set up Turbo remote cache
+        if: ${{ vars.TURBO_TEAM != '' && github.event_name == 'push' }}
+        continue-on-error: true
+        uses: vercel/setup-turborepo-remote-cache-action@49d7b1b46ba4c9251e1977986bfe18336feabc8f # v1.1.0
+        with:
+          team: ${{ vars.TURBO_TEAM }}
+
+      - name: Restore and save Turbo cache
+        uses: actions/cache@v6
+        with:
+          path: .turbo/cache
+          key: ${{ runner.os }}-${{ runner.arch }}-turbo-${{ github.workflow }}-${{ github.job }}-${{ matrix.suite }}-${{ hashFiles('pnpm-lock.yaml', '.nvmrc') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-turbo-${{ github.workflow }}-${{ github.job }}-${{ matrix.suite }}-${{ hashFiles('pnpm-lock.yaml', '.nvmrc') }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Review documentation drift
+        if: matrix.suite == 'Unit'
+        env:
+          DOCS_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}
+        run: |
+          if git diff --quiet "$DOCS_BASE_REF" HEAD -- docs/ tooling/docs/; then
+            exit 0
+          fi
+          pnpm docs:check
+
+      - name: Check translation catalogs match source
+        if: matrix.suite == 'Unit'
+        run: pnpm lingui:check || { echo "::error::Catalogs are out of sync. Run pnpm lingui:extract and commit apps/web/locales and apps/mobile/locales."; exit 1; }
+
+      - name: Review translation changes
+        if: matrix.suite == 'Unit' && github.event_name == 'pull_request'
+        env:
+          LOCALES_BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --quiet "$LOCALES_BASE_REF" HEAD -- apps/web/locales/ apps/mobile/locales/; then
+            exit 0
+          fi
+          pnpm locales:diff --base "$LOCALES_BASE_REF"
+
+      - name: Install PDF text extraction tools
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+
+      - name: Check package boundaries
+        if: matrix.suite == 'Unit'
+        run: pnpm exec turbo boundaries
+
+      - name: Check agent docs
+        if: matrix.suite == 'Unit'
+        run: pnpm check:agent-docs
+
+      - name: Typecheck affected packages
+        if: matrix.suite == 'Unit'
+        run: pnpm exec turbo run typecheck --affected
+
+      - name: Install Chromium, WebKit and browser dependencies
+        if: matrix.suite == 'Browser'
+        timeout-minutes: 20
+        run: pnpm exec playwright install --with-deps chromium webkit
+
+      - name: Prepare test storage
+        run: mkdir -p "$LOCAL_STORAGE_PATH"
+
+      - name: Migrate test database
+        run: pnpm db:migrate
+
+      - name: Create and migrate OAuth test database
+        if: matrix.suite == 'Unit'
+        run: |
+          psql "$DATABASE_URL" -c "CREATE DATABASE oauth_test"
+          DATABASE_URL="$OAUTH_TEST_DATABASE_URL" pnpm db:migrate
+
+      # Discover every package. Four pools of two workers fit the 32-vCPU runner;
+      # keep smaller GitHub runners serial to avoid PDF/rate-limit timeouts.
+      - name: Run unit tests
+        if: matrix.suite == 'Unit'
+        env:
+          # A missing test database URL fails the run instead of skipping the real-database suites.
+          REQUIRE_DB_TESTS: "1"
+        run: pnpm exec turbo run test:ci --concurrency=${{ vars.USE_BLACKSMITH == 'true' && 4 || 1 }}
+
+      - name: Build application
+        if: matrix.suite == 'Browser'
+        run: pnpm build
+
+      - name: Run browser tests
+        if: matrix.suite == 'Browser'
+        env:
+          CUSTOM_DOMAIN_TARGET: domains.example.test
+          CUSTOM_DOMAIN_PROVIDER_SECRET: isolated-ci-custom-domain-secret
+        run: pnpm exec playwright test --workers=${{ vars.USE_BLACKSMITH == 'true' && 4 || 1 }}
+
+      - name: Upload browser test reports and traces
+        if: always() && matrix.suite == 'Browser'
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  check-mobile-bundle:
+    name: Check mobile Hermes bundle
+    if: ${{ !inputs.live_smoke }}
+    runs-on: ${{ vars.USE_BLACKSMITH == 'true' && 'blacksmith-32vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    env:
+      EXPO_NO_TELEMETRY: "1"
+    steps:
+      - name: Check out source
+        if: ${{ vars.USE_BLACKSMITH != 'true' }}
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check out source (Blacksmith)
+        if: ${{ vars.USE_BLACKSMITH == 'true' }}
+        uses: useblacksmith/checkout@v1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # App, shared-package and dependency-resolution changes can alter the bundle.
+      - name: Detect mobile changes
+        id: changes
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}
+        run: |
+          if git diff --quiet "$BASE_REF" HEAD -- apps/mobile/ packages/ pnpm-lock.yaml pnpm-workspace.yaml patches/; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install pnpm
+        if: steps.changes.outputs.changed == 'true'
+        uses: pnpm/action-setup@v6
+      - name: Set up Node.js
+        if: steps.changes.outputs.changed == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        if: steps.changes.outputs.changed == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Export iOS and Android Hermes bundles
+        if: steps.changes.outputs.changed == 'true'
+        run: pnpm --filter mobile check:bundle
+
+  check-cloudflare:
+    name: Check Cloudflare compatibility
+    if: ${{ !inputs.live_smoke }}
+    runs-on: ${{ vars.USE_BLACKSMITH == 'true' && 'blacksmith-32vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - name: Check out source
+        if: ${{ vars.USE_BLACKSMITH != 'true' }}
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check out source (Blacksmith)
+        if: ${{ vars.USE_BLACKSMITH == 'true' }}
+        uses: useblacksmith/checkout@v1
+        with:
+          persist-credentials: false
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      # No cloud account or deployment credentials: forks exercise the real local Workers runtime.
+      - name: Build and validate Cloudflare bundle
+        run: pnpm check:cloudflare
+      - name: Run Cloudflare smoke tests
+        run: pnpm test:cloudflare
+
+  check-vercel:
+    name: Check Vercel compatibility
+    if: ${{ !inputs.live_smoke }}
+    runs-on: ${{ vars.USE_BLACKSMITH == 'true' && 'blacksmith-32vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      APP_URL: http://localhost:3000
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      AUTH_SECRET: isolated-ci-auth-secret-32-characters
+      ENCRYPTION_SECRET: isolated-ci-encryption-secret-32-characters
+      REDIS_URL: redis://localhost:6379
+      STORAGE_BACKEND: blob
+      BLOB_READ_WRITE_TOKEN: vercel_blob_rw_ci_fake_build_only
+      VERCEL: "1"
+      VERCEL_ENV: production
+    steps:
+      - name: Check out source
+        if: ${{ vars.USE_BLACKSMITH != 'true' }}
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check out source (Blacksmith)
+        if: ${{ vars.USE_BLACKSMITH == 'true' }}
+        uses: useblacksmith/checkout@v1
+        with:
+          persist-credentials: false
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Restore and save Turbo cache
+        uses: actions/cache@v6
+        with:
+          path: .turbo/cache
+          key: ${{ runner.os }}-${{ runner.arch }}-turbo-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', '.nvmrc') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-turbo-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', '.nvmrc') }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      # Local project settings avoid authentication and API calls. Forks receive no cloud credentials.
+      - name: Build Vercel deployment artifact
+        run: |
+          mkdir -p .vercel
+          cat > .vercel/project.json <<'JSON'
+          {
+            "projectId": "prj_ci", "orgId": "team_ci", "projectName": "reactive-resume-ci",
+            "settings": { "framework": "services", "nodeVersion": "24.x", "createdAt": 0 }
+          }
+          JSON
+          pnpm dlx --allow-build=esbuild vercel@61.0.0 build --prod --standalone --yes --global-config "$RUNNER_TEMP/vercel-offline"
+      # Runs the backend Function from a copy outside the checkout, so a dependency the build left out fails here.
+      - name: Verify Vercel function loading and limits
+        run: |
+          node --no-experimental-require-module --input-type=module - <<'JS'
+          import assert from 'node:assert/strict';
+          import { cpSync, readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const func = '.vercel/output/services/backend/functions/index.func';
+          const config = JSON.parse(readFileSync(`${func}/.vc-config.json`));
+          assert.equal(config.runtime, 'nodejs24.x');
+          assert.equal(config.maxDuration, 300);
+          assert.equal(config.handler, 'apps/server/vercel.mjs');
+          const root = join(process.env.RUNNER_TEMP, 'backend-function');
+          cpSync(func, root, { recursive: true, verbatimSymlinks: true });
+          const { default: app } = await import(join(root, config.handler));
+          const stage = await app.fetch(new Request('http://localhost:3000/api/storage/stage', { method: 'POST', body: '{}' }));
+          assert.equal(stage.status, 401);
+          const home = await app.fetch(new Request('http://localhost:3000/'));
+          assert.equal(home.status, 200);
+          assert.match(await home.text(), /application\/ld\+json/);
+          process.exit(0);
+          JS
+
+  smoke-test:
+    name: Smoke-test deployment
+    if: github.event_name == 'workflow_dispatch' && inputs.live_smoke
+    runs-on: ${{ vars.USE_BLACKSMITH == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    environment: vercel-smoke
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        if: ${{ vars.USE_BLACKSMITH != 'true' }}
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check out source (Blacksmith)
+        if: ${{ vars.USE_BLACKSMITH == 'true' }}
+        uses: useblacksmith/checkout@v1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - name: Run dedicated deployment smoke test
+        env:
+          SMOKE_URL: ${{ vars.VERCEL_SMOKE_URL }}
+          SMOKE_AI_BASE_URL: ${{ vars.VERCEL_SMOKE_AI_BASE_URL }}
+          SMOKE_AI_API_KEY: ${{ secrets.VERCEL_SMOKE_AI_API_KEY }}
+        run: node tooling/deployment/smoke.mjs

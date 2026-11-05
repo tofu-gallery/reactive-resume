@@ -1,17 +1,16 @@
 import { isIP } from "node:net";
 import { APIError } from "better-auth/api";
-import { getStorageService, migrateUserStorage } from "@reactive-resume/api/features/storage";
-import { auth, setAccountLinkHook, setUserDeleteHook } from "@reactive-resume/auth/config";
+import { migrateUserStorage } from "@reactive-resume/api/features/storage";
+import { auth, setAccountLinkHook } from "@reactive-resume/auth/config";
 import { env } from "@reactive-resume/env/server";
+import { isSessionIntentPath } from "@reactive-resume/utils/auth-intent";
+import { supportedLocales } from "@reactive-resume/utils/locale";
 import { TRUSTED_IP_HEADERS } from "@reactive-resume/utils/rate-limit";
 import { isAllowedOAuthRedirectUri } from "@reactive-resume/utils/url-security.node";
 
-setAccountLinkHook(({ fromUserId, toUserId }) => migrateUserStorage(fromUserId, toUserId));
-
-// Better Auth's own user deletion (guest cleanup after linking, admin removal) leaves uploads behind.
-setUserDeleteHook(async (userId) => {
-	await getStorageService().delete(`uploads/${userId}`);
-});
+setAccountLinkHook(({ fromUserId, toUserId, excludedStoragePrefixes }) =>
+	migrateUserStorage(fromUserId, toUserId, excludedStoragePrefixes),
+);
 
 const oauthAuthorizeSanitizedParams = [
 	"prompt",
@@ -82,16 +81,6 @@ async function defaultPublicClientRegistration(request: Request): Promise<Reques
 		return request;
 	}
 
-	// MCP native clients often omit OIDC application_type. Infer it only for
-	// exact HTTP loopback callbacks; the provider still validates every URI.
-	if (body.application_type === undefined && Array.isArray(body.redirect_uris) && body.redirect_uris.length > 0) {
-		const allLoopback = body.redirect_uris.every(
-			(uri: unknown) =>
-				typeof uri === "string" && /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:[/?]|$)/i.test(uri),
-		);
-		if (allLoopback) body.application_type = "native";
-	}
-
 	// MCP clients that authenticate with PKCE alone omit the method, and Better Auth
 	// would otherwise register them as `client_secret_basic`. Honor an explicit choice:
 	// forcing it to "none" issues no client secret, so the client's own Basic/post
@@ -159,6 +148,23 @@ async function validateOAuthClientMetadata(request: Request): Promise<Response |
 	}
 }
 
+/**
+ * Account settings writes from the browser name the account whose page rendered them. If the cookie now belongs to a
+ * different account (another tab signed out or in), applying that write would change the wrong user; refuse it before
+ * Better Auth runs any effect. Requests without the header, and explicit sign-in/up/out intents, are unchanged.
+ */
+async function rejectMismatchedAccount(request: Request) {
+	const expected = request.headers.get("x-account-id");
+	if (!expected || request.method === "GET" || request.method === "HEAD") return null;
+	if (isSessionIntentPath(new URL(request.url).pathname)) return null;
+	const session = await auth.api.getSession({ headers: request.headers, query: { disableCookieCache: true } });
+	if (!session?.user || session.user.id === expected) return null;
+	return Response.json(
+		{ message: "This page belongs to a different account now. Reload and try again." },
+		{ status: 409, headers: { "Cache-Control": "no-store" } },
+	);
+}
+
 export async function handleAuth(incomingRequest: Request, trustedClient = "unknown") {
 	// Only the server adapter may supply the client address. Never forward client-sent proxy headers to auth.
 	const headers = new Headers(incomingRequest.headers);
@@ -170,6 +176,8 @@ export async function handleAuth(incomingRequest: Request, trustedClient = "unkn
 
 	const sanitizedRequest = sanitizeOAuthAuthorizeRequest(request);
 	const finalRequest = await defaultPublicClientRegistration(sanitizedRequest);
+	const mismatchedAccount = await rejectMismatchedAccount(finalRequest);
+	if (mismatchedAccount) return mismatchedAccount;
 
 	return auth.handler(finalRequest);
 }
@@ -232,6 +240,13 @@ function redirectToOAuthLogin(url: URL, reauthenticate = false, headers = new He
 	const prompt = new Set(url.searchParams.get("prompt")?.split(" ") ?? []);
 	const loginUrl = new URL(prompt.has("create") ? "/auth/register" : "/auth/login", env.APP_URL);
 	if (reauthenticate) loginUrl.searchParams.set("reauthenticate", "true");
+	// A client's OpenID `ui_locales` (the mobile app sends its language) opens the sign-in pages in that language; the
+	// app keeps it, and a new account starts in it. Only a supported locale is passed on.
+	const uiLocale = url.searchParams
+		.get("ui_locales")
+		?.split(" ")
+		.find((tag) => supportedLocales.some((locale) => locale === tag));
+	if (uiLocale) loginUrl.searchParams.set("locale", uiLocale);
 	loginUrl.searchParams.set("callbackURL", `/api/auth/oauth${url.search}`);
 	headers.set("Location", `${loginUrl.pathname}${loginUrl.search}`);
 	return new Response(null, {

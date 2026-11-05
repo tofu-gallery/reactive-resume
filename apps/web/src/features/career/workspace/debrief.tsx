@@ -2,13 +2,14 @@ import type { SavedData, SavedItem } from "../hooks";
 import type { WorkspaceTabProps } from "./shell";
 import type { Application } from "@/features/applications/types";
 import type { InterviewKind, InterviewTimelineEntry } from "@reactive-resume/schema/applications/data";
-import { plural, t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, plural, t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import { useId, useState } from "react";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Checkbox } from "@reactive-resume/ui/components/checkbox";
+import { EmptyState } from "@reactive-resume/ui/components/empty-state";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Input } from "@reactive-resume/ui/components/input";
 import { Label } from "@reactive-resume/ui/components/label";
@@ -18,10 +19,10 @@ import { toast } from "@reactive-resume/ui/components/toast";
 import { downloadWithAnchor } from "@reactive-resume/utils/file";
 import { cn } from "@reactive-resume/utils/style";
 import { latest, useDefaultProvider, useGenerate, useSavedItems, useTicks } from "../hooks";
-import { FilterChip, MemoryProposal, PrivacyLine, useCareerTime, Working, workingSteps } from "../shared";
+import { FilterChip, MemoryProposal, useCareerTime, GenerateNotice, Working, workingSteps } from "../shared";
+import { AiNotice } from "./fit";
 import { buildIcs } from "@/features/applications/ics";
 import { isInterview } from "@/features/applications/interviews";
-import { AiProviderLoadState } from "@/features/settings/integrations/ai-provider-load-state";
 import { toastError } from "@/libs/error-message";
 import { ENTER_CLASS } from "@/libs/motion";
 import { orpc } from "@/libs/orpc/client";
@@ -48,8 +49,9 @@ const afterRound = (kind: InterviewKind | undefined) =>
 		other: t`After the interview`,
 	})[kind ?? "other"];
 
-export function DebriefTab({ application, version, now }: WorkspaceTabProps) {
+export function DebriefTab({ application, version, now, go }: WorkspaceTabProps) {
 	const saved = useSavedItems(application.id);
+	const time = useCareerTime();
 	const [fresh, setFresh] = useState<Review | null>(null);
 	const viewing = isDebrief(version) ? version : undefined;
 	const round = viewing
@@ -58,6 +60,21 @@ export function DebriefTab({ application, version, now }: WorkspaceTabProps) {
 	const forRound = latest(saved.data, "debrief", round?.id ?? null);
 	const review = viewing ?? fresh ?? forRound;
 	const plan = viewing ?? fresh ?? latest(saved.data, "debrief");
+	// A debrief is written after the round: before it starts, the form waits, and Interview prep is the place to go.
+	const upcoming = !viewing && !forRound && round && +new Date(round.at) > +now ? round : undefined;
+	if (upcoming)
+		return (
+			<EmptyState
+				title={t`Write this after your interview on ${time.day(upcoming.at)}`}
+				description={<Trans>Until then, Interview prep has your plan, your opening and the questions to ask.</Trans>}
+				action={
+					<Button variant="secondary" onClick={() => go("prepare")}>
+						<Icon name="calendar-dot" size={18} />
+						<Trans>Open Interview prep</Trans>
+					</Button>
+				}
+			/>
+		);
 
 	return (
 		<div className="grid items-start gap-5 @3xl:grid-cols-[minmax(0,1fr)_320px]">
@@ -152,7 +169,6 @@ function DebriefForm({ application, round, from, readOnly, onReviewed }: Debrief
 	};
 
 	const ready = draft.question.trim() !== "" && draft.answer.trim() !== "" && draft.landed !== null;
-	const providerName = provider?.label ?? t`your AI connection`;
 	const landed = [
 		{ value: "well", label: t`Went well` },
 		{ value: "mixed", label: t`Mixed` },
@@ -187,6 +203,8 @@ function DebriefForm({ application, round, from, readOnly, onReviewed }: Debrief
 					<Trans>What did you say, as close as you remember?</Trans>
 				</Label>
 				<Textarea
+					// What people paste or write here can be in any language: its own text sets the direction.
+					dir="auto"
 					id={`${id}-answer`}
 					value={draft.answer}
 					readOnly={readOnly}
@@ -216,25 +234,8 @@ function DebriefForm({ application, round, from, readOnly, onReviewed }: Debrief
 					<Button disabled={!ready || !provider} loading={generate.isPending} onClick={submit}>
 						{generate.isPending ? <Working steps={workingSteps("debrief")} /> : <Trans>Review my answer</Trans>}
 					</Button>
-					{connection.isUnavailable ? (
-						<AiProviderLoadState state={connection} />
-					) : provider ? (
-						<PrivacyLine>
-							<Trans>
-								Review my answer sends the question, what you said, this posting and your Knowledge to {providerName}.
-							</Trans>
-						</PrivacyLine>
-					) : (
-						<PrivacyLine>
-							<Trans>
-								Reviewing needs an AI connection.{" "}
-								<Link to="/dashboard/settings/ai" className="text-accent-text underline underline-offset-3">
-									Add one in Settings
-								</Link>
-								. What you write here stays in this browser until then.
-							</Trans>
-						</PrivacyLine>
-					)}
+					<GenerateNotice generate={generate} onRetry={submit} />
+					<AiNotice task="debrief" application={application} interview={Boolean(round)} />
 				</div>
 			)}
 		</section>
@@ -422,7 +423,8 @@ function WeekPlan({ application, review, now, readOnly }: WeekPlanProps) {
 					<Trans>This week: make your evidence easier to follow</Trans>
 				</h2>
 				<p className="text-xs text-ink-3">
-					{t`${done} of ${count} done`} · {plural(minutes, { one: "# minute in total", other: "# minutes in total" })}
+					{t`${ph({ done: i18n.number(done) })} of ${ph({ count: i18n.number(count) })} done`} ·{" "}
+					{plural(minutes, { one: "# minute in total", other: "# minutes in total" })}
 				</p>
 			</div>
 			<ul className="grid">
@@ -442,7 +444,7 @@ function WeekPlan({ application, review, now, readOnly }: WeekPlanProps) {
 								<span className="font-mono text-xs leading-4 font-medium text-ink-3">
 									{weekday}
 									<br />
-									{t`${length}m`}
+									{t`${ph({ length: i18n.number(length) })}m`}
 								</span>
 								<span
 									className={cn(

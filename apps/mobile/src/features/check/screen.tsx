@@ -1,5 +1,6 @@
 import type { CheckIssue } from "./issues";
 import type { WritingReview } from "./writing";
+import { i18n } from "@lingui/core";
 import { plural } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
 import { useNetworkState } from "expo-network";
@@ -21,8 +22,12 @@ import { routes } from "@/routes";
 import { Banner, Button, Card, EmptyState, ListRow, Segmented, Skeleton, Text, useTheme } from "@/ui";
 import { usePullRefresh } from "@/ui/use-pull-refresh";
 
-type CheckScreenProps = { id: string };
-export function CheckScreen({ id }: CheckScreenProps) {
+type CheckScreenProps = {
+	id: string;
+	applicationId?: string | undefined;
+	initialTab?: "issues" | "match" | "writing" | undefined;
+};
+export function CheckScreen({ id, applicationId: selectedApplicationId, initialTab = "issues" }: CheckScreenProps) {
 	const router = useRouter();
 	const { t } = useLingui();
 	const { colors, space, motion } = useTheme();
@@ -31,9 +36,10 @@ export function CheckScreen({ id }: CheckScreenProps) {
 	const sourceData = useResumeStore((state) => (state.document?.id === id ? state.data : null));
 	const status = useResumeStore((state) => state.status);
 	const locked = useResumeStore((state) => state.locked);
-	const applicationId = useResumeStore((state) =>
+	const linkedApplicationId = useResumeStore((state) =>
 		state.document?.id === id ? (state.document.applicationId ?? null) : null,
 	);
+	const applicationId = selectedApplicationId ?? linkedApplicationId;
 	const session = useSession();
 	const network = useNetworkState();
 	const data = useDeferredValue(sourceData);
@@ -43,8 +49,10 @@ export function CheckScreen({ id }: CheckScreenProps) {
 		return Promise.resolve();
 	});
 	const check = useMemo(() => (data ? computeCheck(data, new Date(refreshVersion)) : null), [data, refreshVersion]);
+	// One obvious next step: only the highest-ranked open fix that applies gets the filled button.
+	const leadingFix = check?.issues.find((issue) => issue.fix.kind === "apply")?.key ?? null;
 	const [writingReview, setWritingReview] = useState<WritingReview | null>(null);
-	const [tab, setTab] = useState<"issues" | "match" | "writing">("issues");
+	const [tab, setTab] = useState<"issues" | "match" | "writing">(initialTab);
 	const [selected, setSelected] = useState<string | null>(null);
 	const [showPage, setShowPage] = useState(false);
 	const [highlightTerm, setHighlightTerm] = useState<string | null>(null);
@@ -144,11 +152,16 @@ export function CheckScreen({ id }: CheckScreenProps) {
 						>
 							<Card style={{ gap: space.s2 }}>
 								<Text variant="caption" color="ink3">
-									{issue.number} · {getCategoryName(issue.category)}
+									{i18n.number(issue.number)} · {getCategoryName(issue.category)}
 								</Text>
 								<Text variant="title">{issue.title}</Text>
 								<Text color="ink2">{issue.body}</Text>
-								<Button label={issue.fix.label} disabled={locked} onPress={() => fixIssue(id, issue, router)} />
+								<Button
+									variant={issue.key === leadingFix ? "primary" : "secondary"}
+									label={issue.fix.label}
+									disabled={locked}
+									onPress={() => fixIssue(id, issue, router)}
+								/>
 								<View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.s2 }}>
 									<Button variant="ghost" label={t`Show on page`} onPress={() => onPage(issue)} />
 									<Button
@@ -179,7 +192,7 @@ export function CheckScreen({ id }: CheckScreenProps) {
 									subtitle={category === entry ? getCategoryDescription(entry) : undefined}
 									trailing={
 										<Text color={score.passed === score.total ? "accentText" : "warnText"}>
-											{score.passed}/{score.total}
+											{i18n.number(score.passed)}/{i18n.number(score.total)}
 										</Text>
 									}
 									onPress={() => setCategory(category === entry ? null : entry)}

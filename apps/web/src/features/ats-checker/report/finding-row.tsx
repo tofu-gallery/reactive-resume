@@ -1,4 +1,6 @@
 import type { PdfFinding, PdfSeverity } from "@reactive-resume/resume/ats-pdf";
+import { i18n } from "@lingui/core";
+import { Trans } from "@lingui/react/macro";
 import { match } from "ts-pattern";
 import { Badge } from "@reactive-resume/ui/components/badge";
 import { cn } from "@reactive-resume/utils/style";
@@ -44,7 +46,7 @@ export function FindingRow({ finding }: FindingRowProps) {
 					)}
 					{evidence.page !== undefined && (
 						<Badge variant="outline" className="shrink-0 text-xs font-normal">
-							Page {evidence.page}
+							<Trans>Page {i18n.number(evidence.page)}</Trans>
 						</Badge>
 					)}
 				</div>

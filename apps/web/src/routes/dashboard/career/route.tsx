@@ -4,9 +4,12 @@ import { Trans } from "@lingui/react/macro";
 import { createFileRoute, Link, Outlet, useMatchRoute } from "@tanstack/react-router";
 import { Icon } from "@reactive-resume/ui/components/icon";
 import { Tabs, TabsList, TabsTrigger } from "@reactive-resume/ui/components/tabs";
+import { cn } from "@reactive-resume/utils/style";
 import { PageHeader } from "@/components/layout/page-header";
+import { getPageTitle } from "@/libs/seo";
 
 export const Route = createFileRoute("/dashboard/career")({
+	head: () => ({ meta: [{ title: getPageTitle(t`Career`) }] }),
 	component: CareerLayout,
 });
 
@@ -41,16 +44,22 @@ function CareerLayout() {
 		{ to: "/dashboard/career/offers", match: "/dashboard/career/offers", icon: "scales", label: t`Offers` },
 	];
 	const current = places.find((place) => matchRoute({ to: place.match, fuzzy: place.match !== "/dashboard/career/" }));
+	const coach = current?.match === "/dashboard/career/coach";
 
 	return (
-		<div className="mx-auto flex min-h-svh w-full max-w-[1180px] flex-col gap-5 px-8 py-8 max-sm:px-4 max-sm:py-5">
-			<PageHeader
-				title={<Trans>Career</Trans>}
-				description={<Trans>Plan your search, keep your evidence in one place, and decide between offers.</Trans>}
-			>
+		<div
+			className={cn(
+				"mx-auto flex min-h-svh w-full max-w-[1180px] flex-col gap-5 px-8 py-8 max-sm:px-4 max-sm:pt-5 max-sm:pb-[calc(8rem+env(safe-area-inset-bottom))]",
+				// On a phone the coach gets the whole screen above the tab bar (52px and the home indicator), and scrolls
+				// inside its transcript only: the page itself stays put.
+				coach &&
+					"max-sm:h-[calc(100dvh-53px-env(safe-area-inset-bottom))] max-sm:min-h-0 max-sm:gap-3 max-sm:overflow-hidden max-sm:pt-3 max-sm:pb-3",
+			)}
+		>
+			<PageHeader title={<Trans>Career</Trans>}>
 				<Tabs
 					value={current?.to ?? null}
-					className="-mx-4 max-w-[100vw] [scrollbar-width:none] overflow-x-auto px-4 sm:mx-0 sm:px-0"
+					className="-mx-4 max-w-[100vw] [scrollbar-width:none] overflow-x-auto px-4 max-sm:[mask-image:linear-gradient(to_right,black_calc(100%-24px),transparent)] max-sm:pe-7 sm:mx-0 sm:px-0 max-sm:rtl:[mask-image:linear-gradient(to_left,black_calc(100%-24px),transparent)]"
 				>
 					<TabsList variant="line" aria-label={t`Career`}>
 						{places.map((place) => (

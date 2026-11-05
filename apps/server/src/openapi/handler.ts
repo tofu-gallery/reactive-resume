@@ -22,7 +22,8 @@ const openAPIHandler = new OpenAPIHandler(openAPIRouter, {
 		onError((error) => {
 			// Signed-out or expired callers are routine; their 401 still reaches the client.
 			if (error instanceof ORPCError && error.code === "UNAUTHORIZED") return;
-			console.error("[OpenAPI]", error);
+			// Validation errors can contain submitted profile values; keep payloads out of server logs.
+			console.error("[OpenAPI]", error instanceof ORPCError ? error.code : "INTERNAL_SERVER_ERROR");
 		}),
 	],
 });
@@ -50,7 +51,7 @@ export async function handleOpenApi(request: Request, trustedClient: string) {
 	resHeaders.set("X-Content-Type-Options", "nosniff");
 	if (!response)
 		return Response.json(
-			{ defined: false, code: "NOT_FOUND", status: 404, message: "Not found" },
+			{ defined: false, code: "NOT_FOUND", status: 404, message: "Not Found" },
 			{ status: 404, headers: resHeaders },
 		);
 	return mergeResponseHeaders(response, resHeaders);

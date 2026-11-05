@@ -1,9 +1,11 @@
 import type { RequestAuthentication } from "../../context";
+import { ORPCError } from "@orpc/server";
 import z from "zod";
 import { protectedProcedure, publicProcedure } from "../../context";
 import { resumeDto } from "../../dto/resume";
-import { resumeMutationRateLimit, resumePasswordRateLimit } from "../../middleware/rate-limit";
+import { resumeMutationRateLimit } from "../../middleware/rate-limit";
 import { resumeService } from "./service";
+import { webPagePreviewUrl } from "./web-page";
 
 /** Only a credential that may read the owner's resumes sees the owner's view: private, unredacted, no password. */
 export function ownerViewer(context: { user?: { id: string } | null; authentication?: RequestAuthentication | null }) {
@@ -13,6 +15,25 @@ export function ownerViewer(context: { user?: { id: string } | null; authenticat
 }
 
 export const sharingRouter = {
+	previewUrl: protectedProcedure
+		.route({
+			method: "GET",
+			path: "/resumes/{id}/web-page/preview",
+			tags: ["Resume Sharing"],
+			operationId: "getResumeWebPagePreviewUrl",
+			summary: "Get a preview link for the web page",
+			description:
+				"Returns a link, valid for 15 minutes, that shows the resume's web page as visitors will see it, even before it's published. The page isn't counted or listed in search engines. Requires authentication and resume ownership.",
+			successDescription: "The preview link.",
+		})
+		.input(z.object({ id: z.string().describe("The ID of the resume.") }))
+		.output(z.string().describe("The preview link."))
+		.handler(async ({ context, input }) => {
+			const url = await webPagePreviewUrl(input.id, context.user.id);
+			if (!url) throw new ORPCError("NOT_FOUND");
+			return url;
+		}),
+
 	getBySlug: publicProcedure
 		.route({
 			method: "GET",
@@ -43,7 +64,7 @@ export const sharingRouter = {
 			operationId: "checkResumeSlug",
 			summary: "Check a resume address",
 			description:
-				"Checks whether a slug can be a resume's public address: lowercase letters and numbers in groups joined by single dashes, and not used by another of the user's resumes. When it can't, suggests one that works. Requires authentication.",
+				"Checks whether a slug can be a resume's public address: Latin letters a–z and numbers in groups joined by single dashes, and not used by another of the user's resumes. When it can't, suggests one that works. Requires authentication.",
 			successDescription: "Whether the slug is available, and a suggestion when it isn't.",
 		})
 		.input(resumeDto.checkSlug.input)
@@ -58,18 +79,22 @@ export const sharingRouter = {
 			operationId: "setResumePassword",
 			summary: "Set resume password",
 			description:
-				"Sets or updates a password on a resume. When a password is set, viewers of the public resume must enter the password before the resume data is revealed. The password must be between 6 and 64 characters. Locked resumes can't be changed; unlock the resume first. Requires authentication.",
-			successDescription: "The resume password was set successfully.",
+				"Sets or updates a password on a resume. When a password is set, viewers of the public resume must enter the password before the resume data is revealed. The password must be between 6 and 64 characters. Locked resumes can't be changed; unlock the resume first. When expectedUpdatedAt is provided, a stale version returns RESUME_VERSION_CONFLICT (409). Returns the resume as the change left it. Requires authentication.",
+			successDescription: "The resume with hasPassword set and its new updatedAt.",
 		})
 		.input(resumeDto.setPassword.input)
 		.use(resumeMutationRateLimit)
 		.output(resumeDto.setPassword.output)
-		.errors({ RESUME_LOCKED: { status: 403, message: "Unlock the resume first." } })
+		.errors({
+			RESUME_LOCKED: { status: 403, message: "Unlock the resume first." },
+			RESUME_VERSION_CONFLICT: { status: 409, message: "The resume changed since it was read. Read it again." },
+		})
 		.handler(({ context, input }) =>
 			resumeService.setPassword({
 				id: input.id,
 				userId: context.user.id,
 				password: input.password,
+				expectedUpdatedAt: input.expectedUpdatedAt,
 			}),
 		),
 
@@ -91,13 +116,13 @@ export const sharingRouter = {
 				password: z.string().min(1).max(64).describe("The password to verify."),
 			}),
 		)
-		.use(resumePasswordRateLimit)
 		.output(z.boolean())
 		.handler(({ context, input }): Promise<boolean> =>
 			resumeService.verifyPassword({
 				username: input.username,
 				slug: input.slug,
 				password: input.password,
+				trustedClient: context.trustedClient,
 				...(context.resHeaders ? { responseHeaders: context.resHeaders } : {}),
 			}),
 		),
@@ -110,17 +135,21 @@ export const sharingRouter = {
 			operationId: "removeResumePassword",
 			summary: "Remove resume password",
 			description:
-				"Removes password protection from a resume. After removal, the resume (if public) can be viewed without entering a password. Locked resumes can't be changed; unlock the resume first. Requires authentication.",
-			successDescription: "The resume password was removed successfully.",
+				"Removes password protection from a resume. After removal, the resume (if public) can be viewed without entering a password. Locked resumes can't be changed; unlock the resume first. When expectedUpdatedAt is provided, a stale version returns RESUME_VERSION_CONFLICT (409). Returns the resume as the change left it. Requires authentication.",
+			successDescription: "The resume with hasPassword cleared and its new updatedAt.",
 		})
 		.input(resumeDto.removePassword.input)
 		.use(resumeMutationRateLimit)
 		.output(resumeDto.removePassword.output)
-		.errors({ RESUME_LOCKED: { status: 403, message: "Unlock the resume first." } })
+		.errors({
+			RESUME_LOCKED: { status: 403, message: "Unlock the resume first." },
+			RESUME_VERSION_CONFLICT: { status: 409, message: "The resume changed since it was read. Read it again." },
+		})
 		.handler(({ context, input }) =>
 			resumeService.removePassword({
 				id: input.id,
 				userId: context.user.id,
+				expectedUpdatedAt: input.expectedUpdatedAt,
 			}),
 		),
 };

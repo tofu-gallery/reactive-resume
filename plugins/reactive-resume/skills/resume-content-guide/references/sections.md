@@ -71,7 +71,7 @@ Field: `picture.hidden`.
 Field: `basics.headline`.
 
 - The target role in the employer's wording, plus a specialisation where it fits: "Senior Data Engineer · Streaming and cost optimisation".
-- Never a title the user hasn't held. "Aspiring X" reads as weak; career changers name the new function instead: "Operations analyst (SQL, Tableau)".
+- Never imply a title or seniority the user has not held. Career changers pair the held function with the target: "Operations analyst moving into data analytics (SQL, Tableau)".
 
 ## 4. Summary or objective
 

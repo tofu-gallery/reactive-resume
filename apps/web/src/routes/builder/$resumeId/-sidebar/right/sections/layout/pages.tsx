@@ -1,3 +1,4 @@
+import type { DndLabel } from "@/libs/dnd";
 import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core";
 import type { ResumeData, SectionType } from "@reactive-resume/schema/resume/data";
 import type { CSSProperties, HTMLAttributes, Ref } from "react";
@@ -12,7 +13,8 @@ import {
 } from "@dnd-kit/core";
 import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { t } from "@lingui/core/macro";
+import { i18n } from "@lingui/core";
+import { ph, t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useReducedMotion } from "motion/react";
 import { useCallback, useId, useState } from "react";
@@ -36,6 +38,7 @@ import { Switch } from "@reactive-resume/ui/components/switch";
 import { cn } from "@reactive-resume/utils/style";
 import { resolveLayoutSectionTitle } from "./title";
 import { useCurrentResume, useUpdateResumeData } from "@/features/resume/builder/draft";
+import { dndContextProps } from "@/libs/dnd";
 import { DRAG_SETTLE } from "@/libs/motion";
 
 type ColumnId = "main" | "sidebar";
@@ -55,6 +58,16 @@ const getColumnLabel = (columnId: ColumnId): string => {
 			}),
 		)
 		.exhaustive();
+};
+
+/** "Page 2, Sidebar": where a section sits, read out while it's dragged. */
+const getPlaceLabel = (pageIndex: number, columnId: ColumnId) => {
+	const page = pageIndex + 1;
+	const column = getColumnLabel(columnId);
+	return t({
+		message: `Page ${ph({ page: i18n.number(page) })}, ${column}`,
+		comment: "Layout editor: a page and its column, read while dragging",
+	});
 };
 
 type PageLocation = {
@@ -236,6 +249,7 @@ export function LayoutPages() {
 
 	return (
 		<DndContext
+			{...dndContextProps(false)}
 			id="builder-layout"
 			sensors={sensors}
 			collisionDetection={closestCorners}
@@ -299,7 +313,9 @@ function PageContainer({
 				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 @max-[22rem]:grid-cols-1">
 					<div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
 						<span className="text-xs font-medium">
-							<Trans comment="Layout editor page label with 1-based page number">Page {pageIndex + 1}</Trans>
+							<Trans comment="Layout editor page label with 1-based page number">
+								Page {i18n.number(pageIndex + 1)}
+							</Trans>
 						</span>
 
 						<label htmlFor={fullWidthSwitchId} className="flex min-w-0 cursor-pointer items-center gap-2">
@@ -374,7 +390,11 @@ function LayoutColumn({
 	className,
 }: LayoutColumnProps) {
 	const droppableId = createDroppableId(pageIndex, columnId);
-	const { setNodeRef, isOver } = useDroppable({ id: droppableId, disabled });
+	const { setNodeRef, isOver } = useDroppable({
+		id: droppableId,
+		data: { label: getPlaceLabel(pageIndex, columnId) } satisfies DndLabel,
+		disabled,
+	});
 
 	return (
 		<SortableContext id={droppableId} items={items} strategy={verticalListSortingStrategy}>
@@ -410,8 +430,13 @@ type SortableLayoutItemProps = {
 };
 
 function SortableLayoutItem({ id, pageIndex, columnId }: SortableLayoutItemProps) {
+	const resume = useCurrentResume();
 	const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
 		id,
+		data: {
+			label: resolveLayoutSectionTitle(resume.data, id),
+			group: getPlaceLabel(pageIndex, columnId),
+		} satisfies DndLabel,
 		transition: DRAG_SETTLE,
 	});
 
@@ -484,12 +509,24 @@ function MoveToSubmenu({ id, pageIndex, columnId }: MoveToSubmenuProps) {
 				{pages.map((page, targetPageIndex) => {
 					// Full-width pages hide their sidebar, so never offer it as a target.
 					const sidebarHidden = sidebarCollapsed || page.fullWidth;
+					// With only the main column to choose, the page itself is the target: no third level.
+					if (sidebarHidden)
+						return (
+							<DropdownMenuItem
+								key={`page-${targetPageIndex}`}
+								disabled={targetPageIndex === pageIndex && columnId === "main"}
+								onClick={() => moveTo(targetPageIndex, "main")}
+							>
+								<Icon name="file" size={16} />
+								<Trans>Page {i18n.number(targetPageIndex + 1)}</Trans>
+							</DropdownMenuItem>
+						);
 
 					return (
 						<DropdownMenuSub key={`page-${targetPageIndex}`}>
 							<DropdownMenuSubTrigger>
 								<Icon name="file" size={16} />
-								<Trans>Page {targetPageIndex + 1}</Trans>
+								<Trans>Page {i18n.number(targetPageIndex + 1)}</Trans>
 							</DropdownMenuSubTrigger>
 
 							<DropdownMenuSubContent>
@@ -571,7 +608,9 @@ function SectionBreakItems({ id }: SectionBreakItemsProps) {
 				onSelect={(event) => event.preventDefault()}
 				onCheckedChange={() => toggle("keepTogether")}
 			>
-				<Trans comment="Layout editor toggle that prevents a section from splitting across pages">Keep together</Trans>
+				<Trans comment="Layout editor toggle that prevents a section from splitting across pages">
+					Keep on one page
+				</Trans>
 			</DropdownMenuCheckboxItem>
 
 			<p className="px-2 pb-1 text-xs text-ink-3">
@@ -585,7 +624,7 @@ function SectionBreakItems({ id }: SectionBreakItemsProps) {
 				onSelect={(event) => event.preventDefault()}
 				onCheckedChange={() => toggle("startOnNewPage")}
 			>
-				<Trans comment="Layout editor toggle that forces a section to begin on a new page">Start on new page</Trans>
+				<Trans comment="Layout editor toggle that forces a section to begin on a new page">Start on a new page</Trans>
 			</DropdownMenuCheckboxItem>
 		</>
 	);

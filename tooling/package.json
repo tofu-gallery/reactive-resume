@@ -4,18 +4,22 @@
 	"type": "module",
 	"private": true,
 	"scripts": {
-		"docs:gen": "tsx semantic-css/generate-reference.ts",
 		"test": "vp test run --passWithNoTests",
 		"test:ci": "vp test run --reporter=default --reporter=github-actions --reporter=json --reporter=junit --outputFile.json=reports/vitest-results.json --outputFile.junit=reports/vitest-junit.xml --passWithNoTests",
 		"typecheck": "tsrs --noEmit",
 		"pdf:translations": "tsx locales/generate.ts",
-		"icons:pdf": "tsx icons/phosphor-pdf.ts"
+		"icons:pdf": "tsx icons/phosphor-pdf.ts",
+		"capture:build": "node capture/build.mjs"
 	},
 	"dependencies": {
-		"@reactive-resume/schema": "workspace:*"
+		"@reactive-resume/email": "workspace:*",
+		"@reactive-resume/pdf": "workspace:*",
+		"@reactive-resume/schema": "workspace:*",
+		"@reactive-resume/import": "workspace:*",
+		"@reactive-resume/utils": "workspace:*"
 	},
 	"devDependencies": {
-		"@lingui/format-po": "^6.10.1",
+		"@lingui/format-po": "^6.11.0",
 		"@phosphor-icons/react": "^2.1.10",
 		"@reactive-resume/config": "workspace:*",
 		"@reactive-resume/resume": "workspace:*",
@@ -29,6 +33,7 @@
 		"tsrs": "catalog:",
 		"tsx": "^4.23.15",
 		"vite-plus": "catalog:",
-		"wrangler": "catalog:"
+		"wrangler": "catalog:",
+		"fflate": "catalog:"
 	}
 }

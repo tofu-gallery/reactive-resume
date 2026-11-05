@@ -1,11 +1,12 @@
-import type { Application } from "../types";
+import type { ApplicationSummary } from "../types";
 import type { InterviewKind, InterviewTimelineEntry } from "@reactive-resume/schema/applications/data";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { m } from "motion/react";
-import { useId, useMemo, useState } from "react";
-import { interviewDetailsSchema } from "@reactive-resume/schema/applications/data";
+import { useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { interviewDetailsSchema, nextInterviewKind } from "@reactive-resume/schema/applications/data";
 import { Button } from "@reactive-resume/ui/components/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@reactive-resume/ui/components/dialog";
 import { Icon } from "@reactive-resume/ui/components/icon";
@@ -18,23 +19,17 @@ import { toast } from "@reactive-resume/ui/components/toast";
 import { generateId } from "@reactive-resume/utils/string";
 import { cn } from "@reactive-resume/utils/style";
 import { fromZonedDateTime } from "@reactive-resume/utils/timezone";
-import { dayKey } from "../interviews";
-import { applicationsListQueryKey } from "../queries";
+import { interviewCalendarAction, showInterviewCancellation } from "../calendar";
+import { dayKey, interviewTypeLabel } from "../interviews";
+import { applicationDetailQueryOptions, applicationsListQueryKey } from "../queries";
 import { Combobox } from "@/components/ui/combobox";
-import { useCareerTime, withUndo } from "@/features/career/shared";
+import { useCareerTime, withQueryUndo } from "@/features/career/shared";
 import { useClosingValue } from "@/hooks/use-closing-value";
+import { getAccountGeneration } from "@/libs/auth/account-scope";
 import { D2, EASE } from "@/libs/motion";
-import { orpc } from "@/libs/orpc/client";
+import { client, orpc, prepareRpc } from "@/libs/orpc/client";
 
-/** "Screening", "Behavioral": interview types in the interface language. */
-export const interviewTypeLabel = (kind: InterviewKind) =>
-	({
-		screening: t`Screening`,
-		technical: t`Technical`,
-		behavioral: t`Behavioral`,
-		onsite: t`Onsite`,
-		other: t`Other`,
-	})[kind];
+export { interviewTypeLabel } from "../interviews";
 
 const KINDS: InterviewKind[] = ["screening", "technical", "behavioral", "onsite", "other"];
 const LENGTHS = [30, 45, 60, 90];
@@ -51,6 +46,9 @@ const zoneFormatter = (timeZone: string) =>
 		minute: "2-digit",
 		hourCycle: "h23",
 	});
+
+/** A time zone as people read it: "America/New_York" is "America/New York", as the zone picker lists it. */
+const timeZoneName = (zone: string) => zone.replaceAll("_", " ");
 
 /** An instant as the date ("2026-10-08") and time ("17:58") on a clock in `timeZone`. */
 function zonedParts(instant: Date | string, timeZone: string) {
@@ -86,14 +84,27 @@ type Draft = {
 };
 
 // New interviews default to the given day (or tomorrow) at 09:00 in the timezone, or the next full hour if that's past.
-function emptyDraft(applicationId: string, timezone: string, day?: Date | null): Draft {
+/** The likely next interview type for this application (see {@link nextInterviewKind}). */
+function suggestedKind(application: ApplicationSummary | null | undefined): InterviewKind {
+	if (!application) return "screening";
+	const kinds = application.activity.flatMap((entry) => (entry.type === "interview" ? [entry.kind] : []));
+	return nextInterviewKind(kinds, application.status === "interview" || application.status === "offer");
+}
+
+function emptyDraft(
+	applicationId: string,
+	timezone: string,
+	day?: string | null,
+	kind: InterviewKind = "screening",
+): Draft {
 	const now = new Date();
-	const date = dayKey(day ?? new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
+	const today = new Date(`${dayKey(now, timezone)}T00:00:00Z`);
+	const date = day ?? dayKey(new Date(today.getTime() + 86_400_000), "UTC");
 	let at = fromZonedDateTime(date, "09:00", timezone) ?? now;
 	if (at <= now) at = new Date(Math.ceil(now.getTime() / 3_600_000) * 3_600_000);
 	return {
 		applicationId,
-		kind: "screening",
+		kind,
 		...zonedParts(at, timezone),
 		durationMinutes: 60,
 		location: "",
@@ -129,13 +140,13 @@ type InterviewDialogProps = {
 	onOpenChange: (open: boolean) => void;
 	// The application the interview belongs to. When omitted, an application picker is shown
 	// (used by the calendar, where no application is selected yet).
-	application?: Application | null;
+	application?: ApplicationSummary | null;
 	// Applications offered by the picker when `application` is omitted.
-	applications?: Application[];
+	applications?: ApplicationSummary[];
 	// Set when editing an existing interview.
 	interview?: InterviewTimelineEntry | null;
 	// Pre-selects this day when scheduling (e.g. a day clicked on the calendar).
-	day?: Date | null;
+	day?: string | null;
 };
 
 const FULL_SCREEN_ON_PHONES =
@@ -158,9 +169,16 @@ export function InterviewDialog({
 	const [draft, setDraft] = useState<Draft>(() =>
 		interview
 			? draftFrom(application?.id ?? "", interview, preferredZone)
-			: emptyDraft(application?.id ?? "", preferredZone, day),
+			: emptyDraft(application?.id ?? "", preferredZone, day, suggestedKind(application)),
 	);
 	const [otherZone, setOtherZone] = useState(false);
+	const activeForm = useRef<symbol | null>(null);
+	useLayoutEffect(() => {
+		activeForm.current = Symbol();
+		return () => {
+			activeForm.current = null;
+		};
+	}, [open, draft.applicationId, interview?.id]);
 
 	// A fresh draft each time the dialog opens, adjusted during render so the first frame is never stale.
 	const [wasOpen, setWasOpen] = useState(open);
@@ -169,7 +187,9 @@ export function InterviewDialog({
 		if (open) {
 			const applicationId = application?.id ?? "";
 			setDraft(
-				interview ? draftFrom(applicationId, interview, preferredZone) : emptyDraft(applicationId, preferredZone, day),
+				interview
+					? draftFrom(applicationId, interview, preferredZone)
+					: emptyDraft(applicationId, preferredZone, day, suggestedKind(application)),
 			);
 			setOtherZone(false);
 		}
@@ -190,12 +210,6 @@ export function InterviewDialog({
 	const update = useMutation(
 		orpc.applications.updateInterview.mutationOptions({
 			onError: () => toast.add({ type: "error", description: t`Couldn't update the interview. Try again.` }),
-		}),
-	);
-	const remove = useMutation(
-		orpc.applications.deleteTimelineEntry.mutationOptions({
-			onSettled: (_data, _error, variables) => invalidate(variables.id),
-			onError: () => toast.add({ type: "error", description: t`Couldn't delete the interview. Try again.` }),
 		}),
 	);
 
@@ -236,6 +250,7 @@ export function InterviewDialog({
 		}));
 
 	const save = async () => {
+		const generation = getAccountGeneration();
 		if (!at || !canSave || !details.success) return;
 		const input = { id: draft.applicationId, at: at.toISOString(), ...details.data };
 		try {
@@ -244,6 +259,7 @@ export function InterviewDialog({
 		} catch {
 			return;
 		}
+		if (generation !== getAccountGeneration()) return;
 		invalidate(draft.applicationId);
 		onOpenChange(false);
 		// The server moves this interview's briefing schedule with it; say where it went.
@@ -255,8 +271,20 @@ export function InterviewDialog({
 		const schedule = schedules.find(
 			(item) => item.kind === "prepare" && item.interviewId === editing?.id && item.enabled,
 		);
+		if (generation !== getAccountGeneration()) return;
+		const savedApplication = application ?? applications.find((item) => item.id === draft.applicationId);
 		toast.add({
 			type: "success",
+			...(editing && savedApplication
+				? {
+						actionProps: interviewCalendarAction(
+							savedApplication,
+							{ ...editing, ...details.data, at },
+							"PUBLISH",
+							generation,
+						),
+					}
+				: {}),
 			description: schedule ? t`Interview saved · briefing moves to ${when(schedule.nextRunAt)}` : t`Interview saved`,
 		});
 	};
@@ -264,26 +292,44 @@ export function InterviewDialog({
 	// Commit after Undo closes so a restored round retains its identity, history and briefing schedules.
 	const deleteInterview = () => {
 		if (!editing) return;
+		const form = activeForm.current;
 		const applicationId = draft.applicationId;
-		const drop = (item: Application) =>
+		const generation = getAccountGeneration();
+		const savedApplication = application ?? applications.find((item) => item.id === applicationId);
+		const drop = <T extends Pick<ApplicationSummary, "id" | "activity">>(item: T) =>
 			item.id === applicationId
 				? { ...item, activity: item.activity.filter((entry) => entry.id !== editing.id) }
 				: item;
-		queryClient.setQueryData(applicationsListQueryKey(), (list) => list?.map(drop));
-		queryClient.setQueryData(
-			orpc.applications.getById.queryKey({ input: { id: applicationId } }),
-			(item) => item && drop(item),
-		);
-		onOpenChange(false);
-		withUndo({
+		withQueryUndo({
+			queryClient,
+			queryKey: orpc.applications.getById.queryKey({ input: { id: applicationId } }),
 			description: t`Interview deleted`,
-			onUndo: () => invalidate(applicationId),
-			commit: () => {
-				void remove
-					.mutateAsync({ id: applicationId, entryId: editing.id })
-					.catch(() => undefined)
-					.finally(() => invalidate(applicationId));
+			errorMessage: t`Couldn't delete the interview. Try again.`,
+			prepare: async () => {
+				// Calendar summaries can have no detail query, or a hydrated row without its read function.
+				await queryClient.fetchQuery({ ...applicationDetailQueryOptions(applicationId), staleTime: 0 });
+				const request = await prepareRpc(client.applications.deleteTimelineEntry, {
+					id: applicationId,
+					entryId: editing.id,
+				});
+				return {
+					cancel: request.cancel,
+					send: () =>
+						request.send().then((saved) => {
+							if (savedApplication) showInterviewCancellation(savedApplication, editing, generation);
+							return saved;
+						}),
+				};
 			},
+			hide: () => {
+				queryClient.setQueryData(applicationsListQueryKey(), (list) => list?.map(drop));
+				queryClient.setQueryData(
+					orpc.applications.getById.queryKey({ input: { id: applicationId } }),
+					(item) => item && drop(item),
+				);
+				if (form && activeForm.current === form) onOpenChange(false);
+			},
+			restore: () => {},
 		});
 	};
 
@@ -330,7 +376,12 @@ export function InterviewDialog({
 									label: `${item.company} — ${item.role}`,
 									keywords: [item.company, item.role],
 								}))}
-								onValueChange={(value) => set("applicationId", value ?? "")}
+								onValueChange={(value) => {
+									set("applicationId", value ?? "");
+									// The likely next type for the job just picked, as the dialog would open with for it.
+									const picked = applications.find((item) => item.id === value);
+									if (picked) set("kind", suggestedKind(picked));
+								}}
 							/>
 						</Field>
 					)}
@@ -356,7 +407,7 @@ export function InterviewDialog({
 								onChange={(event) => set("date", event.target.value)}
 							/>
 						</Field>
-						<Field label={t`Time · ${draft.timezone}`} htmlFor={`${id}-time`}>
+						<Field label={t`Time · ${timeZoneName(draft.timezone)}`} htmlFor={`${id}-time`}>
 							<Input
 								id={`${id}-time`}
 								type="time"
@@ -432,14 +483,14 @@ export function InterviewDialog({
 						{draft.participants.map((participant, index) => (
 							<div key={participant.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_32px] gap-2">
 								<Input
-									aria-label={t`Name of person ${index + 1}`}
+									aria-label={t`Name of person ${i18n.number(index + 1)}`}
 									placeholder={t`Name`}
 									value={participant.name}
 									maxLength={200}
 									onChange={(event) => setParticipant(participant.id, { name: event.target.value })}
 								/>
 								<Input
-									aria-label={t`Role of person ${index + 1}`}
+									aria-label={t`Role of person ${i18n.number(index + 1)}`}
 									placeholder={t`Role`}
 									value={participant.role}
 									maxLength={200}
@@ -448,7 +499,7 @@ export function InterviewDialog({
 								<IconButton
 									icon="x"
 									iconSize={18}
-									label={t`Remove person ${index + 1}`}
+									label={t`Remove person ${i18n.number(index + 1)}`}
 									className="h-9 w-8 text-ink-2"
 									onClick={() =>
 										set(
@@ -459,7 +510,7 @@ export function InterviewDialog({
 								/>
 								<Input
 									type="url"
-									aria-label={t`Profile link of person ${index + 1}`}
+									aria-label={t`Profile link of person ${i18n.number(index + 1)}`}
 									placeholder={t`Profile link (optional)`}
 									className="col-span-2"
 									value={participant.profileUrl}

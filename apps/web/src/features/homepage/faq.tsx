@@ -1,10 +1,11 @@
 import type { CSSProperties } from "react";
+import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react";
 import { Trans } from "@lingui/react/macro";
 import { Link } from "@tanstack/react-router";
 import { templateSchema } from "@reactive-resume/schema/templates";
-import { localeSchema } from "@reactive-resume/utils/locale";
+import { supportedLocales } from "@reactive-resume/utils/locale";
 import { cn } from "@reactive-resume/utils/style";
 import { SCENE } from "./scroll";
 import { Doodle, labelClass } from "./ui";
@@ -21,8 +22,7 @@ type Question = {
 function useQuestions(): Question[] {
 	const { i18n } = useLingui();
 	const templates = i18n.number(templateSchema.options.length);
-	// Every locale but Lingui's pseudo-locale, which only exists to test layouts.
-	const languages = i18n.number(localeSchema.options.length - 1);
+	const languages = i18n.number(supportedLocales.length);
 
 	return [
 		{
@@ -83,7 +83,7 @@ const underlinePath = "M2 7C30 4 58 9 96 6S160 3 196 7S262 9 298 5";
 type FaqItemProps = { item: Question; index: number };
 
 function FaqItem({ item, index }: FaqItemProps) {
-	const number = String(index + 1).padStart(2, "0");
+	const number = i18n.number(index + 1, { minimumIntegerDigits: 2 });
 	const linkClass =
 		"mt-3 inline-flex items-center gap-1 font-medium font-ui text-[14px] text-[oklch(0.42_0.1_150)] underline underline-offset-[3px] transition-colors hover:text-[oklch(0.32_0.1_150)]";
 
