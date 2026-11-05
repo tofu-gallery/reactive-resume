@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { constants, existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { sql } from "drizzle-orm";
 import { readMigrationFiles } from "drizzle-orm/migrator";
@@ -51,6 +52,22 @@ function databaseErrorOf(error: unknown): { code?: string; constraint?: string }
 		const candidate = current as { code?: unknown; constraint?: string; cause?: unknown };
 		if (typeof candidate.code === "string") return candidate as { code: string; constraint?: string };
 		current = candidate.cause;
+
+// Upstream (2026-11-05): a rolling deploy migrates while the previous release still serves traffic. Postgres can then abort
+// the migration with a deadlock, or stop waiting at lock_timeout; the whole migration transaction rolls back, so it can run
+// again. Tofu keeps its own single-transaction lock below; these are the retry's codes and count.
+const LOCK_CONFLICT_CODES = new Set(["40P01", "55P03"]); // deadlock_detected, lock_not_available
+const MIGRATION_ATTEMPTS = 8;
+
+function lockConflictCode(error: unknown): string | undefined {
+	// Drizzle wraps the driver error in `cause`.
+	for (let current = error, depth = 0; current && typeof current === "object" && depth < 5; depth += 1) {
+		const code = (current as { code?: unknown }).code;
+		if (typeof code === "string" && LOCK_CONFLICT_CODES.has(code)) return code;
+		current = (current as { cause?: unknown }).cause;
+	}
+	return undefined;
+}
 	}
 	return undefined;
 }
@@ -132,12 +149,25 @@ export async function runDatabaseMigrations() {
 				...migration,
 				sql: [migration.sql.join("\n;\n")],
 			}));
+			let duplicateRetried = false;
 			for (let attempt = 1; ; attempt++) {
 				try {
 					await migrateUnderLock(client, migrations, migrationsFolder);
 					break;
 				} catch (error) {
-					if (attempt === 1 && isDuplicateObjectError(error)) {
+					// Upstream (2026-11-05): a rolling deploy migrates while the previous release still serves traffic, so the
+					// migration can meet a deadlock or a lock timeout; the whole transaction rolled back and can run again.
+					const lockConflict = lockConflictCode(error);
+					if (lockConflict && attempt < MIGRATION_ATTEMPTS) {
+						const delay = Math.min(1000 * 2 ** (attempt - 1), 15_000);
+						console.warn(
+							`Database migrations hit a lock conflict (${lockConflict}); retrying in ${delay} ms (attempt ${attempt} of ${MIGRATION_ATTEMPTS}).`,
+						);
+						await sleep(delay);
+						continue;
+					}
+					if (!duplicateRetried && isDuplicateObjectError(error)) {
+						duplicateRetried = true;
 						console.warn("Database migrations met an object another start made; trying the whole step once more", {
 							error,
 						});
@@ -147,6 +177,7 @@ export async function runDatabaseMigrations() {
 					throw error;
 				}
 			}
+			await client.query("RESET lock_timeout");
 
 			// Post-migration verification is not a migration failure, so it gets its own log
 			// message. A drifted schema still lets the server boot; STRICT_SCHEMA_CHECK=true
